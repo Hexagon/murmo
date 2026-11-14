@@ -130,7 +130,7 @@ async fn run(app: Arc<App>, mut socket: WebSocket) -> Result<(), axum::Error> {
 }
 
 async fn session(
-    app: &App,
+    app: &Arc<App>,
     me: &Authed,
     socket: &mut WebSocket,
     rx: &mut mpsc::Receiver<Push>,
@@ -161,8 +161,12 @@ async fn session(
             .await?;
     }
     let mut ping = tokio::time::interval(Duration::from_secs(30));
+    // File chunks queued while this device was away follow, a few at a time between other frames.
+    let mut relay_after = 0i64;
+    let mut relay_more = true;
     loop {
         tokio::select! {
+            biased;
             push = rx.recv() => match push {
                 Some(Push::Text(t)) => socket.send(Message::Text(t.into())).await?,
                 None => {
@@ -184,11 +188,31 @@ async fn session(
                 _ => return Ok(()),
             },
             _ = ping.tick() => socket.send(Message::Ping(Vec::new().into())).await?,
+            _ = std::future::ready(()), if relay_more => {
+                let batch = app
+                    .db
+                    .relay_queued(&me.device, relay_after, 4)
+                    .map_err(axum::Error::new)?;
+                relay_more = !batch.is_empty();
+                for (id, sender, account, data) in batch {
+                    relay_after = id;
+                    socket
+                        .send(frame(
+                            Map::new()
+                                .with("t", "relay")
+                                .with("id", id)
+                                .with("from", sender)
+                                .with("account", account)
+                                .with("data", data),
+                        ))
+                        .await?;
+                }
+            }
         }
     }
 }
 
-fn handle(app: &App, me: &Authed, m: &Map) -> Option<Message> {
+fn handle(app: &Arc<App>, me: &Authed, m: &Map) -> Option<Message> {
     let r = match m.get("t").and_then(Value::as_str) {
         Some("send") => send(app, me, m),
         Some("ack") => ack(app, me, m),
@@ -200,7 +224,10 @@ fn handle(app: &App, me: &Authed, m: &Map) -> Option<Message> {
             Ok(None)
         }
         Some("relay") => relay(app, me, m),
+        Some("relay-ack") => relay_ack(app, me, m),
+        Some("relay-space") => relay_space(app, me, m),
         Some("presence") => presence(app, me, m),
+        Some("push-sub") => push_sub(app, me, m),
         Some("ping") => Ok(Some(frame(Map::new().with("t", "pong")))),
         _ => Err(ApiError::new(400, "bad_frame")),
     };
@@ -210,13 +237,17 @@ fn handle(app: &App, me: &Authed, m: &Map) -> Option<Message> {
             let mut f = Map::new().with("t", "error").with("error", e.code);
             if let Some(id) = m.get("id").and_then(Value::as_str) {
                 f.insert("id", id.into());
+            } else if let Some(r) = m.get("ref").and_then(Value::as_str)
+                && r.len() <= 64
+            {
+                f.insert("id", r.into());
             }
             Some(frame(f))
         }
     }
 }
 
-fn send(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
+fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
     app.limits.check(format!("send:{}", me.device), 60, 60)?;
     let id = m
         .get("id")
@@ -263,6 +294,10 @@ fn send(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
             Some(mid) => {
                 let push = Map::new().with("t", "msg").with("id", mid).with("env", env);
                 app.hub.to_device(device, Push::Text(text(&push.into())));
+                // The sender marks what the user should hear about; the server cannot tell (it is ciphertext).
+                if o.get("notify").and_then(Value::as_bool) == Some(true) {
+                    crate::push::schedule(app, device, mid);
+                }
             }
             None => failed.push(device.into()),
         }
@@ -337,10 +372,15 @@ fn relay(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
             .with("data", data)
             .into(),
     );
+    // `store`: keep the chunk for devices that are not connected (ciphertext, like the mailbox).
+    let store = m.get("store").and_then(Value::as_bool) == Some(true) && app.cfg.file_queue > 0;
     let mut missed: Vec<Value> = Vec::new();
     for d in to {
         let d = d.as_str().ok_or(ApiError::new(400, "bad_field"))?;
-        if d == me.device || !app.hub.to_device(d, Push::Text(push.clone())) {
+        let delivered = d != me.device
+            && (app.hub.to_device(d, Push::Text(push.clone()))
+                || (store && queue_chunk(app, me, d, data)?));
+        if !delivered {
             missed.push(d.into());
         }
     }
@@ -350,6 +390,103 @@ fn relay(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
     let mut f = Map::new()
         .with("t", "relay-missed")
         .with("devices", Value::Array(missed));
+    if let Some(r) = m.get("ref").and_then(Value::as_str)
+        && r.len() <= 64
+    {
+        f.insert("ref", r.into());
+    }
+    Ok(Some(frame(f)))
+}
+
+fn queue_chunk(app: &App, me: &Authed, device: &str, data: &str) -> Result<bool, ApiError> {
+    if !app.db.device_known(device).map_err(ApiError::internal)?
+        || app.db.relay_bytes(None).map_err(ApiError::internal)? + data.len() as i64
+            > app.cfg.file_queue_total
+    {
+        return Ok(false);
+    }
+    app.db
+        .relay_enqueue(
+            device,
+            &me.device,
+            &me.account,
+            data,
+            now() + MAILBOX_TTL,
+            app.cfg.file_queue,
+        )
+        .map_err(ApiError::internal)
+}
+
+/// Which of the given devices have room for `bytes` more of queued chunks (asked before a transfer, so that a file
+/// is queued whole or not at all).
+fn relay_space(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
+    app.limits
+        .check(format!("presence:{}", me.device), 120, 60)?;
+    let devices = m
+        .get("devices")
+        .and_then(Value::as_array)
+        .ok_or(ApiError::new(400, "bad_field"))?;
+    let bytes = m
+        .get("bytes")
+        .and_then(Value::as_int)
+        .filter(|b| *b >= 0)
+        .ok_or(ApiError::new(400, "bad_field"))?;
+    if devices.len() > MAX_PRESENCE {
+        return Err(ApiError::new(400, "bad_field"));
+    }
+    let mut ok: Vec<Value> = Vec::new();
+    if app.cfg.file_queue > 0 {
+        let mut total = app.db.relay_bytes(None).map_err(ApiError::internal)?;
+        for d in devices.iter().filter_map(Value::as_str) {
+            if d == me.device || !app.db.device_known(d).map_err(ApiError::internal)? {
+                continue;
+            }
+            let used = app.db.relay_bytes(Some(d)).map_err(ApiError::internal)?;
+            if used.saturating_add(bytes) <= app.cfg.file_queue
+                && total.saturating_add(bytes) <= app.cfg.file_queue_total
+            {
+                total = total.saturating_add(bytes);
+                ok.push(d.into());
+            }
+        }
+    }
+    let mut f = Map::new()
+        .with("t", "relay-space")
+        .with("ok", Value::Array(ok));
+    if let Some(r) = m.get("ref").and_then(Value::as_str)
+        && r.len() <= 64
+    {
+        f.insert("ref", r.into());
+    }
+    Ok(Some(frame(f)))
+}
+
+fn relay_ack(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
+    let ids = m
+        .get("ids")
+        .and_then(Value::as_array)
+        .ok_or(ApiError::new(400, "bad_field"))?;
+    if ids.len() > 4096 {
+        return Err(ApiError::new(400, "bad_field"));
+    }
+    let ids: Vec<i64> = ids.iter().filter_map(Value::as_int).collect();
+    app.db
+        .relay_ack(&me.device, &ids)
+        .map_err(ApiError::internal)?;
+    Ok(None)
+}
+
+/// Set (`endpoint`) or remove (no `endpoint`) where this device is woken by push.
+fn push_sub(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
+    app.limits.check(format!("push:{}", me.device), 20, 3600)?;
+    let endpoint = m.get("endpoint").and_then(Value::as_str);
+    if let Some(e) = endpoint {
+        app.push.check_endpoint(e)?;
+    }
+    app.db
+        .set_push_sub(&me.device, endpoint)
+        .map_err(ApiError::internal)?;
+    let mut f = Map::new().with("t", "ok");
     if let Some(r) = m.get("ref").and_then(Value::as_str)
         && r.len() <= 64
     {

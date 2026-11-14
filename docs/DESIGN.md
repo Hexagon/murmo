@@ -276,7 +276,9 @@ Database `mesg-<account>`:
 
 ## 9. Files
 
-Files never touch the server's storage.
+Files go live between connected devices. For devices that are not connected the server may keep the encrypted
+chunks (the *file queue*), like the mailbox keeps envelopes; the sender can turn that off, and the operator can turn
+it off for the whole server (`MESG_FILE_QUEUE_MB=0`).
 
 1. The sender picks a file (at most 100 MiB). It makes a random file key and file id, hashes the file (SHA-256), and
    asks the server which of the recipient's devices and its own other devices are **connected right now**
@@ -286,6 +288,14 @@ Files never touch the server's storage.
 3. It streams the file to the **connected** devices only, over the live **relay** (`relay` frames): 48 KiB chunks,
    each encrypted with the file key (AES-256-GCM, nonce from the chunk index). The server forwards relay frames in
    memory and stores nothing; a device that is not connected simply does not get them.
+   With the file queue, the sender first asks how many bytes the server can keep for each device that is away
+   (`relay-space`), so that a file is queued whole or not at all, and sends the chunks with `store: true`: the server
+   forwards them to connected devices and stores them for the others (per device ≤ 150 MiB, in total ≤ 2 GiB by
+   default, at most 14 days). A device reads its queued chunks after its queued envelopes and acknowledges them
+   (`relay-ack`) once the file is complete and checked, or found broken.
+   Devices that got neither are recorded on the sender's message (`missed`) and offered the file again whenever the
+   sender is connected and they are too (every minute and on reconnect, for 14 days). The interface shows a file that
+   no device of the recipient has yet as *not sent yet*.
 4. Receivers check every chunk and the final hash, store the file encrypted locally and show images inline
    (PNG, JPEG, GIF, WebP; never SVG).
 5. **Later federation between one account's devices:** a device that has the metadata but not the content can ask its
@@ -324,10 +334,34 @@ WebSocket frames (JSON):
 | client → server | `{ t: "prekey", prekey }` |
 | client → server | `{ t: "presence", devices, ref }` → `{ t: "presence", online, ref }` |
 | client → server | `{ t: "relay", to, data, ref }` → forwarded as `{ t: "relay", from, account, data }` to connected devices only; `{ t: "relay-missed", devices, ref }` for the rest |
+| server → client | queued file chunks `{ t: "relay", id, from, account, data }`, a few at a time after the envelopes |
+| client → server | `{ t: "relay", to, data, ref, store: true }`: as above, and chunks for devices that are not connected are queued |
+| client → server | `{ t: "relay-space", devices, bytes, ref }` → `{ t: "relay-space", ok, ref }` (room in the file queue) |
+| client → server | `{ t: "relay-ack", ids }` (deletes queued chunks) |
+| client → server | `{ t: "push-sub", endpoint?, ref }` → `{ t: "ok", ref }`: set or remove this device's push endpoint |
+| client → server | `{ t: "ping" }` → `{ t: "pong" }` (the client's heartbeat; browsers drop sockets of background pages silently) |
 | server → client | `{ t: "link", request }`, `{ t: "devices", account, head }` |
 
 Limits (v0): envelope ≤ 64 KiB, ≤ 24 recipients per send, ≤ 2 000 queued envelopes per device, mailbox TTL 14 days,
 60 sends per minute per device, 20 lookups per minute and 5 link requests per hour per network address.
+
+### 10.1 Notifications
+
+A device can ask to be woken when something arrives while its page is frozen or closed. Its service worker subscribes
+with the browser's push service (Web Push, VAPID key from `info.push_key`) and the page sends the endpoint URL
+(`push-sub`). The server accepts endpoints only on the push services in `MESG_PUSH_HOSTS` (no requests to arbitrary
+addresses).
+
+The sender marks recipients that should be notified (`notify: true` per recipient in `send`) for requests, texts and
+files to the other party; never for its own devices or for receipts. If such an envelope is still unacknowledged after
+a few seconds, the server posts an **empty** message (no payload, no encryption needed) to the endpoint, at most one per
+device per 10 seconds. The service worker has no keys and does not connect to the mailbox: it shows "Nytt meddelande"
+and the page fetches and decrypts when the user opens it. So a wake-up does not make the device look connected, and the
+push service learns only that this browser got a wake-up from this server at that time. An endpoint that the push
+service reports as gone (404/410) is deleted.
+
+While the page runs in the background (not frozen), it shows the notification itself with the sender's handle, which
+never leaves the device.
 
 ## 11. Data the server stores
 
@@ -338,7 +372,10 @@ Limits (v0): envelope ≤ 64 KiB, ≤ 24 recipients per send, ≤ 2 000 queued e
 | device lists, current prekeys | others must encrypt to your devices | while the account exists |
 | envelopes | delivery | until acknowledged, at most 14 days |
 | link requests | linking | memory only, 10 minutes |
-| relay frames (file chunks) | live transfer | never stored; forwarded from memory |
+| relay frames (file chunks) | live transfer | not stored when the recipient device is connected |
+| queued file chunks (ciphertext) | files for devices that are away (sender's choice) | until acknowledged, at most 14 days |
+| push endpoint per device | notifications (the user's choice) | until turned off, logged out, or reported gone |
+| VAPID key | signing push requests | while the server exists |
 | network addresses | rate limits | memory only, minutes |
 
 No access logs with addresses are written by default (`MESG_LOG=info` logs no addresses or account ids).

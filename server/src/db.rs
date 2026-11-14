@@ -53,6 +53,21 @@ CREATE TABLE IF NOT EXISTS remote_ids (
   fetched     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS remote_ids_handle ON remote_ids (username_lc, tag);
+CREATE TABLE IF NOT EXISTS relay_queue (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  device  TEXT NOT NULL,
+  sender  TEXT NOT NULL,
+  account TEXT NOT NULL,
+  size    INTEGER NOT NULL,
+  expires INTEGER NOT NULL,
+  data    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS relay_queue_device ON relay_queue (device, id);
+CREATE TABLE IF NOT EXISTS push_subs (
+  device   TEXT PRIMARY KEY,
+  endpoint TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
 /// A cached remote identity (its home is another rootcard host).
@@ -171,6 +186,10 @@ impl Db {
             c.execute("DELETE FROM prekeys WHERE device = ?1", params![d])
                 .map_err(store_err)?;
             c.execute("DELETE FROM mailbox WHERE device = ?1", params![d])
+                .map_err(store_err)?;
+            c.execute("DELETE FROM relay_queue WHERE device = ?1", params![d])
+                .map_err(store_err)?;
+            c.execute("DELETE FROM push_subs WHERE device = ?1", params![d])
                 .map_err(store_err)?;
         }
         Ok(())
@@ -388,10 +407,166 @@ impl Db {
         tx.commit().map_err(store_err)
     }
 
-    /// Delete expired envelopes.
+    /// Whether the device still has an unacknowledged envelope with this id or a later one.
+    pub fn queued_since(&self, device: &str, id: i64) -> Result<bool, StoreError> {
+        let n: i64 = self
+            .conn()?
+            .query_row(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM mailbox WHERE device = ?1 AND id >= ?2 LIMIT 1)",
+                params![device, id],
+                |r| r.get(0),
+            )
+            .map_err(store_err)?;
+        Ok(n > 0)
+    }
+
+    /// Delete expired envelopes and expired queued file chunks.
     pub fn purge(&self, now: i64) -> Result<usize, StoreError> {
-        self.conn()?
+        let c = self.conn()?;
+        let n = c
             .execute("DELETE FROM mailbox WHERE expires < ?1", params![now])
+            .map_err(store_err)?;
+        let m = c
+            .execute("DELETE FROM relay_queue WHERE expires < ?1", params![now])
+            .map_err(store_err)?;
+        Ok(n + m)
+    }
+
+    // ── queued file chunks (ciphertext for devices that were not connected) ─────────────────────────────────────
+
+    /// Bytes of queued chunks, of one device or of all.
+    pub fn relay_bytes(&self, device: Option<&str>) -> Result<i64, StoreError> {
+        let c = self.conn()?;
+        match device {
+            Some(d) => c.query_row(
+                "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE device = ?1",
+                params![d],
+                |r| r.get(0),
+            ),
+            None => c.query_row("SELECT COALESCE(SUM(size), 0) FROM relay_queue", [], |r| {
+                r.get(0)
+            }),
+        }
+        .map_err(store_err)
+    }
+
+    /// Queue a chunk for a device unless that would exceed `max_device` bytes for it.
+    pub fn relay_enqueue(
+        &self,
+        device: &str,
+        sender: &str,
+        account: &str,
+        data: &str,
+        expires: i64,
+        max_device: i64,
+    ) -> Result<bool, StoreError> {
+        let size = i64::try_from(data.len()).unwrap_or(i64::MAX);
+        let mut c = self.conn()?;
+        let tx = c.transaction().map_err(store_err)?;
+        let used: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE device = ?1",
+                params![device],
+                |r| r.get(0),
+            )
+            .map_err(store_err)?;
+        if used.saturating_add(size) > max_device {
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO relay_queue (device, sender, account, size, expires, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![device, sender, account, size, expires, data],
+        )
+        .map_err(store_err)?;
+        tx.commit().map_err(store_err)?;
+        Ok(true)
+    }
+
+    /// Queued chunks of a device after `after`, oldest first: `(id, sender device, sender account, data)`.
+    pub fn relay_queued(
+        &self,
+        device: &str,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<(i64, String, String, String)>, StoreError> {
+        let c = self.conn()?;
+        let mut st = c
+            .prepare(
+                "SELECT id, sender, account, data FROM relay_queue WHERE device = ?1 AND id > ?2 ORDER BY id LIMIT ?3",
+            )
+            .map_err(store_err)?;
+        let rows = st
+            .query_map(params![device, after, limit], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .map_err(store_err)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(store_err)
+    }
+
+    /// Delete acknowledged chunks of a device.
+    pub fn relay_ack(&self, device: &str, ids: &[i64]) -> Result<(), StoreError> {
+        let mut c = self.conn()?;
+        let tx = c.transaction().map_err(store_err)?;
+        for id in ids {
+            tx.execute(
+                "DELETE FROM relay_queue WHERE id = ?1 AND device = ?2",
+                params![id, device],
+            )
+            .map_err(store_err)?;
+        }
+        tx.commit().map_err(store_err)
+    }
+
+    // ── push subscriptions and settings ─────────────────────────────────────────────────────────────────────────
+
+    /// The push endpoint of a device, if it asked for notifications.
+    pub fn push_sub(&self, device: &str) -> Result<Option<String>, StoreError> {
+        self.conn()?
+            .query_row(
+                "SELECT endpoint FROM push_subs WHERE device = ?1",
+                params![device],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(store_err)
+    }
+
+    /// Set (`Some`) or remove (`None`) the push endpoint of a device.
+    pub fn set_push_sub(&self, device: &str, endpoint: Option<&str>) -> Result<(), StoreError> {
+        let c = self.conn()?;
+        match endpoint {
+            Some(e) => c.execute(
+                "INSERT INTO push_subs (device, endpoint) VALUES (?1, ?2)
+                 ON CONFLICT (device) DO UPDATE SET endpoint = excluded.endpoint",
+                params![device, e],
+            ),
+            None => c.execute("DELETE FROM push_subs WHERE device = ?1", params![device]),
+        }
+        .map(|_| ())
+        .map_err(store_err)
+    }
+
+    /// A server setting.
+    pub fn setting(&self, key: &str) -> Result<Option<String>, StoreError> {
+        self.conn()?
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(store_err)
+    }
+
+    /// Store a server setting.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
+        self.conn()?
+            .execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map(|_| ())
             .map_err(store_err)
     }
 }

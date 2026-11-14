@@ -17,6 +17,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 getrandom = "0.4"
 zeroize = "1.9"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [lints.rust]
