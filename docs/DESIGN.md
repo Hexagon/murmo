@@ -178,7 +178,7 @@ come with the Double Ratchet in phase 2 (PLAN.md).
 {
   "v": 1,
   "id": "<16 random bytes>",
-  "kind": "request",              // "request" | "accept" | "text" | "file" | "sync" | "history"
+  "kind": "request",              // "request" | "accept" | "text" | "file" | "sync" | "history" | "receipt"
   "from": { "account": "…", "device": "…" },
   "to":   { "account": "…", "device": "…" },
   "conv": "<account id of the other party>",
@@ -223,6 +223,23 @@ head, and sends a `request` message with an optional short note (at most 500 cha
 Each conversation shows a **safety code**: twelve groups of four digits from
 `SHA-256(frame("mesg/safety/v1", canonical(sorted [ {account, head}, {account, head} ])))`. Comparing it in person
 proves that neither server nor anyone else sits in between. The code changes when either side adds or removes a device.
+
+### 6.4 Receipts: queued or delivered
+
+The interface shows a ring on a sent message while the server holds it for the recipient, and a ring with a check
+once one of the recipient's devices has it.
+
+- The server tells the sender nothing about delivery (it would have to remember who sent what). Instead the
+  recipient's device answers with a `receipt` message, `body: { ids: [<message id>, …] }`, end-to-end encrypted to the
+  sender's devices like any message, a short moment after it stored the messages (several ids per receipt, at most
+  200). It is never marked `notify`.
+- Receipts are sent **only to accepted contacts**: a request is not answered, so a stranger learns nothing about
+  whether or when a device read its mailbox. When a request is accepted, the `accept` marks it (and its note) as
+  delivered. A blocked or declined sender gets no receipts.
+- A text is acknowledged when it is stored; a file when its content is complete and checked on the device.
+- A receipt says *arrived on a device*, not *read*. A contact thereby learns when one of the user's devices was
+  connected, which the live file transfer already shows (THREAT_MODEL T21). To the server a receipt is one more
+  envelope in the other direction.
 
 ## 7. Multi-device history
 

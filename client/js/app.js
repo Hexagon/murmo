@@ -46,6 +46,8 @@ const ICONS = {
   more: "M5 12h.01M12 12h.01M19 12h.01",
   back: "M15 5l-7 7 7 7",
   plus: "M12 5v14M5 12h14",
+  ring: "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 0 0 0-17z",
+  ringCheck: "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 0 0 0-17zM8 12.4l2.7 2.7L16 9.6",
   close: "M6 6l12 12M18 6L6 18",
 };
 
@@ -1046,7 +1048,19 @@ function message(m) {
       }),
     );
   }
+  else if (m.dir === "out" && m.delivered !== undefined) meta.append(deliveryMark(m));
   return h("div", { class: `msg ${m.dir}${media}` }, body, meta);
+}
+
+/** A ring while the server holds the message for the recipient, a ring with a check once a device of theirs has it. */
+function deliveryMark(m) {
+  const done = !!m.delivered;
+  const label = done ? "Levererat till mottagaren" : "Köat på servern – inte levererat än";
+  const s = icon(done ? "ringCheck" : "ring");
+  s.setAttribute("width", "14");
+  s.setAttribute("height", "14");
+  s.setAttribute("aria-hidden", "true");
+  return h("span", { class: `delivery${done ? " ok" : ""}`, role: "img", "aria-label": label, title: label }, s);
 }
 
 /** A picture full size: closed by the cross, a tap anywhere, Escape or the back button. */
