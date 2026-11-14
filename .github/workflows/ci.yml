@@ -24,3 +24,36 @@ jobs:
       - run: cargo build
       - run: npm ci
       - run: npm test
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo build
+      - run: npm ci
+      - name: Browser smoke test (headless Chrome, fails on any console error)
+        env:
+          MESG_ORIGIN: http://127.0.0.1:18100
+          MESG_BIND: 127.0.0.1:18100
+          MESG_DB: ${{ runner.temp }}/ui.sqlite
+          MESG_HOST_KEY_FILE: ${{ runner.temp }}/ui.key
+          MESG_LIMIT_SCALE: "10"
+          MESG_REMOTE_HOMES: ""
+          CHROME: /usr/bin/google-chrome
+          SHOTS: ${{ runner.temp }}/shots
+        run: |
+          ./target/debug/mesg-server > "$RUNNER_TEMP/server.log" 2>&1 &
+          for i in $(seq 1 50); do curl -sf http://127.0.0.1:18100/ > /dev/null && break; sleep 0.2; done
+          npm run test:ui
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-smoke
+          path: |
+            ${{ runner.temp }}/shots
+            ${{ runner.temp }}/server.log
+          if-no-files-found: ignore

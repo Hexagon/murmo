@@ -20,7 +20,7 @@
 - [ ] Signed, reproducible client release with published hashes; installable copy not served by the server
 - [x] Persistent rate limits behind a reverse proxy (`X-Forwarded-For` only from a trusted proxy)
 - [ ] Fuzz targets for the server parsers
-- [ ] Run the browser smoke test in CI
+- [x] Run the browser smoke test in CI
 
 ## Phase 2: protocol
 
