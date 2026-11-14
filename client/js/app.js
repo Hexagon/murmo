@@ -316,7 +316,17 @@ async function loginForm(body, err, prefill) {
     remoteField,
     h("div", { class: "field" }, h("label", { text: "Identifierare" }), handle),
     h("div", { class: "field" }, h("label", { text: "Lösenord" }), pw),
-    h("label", { class: "check" }, remember, h("span", { text: "Kom ihåg den här enheten (låses upp utan lösenord)" })),
+    h(
+      "label",
+      { class: "check" },
+      remember,
+      h(
+        "span",
+        {},
+        "Kom ihåg den här enheten",
+        h("span", { class: "hint", style: "display:block", text: "Sparar inte ditt lösenord. Webbläsaren behåller en låst nyckel så att mesg öppnas direkt – den som kommer åt webbläsaren kan då läsa dina meddelanden. Lämna av på delade datorer." }),
+      ),
+    ),
     btn,
   );
   body.replaceChildren(form);
