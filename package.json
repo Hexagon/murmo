@@ -1,0 +1,17 @@
+{
+  "name": "mesg",
+  "private": true,
+  "type": "module",
+  "description": "Development tooling for mesg (the client itself has no dependencies and no build step)",
+  "scripts": {
+    "test": "node --test tests/protocol.test.mjs tests/e2e.test.mjs",
+    "test:ui": "node tests/ui-smoke.mjs"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "6.2.8",
+    "puppeteer-core": "24.43.1"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
