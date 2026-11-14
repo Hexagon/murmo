@@ -23,7 +23,7 @@ binary that stores as little as possible.
   server can keep the encrypted chunks until they are fetched (at most 14 days; the sender can turn this off, and so
   can the operator); otherwise the file is sent when both are connected. Images (PNG, JPEG, GIF, WebP) show inline.
   Your own devices can later fetch a file from each other.
-- **Notifications** in the browser and the installed app (PWA), off by default: an empty Web Push wakes the browser,
+- **Notifications** in the browser and the installed app (PWA), on by default once the browser's permission is given (and a setting per device): an empty Web Push wakes the browser,
   the notification says only "Nytt meddelande", and being woken does not make the device look connected.
 - **Encrypted local storage** unlocked by the rootcard password: a secret in the rootcard vault unlocks each device's
   local data, but the E2E private keys never enter the vault (docs/DESIGN.md §8).

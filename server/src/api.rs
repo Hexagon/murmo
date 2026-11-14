@@ -105,7 +105,58 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
     if app.push.enabled() {
         m.insert("push_key", app.push.public.as_str().into());
     }
+    if let Some(build) = client_build(&app.cfg.client_dir) {
+        m.insert("build", build.into());
+    }
     json(200, &m.into())
+}
+
+/// An identifier of the client that is served now: it changes when any file of the client changes, so an open page
+/// can offer a reload. Not a security measure. Read from disk at most every 30 seconds.
+fn client_build(dir: &str) -> Option<String> {
+    use std::hash::Hasher;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+
+    if dir.is_empty() {
+        return None;
+    }
+    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, build)) = cache.as_ref()
+        && at.elapsed() < Duration::from_secs(30)
+    {
+        return Some(build.clone());
+    }
+    let mut files = Vec::new();
+    walk(std::path::Path::new(dir), &mut files);
+    files.sort();
+    let mut h = std::hash::DefaultHasher::new();
+    for f in &files {
+        let Ok(bytes) = std::fs::read(f) else {
+            continue;
+        };
+        h.write(f.to_string_lossy().as_bytes());
+        h.write_u64(bytes.len() as u64);
+        h.write(&bytes);
+    }
+    let build = format!("{}-{:016x}", env!("CARGO_PKG_VERSION"), h.finish());
+    *cache = Some((Instant::now(), build.clone()));
+    Some(build)
 }
 
 /// `POST /api/v1/challenge`: a single-use challenge for a rootcard proof.
