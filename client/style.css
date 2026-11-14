@@ -195,6 +195,8 @@ pre.cardtext {
 .card.mine, .card.offer { display: flex; align-items: center; gap: 10px; padding: 14px 16px; box-shadow: none; }
 .card.mine > div, .card.offer > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .msg .meta .pending { color: var(--danger); }
+.msg .meta .delivery { display: inline-flex; vertical-align: -3px; margin-left: 5px; color: var(--muted); }
+.msg .meta .delivery.ok { color: var(--ok); }
 .link { border: 0; background: none; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
 
 /* the composer: one rounded box, like a prompt field */

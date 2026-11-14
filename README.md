@@ -16,6 +16,9 @@ binary that stores as little as possible.
   Decline and block are local decisions, so the server learns no social graph.
 - **End-to-end encryption per device**, with signed device lists rooted in the rootcard log: a password alone cannot
   add a device; a new device must be approved on an existing one (compare the code on both screens).
+- **Queued or delivered.** A sent message shows a ring while the server holds it for the recipient and a ring with a
+  check once one of their devices has it. The receipt comes end-to-end encrypted from the recipient's device, only
+  between accepted contacts; the server reports nothing.
 - **Safety codes** to compare in person; device-list changes are gossiped inside messages and forks are refused.
 - **Several devices.** Messages go to all your devices; a newly linked device receives the history from the device
   that approved it.

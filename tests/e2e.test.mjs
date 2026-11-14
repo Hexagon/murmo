@@ -175,6 +175,9 @@ test("message request, acceptance and text", async () => {
   await alice.sendText(bob.me.account, "Hemligt meddelande");
   await got;
   await until(async () => (await bob.messages(alice.me.account)).some((m) => m.text === "Hemligt meddelande"));
+  // Bob's device tells Alice that it arrived: queued on the server (0) becomes delivered. The request note too.
+  await until(async () => (await alice.messages(bob.me.account)).every((m) => m.dir !== "out" || m.delivered > 0));
+  assert.equal((await alice.messages(bob.me.account)).filter((m) => m.dir === "out").length, 2);
   assert.equal(await alice.safetyCode(bob.me.account), await bob.safetyCode(alice.me.account));
 });
 
@@ -209,6 +212,8 @@ test("link a second device: approval on the first, history handed over", async (
   alice.lists.clear();
   await alice.sendText(bob.me.account, "Från laptopen");
   await until(async () => (await alice2.messages(bob.me.account)).some((m) => m.text === "Från laptopen" && m.dir === "out"));
+  // Bob's receipt reaches both of Alice's devices: the one that wrote it and the other.
+  for (const dev of [alice, alice2]) await until(async () => (await dev.messages(bob.me.account)).find((m) => m.text === "Från laptopen")?.delivered > 0);
 });
 
 test("files go live to connected devices, wait for absent ones, and own devices federate later", async () => {
@@ -296,11 +301,16 @@ test("a message to a device that is away wakes it with an empty push", async () 
   assert.match(push.auth, /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]{87}$/);
   // Alice's own devices are not woken for her own messages.
   assert.ok(pushes.slice(before).every((x) => x.url === "/sub/bob"));
+  // While Bob is away the message is queued on the server: not delivered on any of Alice's devices.
+  const waiting = async (dev) => (await dev.messages(bob.me.account)).find((m) => m.text === "Är du där?");
+  assert.equal((await waiting(alice)).delivered, 0);
   clearInterval(bob.retryTimer);
   const back = waitFor(bob, "status", (s) => s === "online");
   await bob.start();
   await back;
   await until(async () => (await bob.messages(alice.me.account)).some((m) => m.text === "Är du där?"));
+  // Delivered once Bob's device has read its mailbox, on the device that sent it.
+  await until(async () => (await waiting(alice)).delivered > 0);
   await bob.setPushEndpoint(null);
 });
 

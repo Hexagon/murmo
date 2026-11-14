@@ -172,6 +172,12 @@ export class Store {
     for (const r of rows) out.push(decode(await p.decryptLocal(this.key, r.v, `message:${r.k}`)));
     return out.sort((a, b) => a.time - b.time || (a.at ?? 0) - (b.at ?? 0) || (a.id < b.id ? -1 : 1));
   }
+  /** One message by its id, or undefined. */
+  async message(id) {
+    const k = await this.tag("message", id);
+    const r = await req(this.db.transaction("messages").objectStore("messages").get(k));
+    return r ? decode(await p.decryptLocal(this.key, r.v, `message:${k}`)) : undefined;
+  }
   async hasMessage(id) {
     const k = await this.tag("message", id);
     return (await req(this.db.transaction("messages").objectStore("messages").count(k))) > 0;

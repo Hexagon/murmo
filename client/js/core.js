@@ -22,6 +22,9 @@ const NOTIFY_KINDS = ["request", "text", "file"];
 const FILE_RETRY = 14 * 24 * 3600;
 const FILE_RETRY_EVERY = 60_000;
 const OFFLINE = ["offline", "disconnected", "timeout"];
+/** Receipts are collected for this long and sent together (a mailbox read after a while away is one receipt). */
+const RECEIPT_WAIT = 400;
+const RECEIPT_MAX = 200;
 
 /**
  * Prepare this browser as a device of the account after a login (docs/DESIGN.md §4.2, §4.3).
@@ -106,6 +109,8 @@ export class Messenger extends EventTarget {
     this.prekeys = new Map(); // id → { privateKey, publicRaw, time }
     this.files = new Map(); // f → { meta, chunks: [], got, from }
     this.status = "offline";
+    this.receipts = new Map(); // account → Set(message id): arrived here, the sender is told soon
+    this.early = new Set(); // receipts that came before this device had stored the message
   }
 
   emit(type, detail) {
@@ -153,6 +158,7 @@ export class Messenger extends EventTarget {
 
   stop() {
     clearInterval(this.retryTimer);
+    clearTimeout(this.receiptTimer);
     this.ws?.close();
     this.store.close();
   }
@@ -234,6 +240,7 @@ export class Messenger extends EventTarget {
 
   async onOnline() {
     await this.rotatePrekey();
+    await this.flushReceipts();
     await this.flushFiles();
   }
 
@@ -283,8 +290,8 @@ export class Messenger extends EventTarget {
     await this.saveContact(c);
     const body = { note: String(note).slice(0, NOTE_MAX) };
     const kind = c.state === "accepted" ? "accept" : "request";
-    await this.send(c.account, kind, body);
-    if (body.note) await this.record({ id: p.b64(p.random(16)), conv: c.account, dir: "out", time: p.now(), kind: "text", text: body.note });
+    const { id, time } = await this.send(c.account, kind, body);
+    if (body.note) await this.record({ id, conv: c.account, dir: "out", time, kind: "text", text: body.note, delivered: 0 });
     return c;
   }
 
@@ -381,14 +388,77 @@ export class Messenger extends EventTarget {
     if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
     const t = String(text).slice(0, TEXT_MAX);
     const { id, time } = await this.send(conv, "text", { text: t });
-    await this.record({ id, conv, dir: "out", time, kind: "text", text: t, device: this.me.device });
+    await this.record({ id, conv, dir: "out", time, kind: "text", text: t, device: this.me.device, delivered: 0 });
   }
 
   async record(m) {
     // Local order within a second: when this device stored it (kept when history is handed over).
     m.at ??= Date.now();
+    if (m.dir === "out" && this.early.delete(m.id)) m.delivered = p.now();
     await this.store.putMessage(m);
     this.emit("messages", { conv: m.conv });
+  }
+
+  // ── receipts: "it arrived on one of my devices" (DESIGN.md §6.4) ──────────────────────────────────────────────
+
+  /** Tell `account` soon that message `id` arrived on this device. Only for accepted contacts. */
+  queueReceipt(account, id) {
+    let set = this.receipts.get(account);
+    if (!set) this.receipts.set(account, (set = new Set()));
+    set.add(id);
+    clearTimeout(this.receiptTimer);
+    this.receiptTimer = setTimeout(() => this.flushReceipts().catch(() => {}), RECEIPT_WAIT);
+  }
+
+  async flushReceipts() {
+    const waiting = [...this.receipts];
+    this.receipts = new Map();
+    for (const [account, set] of waiting) {
+      const ids = [...set];
+      for (let i = 0; i < ids.length; i += RECEIPT_MAX) {
+        const part = ids.slice(i, i + RECEIPT_MAX);
+        try {
+          if (this.contacts.get(account)?.state !== "accepted") break;
+          await this.deliver(await this.peerTargets(account), "receipt", account, { ids: part });
+        } catch (e) {
+          // Not connected: once more when the connection is back. Anything else (a fork, say): no receipt.
+          if (OFFLINE.includes(e?.message)) for (const id of ids.slice(i)) this.queueReceiptLater(account, id);
+          break;
+        }
+      }
+    }
+  }
+
+  queueReceiptLater(account, id) {
+    let set = this.receipts.get(account);
+    if (!set) this.receipts.set(account, (set = new Set()));
+    set.add(id);
+  }
+
+  /** Mark our outgoing messages in `conv` as delivered: the given ids, or (without ids) all of them. */
+  async markDelivered(conv, ids) {
+    const t = p.now();
+    let changed = false;
+    const mark = async (m) => {
+      if (!m || m.conv !== conv || m.dir !== "out" || m.delivered) return;
+      m.delivered = t;
+      await this.store.putMessage(m);
+      changed = true;
+    };
+    if (!ids) {
+      for (const m of await this.store.messages(conv)) if (m.delivered === 0) await mark(m);
+    } else {
+      for (const id of ids.slice(0, RECEIPT_MAX)) {
+        if (typeof id !== "string" || id.length > 64) continue;
+        const m = await this.store.message(id);
+        if (m) await mark(m);
+        else {
+          if (this.early.size >= 1000) this.early.clear();
+          this.early.add(id);
+        }
+      }
+    }
+    if (changed) this.emit("messages", { conv });
   }
 
   // ── receiving ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -450,12 +520,18 @@ export class Messenger extends EventTarget {
           c.state = "accepted";
           c.updated = p.now();
           await this.saveContact(c);
+          await this.markDelivered(peer); // the request (and its note) evidently arrived
         }
         return;
       case "text":
-        if (c?.state !== "accepted" || (await this.store.hasMessage(m.id))) return;
+        if (c?.state !== "accepted") return;
+        this.queueReceipt(peer, m.id); // also for a copy we already have: the first receipt may have been lost
+        if (await this.store.hasMessage(m.id)) return;
         await this.record({ id: m.id, conv: peer, dir: "in", time: m.time, kind: "text", text: String(m.body?.text ?? "").slice(0, TEXT_MAX), device: m.from.device });
         this.emit("incoming", { conv: peer, kind: "text" });
+        return;
+      case "receipt":
+        if (c?.state === "accepted" && Array.isArray(m.body?.ids)) await this.markDelivered(peer, m.body.ids);
         return;
       case "file":
         if (c?.state !== "accepted") return;
@@ -479,7 +555,7 @@ export class Messenger extends EventTarget {
         c.updated = p.now();
         await this.saveContact(c);
         const note = String(m.body?.note ?? "");
-        if (note) await this.record({ id: m.id, conv, dir: "out", time: m.time, kind: "text", text: note });
+        if (note) await this.record({ id: m.id, conv, dir: "out", time: m.time, kind: "text", text: note, delivered: 0 });
         return;
       }
       case "accept": {
@@ -492,7 +568,7 @@ export class Messenger extends EventTarget {
       }
       case "text":
         if (await this.store.hasMessage(m.id)) return;
-        await this.record({ id: m.id, conv, dir: "out", time: m.time, kind: "text", text: String(m.body?.text ?? ""), device: m.from.device });
+        await this.record({ id: m.id, conv, dir: "out", time: m.time, kind: "text", text: String(m.body?.text ?? ""), device: m.from.device, delivered: 0 });
         return;
       case "file":
         await this.onFileMeta(m, conv, "out");
@@ -619,7 +695,7 @@ export class Messenger extends EventTarget {
     const queued = this.fileQueue() ? await this.ws.relaySpace(away, Math.ceil(bytes.length * 1.4) + n * 256) : [];
     await this.store.putFile(f, bytes);
     const { id, time } = await this.deliver([...peers, ...owns], "file", conv, meta);
-    const m = { id, conv, dir: "out", time, kind: "file", file: { ...meta, have: true }, device: this.me.device };
+    const m = { id, conv, dir: "out", time, kind: "file", file: { ...meta, have: true }, device: this.me.device, delivered: 0 };
     m.file.missed = away.filter((d) => !queued.includes(d));
     m.file.peers = peers.map((t) => t.device);
     await this.record(m);
@@ -707,7 +783,11 @@ export class Messenger extends EventTarget {
     const fresh = !(await this.store.hasMessage(m.id));
     if (fresh) {
       const have = await this.store.hasFile(b.f);
-      await this.record({ id: m.id, conv, dir, time: m.time, kind: "file", file: { ...b, have }, device: m.from.device });
+      const rec = { id: m.id, conv, dir, time: m.time, kind: "file", file: { ...b, have }, device: m.from.device };
+      if (dir === "out") rec.delivered = 0;
+      await this.record(rec);
+      // A file counts as arrived when its content is here (otherwise tryAssemble says so later).
+      if (dir === "in" && have) this.queueReceipt(conv, m.id);
     }
     const t = this.files.get(b.f) ?? { chunks: [], got: 0 };
     t.meta = b;
@@ -787,6 +867,7 @@ export class Messenger extends EventTarget {
     if (m) {
       m.file.have = true;
       await this.store.putMessage(m);
+      if (m.dir === "in" && this.contacts.get(m.conv)?.state === "accepted") this.queueReceipt(m.conv, m.id);
     }
     this.emit("file", { f });
     this.emit("messages", { conv: t.message.conv });
