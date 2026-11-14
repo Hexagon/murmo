@@ -57,3 +57,21 @@ jobs:
             ${{ runner.temp }}/shots
             ${{ runner.temp }}/server.log
           if-no-files-found: ignore
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - name: Fuzz each target for a minute
+        working-directory: fuzz
+        run: |
+          for t in json_body http_text ws_frame; do
+            cargo fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=2048
+          done
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts

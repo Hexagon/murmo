@@ -91,6 +91,8 @@ cargo build && npm ci && npm test        # protocol tests + end to end against t
 # Browser smoke test (headless Chrome, fails on any console error such as a CSP violation):
 MESG_ORIGIN=http://127.0.0.1:18100 MESG_BIND=127.0.0.1:18100 MESG_LIMIT_SCALE=10 cargo run &
 CHROME=/path/to/chrome npm run test:ui
+# Fuzzing (nightly, cargo install cargo-fuzz): json_body, http_text, ws_frame
+cd fuzz && cargo +nightly fuzz run ws_frame
 ```
 
 ## License

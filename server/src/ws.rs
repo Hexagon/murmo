@@ -176,11 +176,7 @@ async fn session(
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(t))) => {
-                    let reply = match parse_limited(t.as_bytes(), MAX_FRAME) {
-                        Ok(Value::Object(m)) => handle(app, me, &m),
-                        _ => Some(error("bad_json")),
-                    };
-                    if let Some(r) = reply {
+                    if let Some(r) = text_frame(app, me, t.as_bytes()) {
                         socket.send(r).await?;
                     }
                 }
@@ -209,6 +205,27 @@ async fn session(
                 }
             }
         }
+    }
+}
+
+/// The reply to a text frame from an authenticated device, if any.
+fn text_frame(app: &Arc<App>, me: &Authed, text: &[u8]) -> Option<Message> {
+    match parse_limited(text, MAX_FRAME) {
+        Ok(Value::Object(m)) => handle(app, me, &m),
+        _ => Some(error("bad_json")),
+    }
+}
+
+/// [`text_frame`] for the fuzz targets: the reply as text.
+#[doc(hidden)]
+pub fn fuzz_frame(app: &Arc<App>, account: &str, device: &str, text: &[u8]) -> Option<String> {
+    let me = Authed {
+        account: account.to_string(),
+        device: device.to_string(),
+    };
+    match text_frame(app, &me, text)? {
+        Message::Text(t) => Some(t.to_string()),
+        _ => None,
     }
 }
 

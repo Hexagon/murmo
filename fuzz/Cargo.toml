@@ -1,0 +1,33 @@
+[package]
+name = "mesg-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mesg-server = { path = "../server" }
+
+[[bin]]
+name = "json_body"
+path = "fuzz_targets/json_body.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_text"
+path = "fuzz_targets/http_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ws_frame"
+path = "fuzz_targets/ws_frame.rs"
+test = false
+doc = false
+bench = false

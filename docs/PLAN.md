@@ -19,7 +19,7 @@
 - [ ] Retention settings per conversation in the UI
 - [ ] Signed, reproducible client release with published hashes; installable copy not served by the server
 - [x] Persistent rate limits behind a reverse proxy (`X-Forwarded-For` only from a trusted proxy)
-- [ ] Fuzz targets for the server parsers
+- [x] Fuzz targets for the server parsers (`fuzz/`: JSON bodies and device lists, WebSocket frames, query/proxy/origin text; a minute each in CI)
 - [x] Run the browser smoke test in CI
 
 ## Phase 2: protocol
