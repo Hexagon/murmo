@@ -61,7 +61,7 @@ Configuration (environment):
 | `MESG_REALM` | `global` | rootcard realm for identities registered here |
 | `MESG_REMOTE_HOMES` | `https://rootcard.org` | other homes whose identities may log in (comma-separated origins, `*` for any https host, empty for none) |
 | `MESG_REALMS` | `global` | realms accepted from other homes |
-| `MESG_TRUST_PROXY` | `0` | take the client address from `X-Forwarded-For` (only behind your own proxy) |
+| `MESG_TRUST_PROXY` | `0` | proxies whose `X-Forwarded-For` is believed: `0` none, `1` loopback and private networks, or a list of addresses and CIDR ranges (`10.1.2.3,fd00::/8`) |
 | `MESG_FILE_QUEUE_MB` | `150` | encrypted file chunks kept per device that is away (`0`: files only go live) |
 | `MESG_FILE_QUEUE_TOTAL_MB` | `2048` | file chunks kept in total |
 | `MESG_PUSH_HOSTS` | the push services of Chrome, Firefox, Safari, Edge | push-service hosts accepted for notifications (`*.` for subdomains, empty: no push) |

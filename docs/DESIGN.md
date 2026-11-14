@@ -362,6 +362,15 @@ WebSocket frames (JSON):
 Limits (v0): envelope ≤ 64 KiB, ≤ 24 recipients per send, ≤ 2 000 queued envelopes per device, mailbox TTL 14 days,
 60 sends per minute per device, 20 lookups per minute and 5 link requests per hour per network address.
 
+Rate limits count per IPv4 address and per IPv6 /64. Counters are keyed by a hash of the address under a random
+secret in the database (HKDF-SHA-256, 128 bits), never by the address itself. Windows of ten minutes or more
+(registration, link requests, vault fetches, `connect`) are saved every minute and on shutdown, so restarting the
+server does not reset them; nothing older than an hour is kept.
+
+Behind a reverse proxy, `X-Forwarded-For` is read only when the connection comes from a proxy listed in
+`MESG_TRUST_PROXY` (`1`: loopback and private networks). The hops are read from the right, skipping trusted proxies;
+the first other address is the client. Anything further left was written by the client and is ignored.
+
 ### 10.1 Notifications
 
 A device is woken when something arrives while its page is frozen or closed, unless the user turns that off: the
@@ -394,6 +403,6 @@ never leaves the device.
 | queued file chunks (ciphertext) | files for devices that are away (sender's choice) | until acknowledged, at most 14 days |
 | push endpoint per device | notifications (the user's choice) | until turned off, logged out, or reported gone |
 | VAPID key | signing push requests | while the server exists |
-| network addresses | rate limits | memory only, minutes |
+| network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
 
 No access logs with addresses are written by default (`MESG_LOG=info` logs no addresses or account ids).

@@ -38,8 +38,8 @@ pub struct Config {
     pub remote_homes: Vec<String>,
     /// Accept identities from any public https home.
     pub any_home: bool,
-    /// Trust `X-Forwarded-For` from a reverse proxy.
-    pub trust_proxy: bool,
+    /// Reverse proxies whose `X-Forwarded-For` is believed (empty: none).
+    pub trust_proxy: Vec<Net>,
     /// Multiplier for every rate limit (1 in production).
     pub limit_scale: u32,
     /// Bytes of encrypted file chunks kept per device that is not connected (0: files only go live).
@@ -169,49 +169,278 @@ impl Hub {
 
 // ── rate limits ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/// Fixed-window counters, in memory only. `scale` multiplies every limit (`MESG_LIMIT_SCALE`, for tests).
-pub struct Limiter(Mutex<HashMap<String, (u32, i64)>>, u32);
+/// Windows at least this long survive a restart (see [`Limiter::save`]).
+pub const PERSIST_WINDOW: i64 = 600;
+
+/// Fixed-window counters. `scale` multiplies every limit (`MESG_LIMIT_SCALE`, for tests).
+///
+/// Keys are never kept as given: each is replaced by a keyed hash (HKDF-SHA-256 under a random secret kept in the
+/// database), so neither memory nor the database holds network addresses in the clear. Counters of windows of
+/// [`PERSIST_WINDOW`] seconds or more are written to the database by [`Limiter::save`] and read back on start, so a
+/// restart does not hand out fresh budgets for registration, link requests or vault fetches. Nothing older than an
+/// hour is kept.
+pub struct Limiter {
+    counters: Mutex<HashMap<[u8; 16], Counter>>,
+    scale: u32,
+    secret: [u8; 32],
+    db: Option<Db>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Counter {
+    count: u32,
+    start: i64,
+    window: i64,
+}
 
 impl Default for Limiter {
     fn default() -> Self {
-        Limiter(Mutex::new(HashMap::new()), 1)
+        Limiter::scaled(1)
     }
 }
 
+const LIMIT_SECRET: &str = "rate_limit_secret";
+
 impl Limiter {
-    /// Limits multiplied by `scale` (at least 1).
+    /// In-memory limits multiplied by `scale` (at least 1).
     pub fn scaled(scale: u32) -> Self {
-        Limiter(Mutex::new(HashMap::new()), scale.max(1))
+        Limiter {
+            counters: Mutex::new(HashMap::new()),
+            scale: scale.max(1),
+            secret: random::<32>(),
+            db: None,
+        }
+    }
+
+    /// Limits that survive restarts: the hashing secret and the long windows live in `db`.
+    pub fn persistent(scale: u32, db: Db) -> Result<Self, String> {
+        let secret = match db.setting(LIMIT_SECRET).map_err(|e| e.to_string())? {
+            Some(hex) => rootcard::encoding::hex_decode(&hex)
+                .ok()
+                .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok())
+                .ok_or("bad rate limit secret in the database")?,
+            None => {
+                let s = random::<32>();
+                db.set_setting(LIMIT_SECRET, &rootcard::encoding::hex_encode(&s))
+                    .map_err(|e| e.to_string())?;
+                s
+            }
+        };
+        let t = now();
+        let mut counters = HashMap::new();
+        for (key, count, start, window) in db.rate_limits().map_err(|e| e.to_string())? {
+            if let Ok(k) = <[u8; 16]>::try_from(key.as_slice())
+                && t - start < window.min(3600)
+                && start <= t
+            {
+                counters.insert(
+                    k,
+                    Counter {
+                        count,
+                        start,
+                        window,
+                    },
+                );
+            }
+        }
+        Ok(Limiter {
+            counters: Mutex::new(counters),
+            scale: scale.max(1),
+            secret,
+            db: Some(db),
+        })
+    }
+
+    fn hash(&self, key: &str) -> [u8; 16] {
+        let h = rootcard::crypto::hkdf(key.as_bytes(), &self.secret, b"mesg rate limit v1");
+        let mut out = [0u8; 16];
+        out.copy_from_slice(&h[..16]);
+        out
     }
 
     /// Count one event for `key`; at most `max` per `window` seconds.
     pub fn check(&self, key: String, max: u32, window: i64) -> Result<(), ApiError> {
+        let k = self.hash(&key);
         let t = now();
-        let mut g = self.0.lock().map_err(ApiError::internal)?;
-        let e = g.entry(key).or_insert((0, t));
-        if t - e.1 >= window {
-            *e = (0, t);
+        let mut g = self.counters.lock().map_err(ApiError::internal)?;
+        let e = g.entry(k).or_insert(Counter {
+            count: 0,
+            start: t,
+            window,
+        });
+        if t - e.start >= window || e.start > t {
+            *e = Counter {
+                count: 0,
+                start: t,
+                window,
+            };
         }
-        if e.0 >= max.saturating_mul(self.1) {
-            let wait = u64::try_from(window - (t - e.1)).unwrap_or(1).max(1);
+        e.window = e.window.max(window);
+        if e.count >= max.saturating_mul(self.scale) {
+            let wait = u64::try_from(window - (t - e.start)).unwrap_or(1).max(1);
             return Err(ApiError::rate_limited(wait));
         }
-        e.0 += 1;
+        e.count += 1;
         Ok(())
     }
 
-    /// Forget windows older than an hour.
+    /// Forget windows that have ended (and anything older than an hour).
     pub fn sweep(&self) {
         let t = now();
-        if let Ok(mut g) = self.0.lock() {
-            g.retain(|_, (_, start)| t - *start < 3600);
+        if let Ok(mut g) = self.counters.lock() {
+            g.retain(|_, c| t - c.start < c.window.min(3600));
         }
     }
 
-    /// Limit by network address.
-    pub fn by_addr(&self, what: &str, addr: IpAddr, max: u32, window: i64) -> Result<(), ApiError> {
-        self.check(format!("{what}:{addr}"), max, window)
+    /// Write the counters of long windows to the database (replacing what was there). A no-op without one.
+    pub fn save(&self) -> Result<(), String> {
+        let Some(db) = &self.db else { return Ok(()) };
+        let rows: Vec<crate::db::RateRow> = self
+            .counters
+            .lock()
+            .map_err(|_| "lock poisoned".to_string())?
+            .iter()
+            .filter(|(_, c)| c.window >= PERSIST_WINDOW && c.count > 0)
+            .map(|(k, c)| (k.to_vec(), c.count, c.start, c.window))
+            .collect();
+        db.set_rate_limits(&rows).map_err(|e| e.to_string())
     }
+
+    /// Limit by network address. IPv6 addresses count per /64, since one host usually holds a whole /64.
+    pub fn by_addr(&self, what: &str, addr: IpAddr, max: u32, window: i64) -> Result<(), ApiError> {
+        self.check(format!("{what}:{}", limit_net(addr)), max, window)
+    }
+}
+
+/// The network a rate limit by address counts against: the IPv4 address (also when mapped into IPv6), or the /64
+/// of an IPv6 address.
+pub fn limit_net(addr: IpAddr) -> String {
+    match addr {
+        IpAddr::V4(a) => a.to_string(),
+        IpAddr::V6(a) => match a.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = a.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+    }
+}
+
+// ── trusted proxies ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// An address range in CIDR notation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Net {
+    addr: IpAddr,
+    prefix: u8,
+}
+
+impl Net {
+    /// Parse `10.0.0.0/8`, `::1` or `fd00::/8`. A bare address is a single host.
+    pub fn parse(s: &str) -> Option<Net> {
+        let (a, p) = match s.split_once('/') {
+            Some((a, p)) => (a, Some(p)),
+            None => (s, None),
+        };
+        let addr: IpAddr = a.trim().parse().ok()?;
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        let prefix = match p {
+            Some(p) => p.trim().parse::<u8>().ok().filter(|p| *p <= max)?,
+            None => max,
+        };
+        Some(Net { addr, prefix })
+    }
+
+    /// Whether `ip` is inside the range (IPv4-mapped IPv6 addresses count as IPv4).
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        let ip = canonical_ip(ip);
+        match (self.addr, ip) {
+            (IpAddr::V4(n), IpAddr::V4(a)) => {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                u32::from(n) & mask == u32::from(a) & mask
+            }
+            (IpAddr::V6(n), IpAddr::V6(a)) => {
+                let mask = u128::MAX
+                    .checked_shl(128 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                u128::from(n) & mask == u128::from(a) & mask
+            }
+            _ => false,
+        }
+    }
+}
+
+/// IPv4-mapped IPv6 addresses as IPv4.
+pub fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(a) => a.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    }
+}
+
+/// The ranges `MESG_TRUST_PROXY=1` stands for: loopback and private networks, where a reverse proxy on the same
+/// host or in the same container network connects from.
+pub const LOCAL_NETS: &[&str] = &[
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "::1/128",
+    "fc00::/7",
+];
+
+/// Parse `MESG_TRUST_PROXY`: `0` or empty for none, `1` for [`LOCAL_NETS`], or a comma-separated list of addresses
+/// and ranges. Entries that do not parse are returned as errors.
+pub fn trusted_proxies(s: &str) -> Result<Vec<Net>, String> {
+    let s = s.trim();
+    if s.is_empty() || s == "0" {
+        return Ok(Vec::new());
+    }
+    let items: Vec<&str> = if s == "1" {
+        LOCAL_NETS.to_vec()
+    } else {
+        s.split(',')
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .collect()
+    };
+    items
+        .into_iter()
+        .map(|x| Net::parse(x).ok_or_else(|| format!("not an address or range: {x}")))
+        .collect()
+}
+
+/// The client address of a request from `peer` with the given `X-Forwarded-For` header values.
+///
+/// The header is only believed when `peer` is a trusted proxy. Then the hops are read from the right (the hop the
+/// proxy appended itself) and every trusted proxy is skipped: the first untrusted hop is the client. A hop that is
+/// not an address ends the walk at the last address before it, since everything further left is whatever the client
+/// chose to send.
+pub fn client_addr<'a>(
+    peer: IpAddr,
+    forwarded: impl IntoIterator<Item = &'a str>,
+    trusted: &[Net],
+) -> IpAddr {
+    let is_trusted = |ip: IpAddr| trusted.iter().any(|n| n.contains(ip));
+    let peer = canonical_ip(peer);
+    if !is_trusted(peer) {
+        return peer;
+    }
+    let hops: Vec<&str> = forwarded.into_iter().flat_map(|v| v.split(',')).collect();
+    let mut client = peer;
+    for hop in hops.iter().rev() {
+        let Ok(ip) = hop.trim().parse::<IpAddr>() else {
+            break;
+        };
+        client = canonical_ip(ip);
+        if !is_trusted(client) {
+            break;
+        }
+    }
+    client
 }
 
 // ── link requests ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -447,4 +676,107 @@ fn stale_ids(entries: &[Value]) -> Vec<String> {
 /// A canonical JSON text.
 pub fn text(v: &Value) -> String {
     String::from_utf8(canonical(v)).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().expect("ip")
+    }
+
+    #[test]
+    fn nets() {
+        let n = Net::parse("10.0.0.0/8").expect("net");
+        assert!(n.contains(ip("10.1.2.3")));
+        assert!(n.contains(ip("::ffff:10.1.2.3")));
+        assert!(!n.contains(ip("11.0.0.1")));
+        assert!(
+            Net::parse("0.0.0.0/0")
+                .expect("net")
+                .contains(ip("8.8.8.8"))
+        );
+        assert!(Net::parse("fc00::/7").expect("net").contains(ip("fd12::1")));
+        assert!(!Net::parse("::1").expect("net").contains(ip("::2")));
+        assert!(Net::parse("10.0.0.0/33").is_none());
+        assert!(Net::parse("nonsense").is_none());
+        assert!(trusted_proxies("10.0.0.1, bad").is_err());
+        assert_eq!(trusted_proxies("0").expect("none"), Vec::new());
+        assert_eq!(trusted_proxies("1").expect("local").len(), LOCAL_NETS.len());
+    }
+
+    #[test]
+    fn forwarded_for() {
+        let local = trusted_proxies("1").expect("local");
+        // Not behind a trusted proxy: the header is ignored.
+        assert_eq!(
+            client_addr(ip("203.0.113.9"), ["1.2.3.4"], &local),
+            ip("203.0.113.9")
+        );
+        // No trust configured.
+        assert_eq!(
+            client_addr(ip("127.0.0.1"), ["1.2.3.4"], &[]),
+            ip("127.0.0.1")
+        );
+        // One proxy: the hop it appended.
+        assert_eq!(
+            client_addr(ip("127.0.0.1"), ["1.2.3.4"], &local),
+            ip("1.2.3.4")
+        );
+        // A spoofed hop on the left is not taken.
+        assert_eq!(
+            client_addr(ip("127.0.0.1"), ["6.6.6.6, 1.2.3.4"], &local),
+            ip("1.2.3.4")
+        );
+        // Two trusted proxies, in one header or several.
+        assert_eq!(
+            client_addr(ip("127.0.0.1"), ["6.6.6.6, 1.2.3.4, 10.0.0.2"], &local),
+            ip("1.2.3.4")
+        );
+        assert_eq!(
+            client_addr(ip("127.0.0.1"), ["6.6.6.6, 1.2.3.4", "10.0.0.2"], &local),
+            ip("1.2.3.4")
+        );
+        // Garbage stops the walk at the last good hop.
+        assert_eq!(
+            client_addr(ip("127.0.0.1"), ["1.2.3.4, junk, 10.0.0.2"], &local),
+            ip("10.0.0.2")
+        );
+        // No header: the proxy itself.
+        assert_eq!(client_addr(ip("127.0.0.1"), [], &local), ip("127.0.0.1"));
+    }
+
+    #[test]
+    fn ipv6_per_64() {
+        assert_eq!(limit_net(ip("2001:db8:1:2:3:4:5:6")), "2001:db8:1:2::/64");
+        assert_eq!(limit_net(ip("::ffff:1.2.3.4")), "1.2.3.4");
+        let l = Limiter::scaled(1);
+        for i in 0..3 {
+            let a = ip(&format!("2001:db8:1:2::{i}"));
+            assert!(l.by_addr("x", a, 3, 60).is_ok());
+        }
+        assert!(l.by_addr("x", ip("2001:db8:1:2::ff"), 3, 60).is_err());
+        assert!(l.by_addr("x", ip("2001:db8:1:3::1"), 3, 60).is_ok());
+    }
+
+    #[test]
+    fn survives_restart() {
+        let db = Db::open(":memory:").expect("db");
+        let l = Limiter::persistent(1, db.clone()).expect("limiter");
+        for _ in 0..5 {
+            assert!(l.check("register:1.2.3.4".into(), 5, 3600).is_ok());
+            assert!(l.check("lookup:1.2.3.4".into(), 5, 60).is_ok());
+        }
+        assert!(l.check("register:1.2.3.4".into(), 5, 3600).is_err());
+        l.save().expect("save");
+        // Nothing in the clear.
+        let rows = db.rate_limits().expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0.len(), 16);
+        let again = Limiter::persistent(1, db).expect("limiter");
+        assert!(again.check("register:1.2.3.4".into(), 5, 3600).is_err());
+        // Short windows start over.
+        assert!(again.check("lookup:1.2.3.4".into(), 5, 60).is_ok());
+    }
 }

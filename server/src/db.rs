@@ -68,7 +68,16 @@ CREATE TABLE IF NOT EXISTS push_subs (
   endpoint TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key    BLOB PRIMARY KEY,
+  count  INTEGER NOT NULL,
+  start  INTEGER NOT NULL,
+  window INTEGER NOT NULL
+);
 ";
+
+/// A saved rate limit counter: `(keyed hash, count, window start, window seconds)`.
+pub type RateRow = (Vec<u8>, u32, i64, i64);
 
 /// A cached remote identity (its home is another rootcard host).
 pub struct Remote {
@@ -556,6 +565,34 @@ impl Db {
             )
             .optional()
             .map_err(store_err)
+    }
+
+    /// Saved rate limit counters: `(keyed hash, count, window start, window seconds)`.
+    pub fn rate_limits(&self) -> Result<Vec<RateRow>, StoreError> {
+        let c = self.conn()?;
+        let mut st = c
+            .prepare("SELECT key, count, start, window FROM rate_limits")
+            .map_err(store_err)?;
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .map_err(store_err)?
+            .collect::<Result<_, _>>()
+            .map_err(store_err)
+    }
+
+    /// Replace the saved rate limit counters.
+    pub fn set_rate_limits(&self, rows: &[RateRow]) -> Result<(), StoreError> {
+        let mut c = self.conn()?;
+        let tx = c.transaction().map_err(store_err)?;
+        tx.execute("DELETE FROM rate_limits", [])
+            .map_err(store_err)?;
+        for (k, n, start, window) in rows {
+            tx.execute(
+                "INSERT INTO rate_limits (key, count, start, window) VALUES (?1, ?2, ?3, ?4)",
+                params![k, n, start, window],
+            )
+            .map_err(store_err)?;
+        }
+        tx.commit().map_err(store_err)
     }
 
     /// Store a server setting.

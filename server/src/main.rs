@@ -12,7 +12,7 @@
 //! | `MESG_REALM` | `global` | rootcard realm for new identities |
 //! | `MESG_REMOTE_HOMES` | `https://rootcard.org` | other rootcard homes whose identities may log in (comma-separated origins; `*` for any public https host; empty for none) |
 //! | `MESG_REALMS` | `global` | realms accepted for identities from other homes (comma-separated) |
-//! | `MESG_TRUST_PROXY` | `0` | take the client address from the last `X-Forwarded-For` hop |
+//! | `MESG_TRUST_PROXY` | `0` | reverse proxies whose `X-Forwarded-For` is believed: `0` none, `1` loopback and private networks, or a comma-separated list of addresses and CIDR ranges |
 //! | `MESG_LIMIT_SCALE` | `1` | multiply every rate limit (tests only) |
 
 #![forbid(unsafe_code)]
@@ -58,17 +58,19 @@ impl FromRequestParts<Arc<App>> for ClientAddr {
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
             .map_or(IpAddr::from([0, 0, 0, 0]), |c| c.0.ip());
-        if app.cfg.trust_proxy
-            && let Some(ip) = parts
-                .headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.rsplit(',').next())
-                .and_then(|v| v.trim().parse::<IpAddr>().ok())
-        {
-            return Ok(ClientAddr(ip));
+        if app.cfg.trust_proxy.is_empty() {
+            return Ok(ClientAddr(peer));
         }
-        Ok(ClientAddr(peer))
+        let forwarded = parts
+            .headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok());
+        Ok(ClientAddr(app::client_addr(
+            peer,
+            forwarded,
+            &app.cfg.trust_proxy,
+        )))
     }
 }
 
@@ -93,8 +95,8 @@ fn megabytes(name: &str, default: i64) -> i64 {
         * 1024
 }
 
-fn config() -> Config {
-    Config {
+fn config() -> Result<Config, String> {
+    Ok(Config {
         origin: env("MESG_ORIGIN", "http://127.0.0.1:8080")
             .trim_end_matches('/')
             .to_string(),
@@ -112,7 +114,8 @@ fn config() -> Config {
         any_home: list(&env("MESG_REMOTE_HOMES", "https://rootcard.org"))
             .iter()
             .any(|h| h == "*"),
-        trust_proxy: env("MESG_TRUST_PROXY", "0") == "1",
+        trust_proxy: app::trusted_proxies(&env("MESG_TRUST_PROXY", "0"))
+            .map_err(|e| format!("MESG_TRUST_PROXY: {e}"))?,
         limit_scale: env("MESG_LIMIT_SCALE", "1").parse().unwrap_or(1),
         file_queue: megabytes("MESG_FILE_QUEUE_MB", 150),
         file_queue_total: megabytes("MESG_FILE_QUEUE_TOTAL_MB", 2048),
@@ -127,7 +130,7 @@ fn config() -> Config {
             .chars()
             .filter(|c| c.is_ascii_graphic() && *c != '"' && *c != '\\')
             .collect(),
-    }
+    })
 }
 
 /// Load the host key seed, or create it (mode 0600) on first start.
@@ -240,7 +243,7 @@ pub fn router(app: Arc<App>) -> Router {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = config();
+    let cfg = config()?;
     rootcard::check_base_url(&cfg.origin).map_err(|e| format!("MESG_ORIGIN: {e}"))?;
     let seed = host_key(&cfg.key_file)?;
     let db = db::Db::open(&cfg.db)?;
@@ -269,6 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.push_contact.clone()
     };
     let push = push::Pusher::open(&db, cfg.push_hosts.clone(), contact)?;
+    let limits = Limiter::persistent(cfg.limit_scale, db.clone())?;
     let app = Arc::new(App {
         cfg: cfg.clone(),
         push,
@@ -276,13 +280,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         host,
         hub: Hub::default(),
         links: Links::default(),
-        limits: Limiter::scaled(cfg.limit_scale),
+        limits,
         challenges: Challenges::default(),
     });
 
     let sweeper = app.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(300));
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
         loop {
             tick.tick().await;
             if let Err(e) = sweeper.db.purge(now()) {
@@ -290,18 +294,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             sweeper.links.sweep();
             sweeper.limits.sweep();
+            if let Err(e) = sweeper.limits.save() {
+                eprintln!("rate limits: {e}");
+            }
         }
     });
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     eprintln!("mesg-server for {} on {}", cfg.origin, cfg.bind);
+    let last = app.clone();
     axum::serve(
         listener,
         router(app).into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
+    .with_graceful_shutdown(shutdown())
     .await?;
+    last.limits.save()?;
     Ok(())
+}
+
+/// Ctrl-C, or SIGTERM on Unix (systemd, containers).
+async fn shutdown() {
+    #[cfg(unix)]
+    {
+        let term = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut s) => {
+                    s.recv().await;
+                }
+                Err(_) => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            () = term => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
