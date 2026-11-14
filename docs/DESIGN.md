@@ -313,7 +313,7 @@ All bodies are canonical JSON. Errors are `{ "error": "<code>" }`.
 |---|---|---|---|
 | any | `/id/v0/…` | rootcard | rootcard host protocol (HOST_PROTOCOL.md) |
 | GET | `/.well-known/rootcard` | – | host pointer |
-| GET | `/api/v1/info` | – | origin, own home, realms, allowed homes |
+| GET | `/api/v1/info` | – | origin, own home, realms, allowed homes, `build` (changes when the served client changes; an open page then offers a reload) |
 | GET | `/api/v1/lookup?handle=` | – | exact identifier → account and home (no search) |
 | POST | `/api/v1/accounts/{account}/connect` | – | fetch and verify an identity from an allowed home |
 | POST | `/api/v1/challenge` | – | single-use challenge for a rootcard proof |
@@ -347,7 +347,8 @@ Limits (v0): envelope ≤ 64 KiB, ≤ 24 recipients per send, ≤ 2 000 queued e
 
 ### 10.1 Notifications
 
-A device can ask to be woken when something arrives while its page is frozen or closed. Its service worker subscribes
+A device is woken when something arrives while its page is frozen or closed, unless the user turns that off: the
+setting is on by default and the client asks for the browser's notification permission at the first click after login. Its service worker subscribes
 with the browser's push service (Web Push, VAPID key from `info.push_key`) and the page sends the endpoint URL
 (`push-sub`). The server accepts endpoints only on the push services in `MESG_PUSH_HOSTS` (no requests to arbitrary
 addresses).

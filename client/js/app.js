@@ -147,7 +147,8 @@ function dayLabel(t) {
 
 // ── settings of this browser, per account ───────────────────────────────────────────────────────────────────────
 
-const DEFAULTS = { notify: false, fileQueue: true, askedNotify: false };
+// notify: on unless the user turns it off (the browser still asks for its permission, see askNotifications).
+const DEFAULTS = { notify: true, fileQueue: true, notifyPrompted: false };
 
 function settings() {
   try {
@@ -254,7 +255,7 @@ const HELP = [
     "Är mottagaren ansluten går filen direkt, via servern, utan att sparas. Är den inte ansluten kan servern hålla den krypterad tills mottagaren hämtat den, högst 14 dagar. Det går att stänga av under Konto och inställningar; då skickas filen i stället när ni båda är anslutna samtidigt. Servern ser filens ungefärliga storlek, aldrig namn eller innehåll.",
   ]],
   ["Notiser", [
-    "Notiser är av tills du slår på dem, och gäller bara den enhet du gör det på.",
+    "Notiser är på från början om du tillåter dem när webbläsaren frågar. Du kan stänga av dem under Konto och inställningar, och valet gäller bara den enhet du gör det på.",
     "När mesg är stängt skickar servern ett tomt meddelande via webbläsarens pushtjänst (Google, Mozilla eller Apple), som väcker webbläsaren. Pushtjänsten får veta att din webbläsare fick något från den här servern och när – inget om innehåll eller avsändare. Notisen säger bara ”Nytt meddelande”.",
     "Att väckas gör inte att du visas som ansluten: webbläsaren ansluter inte till servern förrän du öppnar mesg.",
   ]],
@@ -582,7 +583,9 @@ async function enter({ store, account, handle, home }) {
   messenger.addEventListener("messages", (e) => { if (e.detail.conv === current) renderThread(); renderSidebar(); });
   messenger.addEventListener("status", (e) => {
     renderSidebar();
-    if (e.detail === "online") syncPush().catch((x) => console.warn("push", x?.message ?? x));
+    if (e.detail !== "online") return;
+    syncPush().catch((x) => console.warn("push", x?.message ?? x));
+    checkVersion(); // the server may have been restarted with a new client
   });
   messenger.addEventListener("incoming", (e) => onIncoming(e.detail));
   messenger.addEventListener("link", (e) => showLinkRequest(e.detail));
@@ -593,6 +596,7 @@ async function enter({ store, account, handle, home }) {
   });
   await messenger.start();
   renderShell();
+  askNotifications();
 }
 
 // A page that was in the background comes back with a dead connection: check it at once.
@@ -600,6 +604,7 @@ function wake() {
   if (document.visibilityState !== "visible") return;
   messenger?.wake();
   notify.clear().catch(() => {});
+  checkVersion();
 }
 document.addEventListener("visibilitychange", wake);
 addEventListener("pageshow", wake);
@@ -628,6 +633,52 @@ async function syncPush() {
   if (endpoint) await messenger.setPushEndpoint(endpoint);
 }
 
+/**
+ * Notifications are on by default, but the browser's permission must be asked for from a user gesture: ask at the
+ * first click after login, once per device. If that question is dismissed, the start page offers it again, and the setting always can.
+ */
+function askNotifications() {
+  const due = () => messenger && settings().notify && !settings().notifyPrompted && notify.support() === "ok" && notify.permission() === "default";
+  if (!due()) return;
+  document.addEventListener(
+    "click",
+    async () => {
+      if (!due()) return;
+      setSetting("notifyPrompted", true);
+      const text = await setNotifications(true).catch(() => null);
+      if (text && notify.permission() === "granted") toast(text);
+    },
+    { once: true, capture: true },
+  );
+}
+
+// ── a new version ───────────────────────────────────────────────────────────────────────────────────────────────
+
+let versionChecked = Date.now();
+let versionOffered = false;
+
+/** Ask the server which client it serves now; offer a reload when it is not the one this page was loaded from. */
+async function checkVersion() {
+  if (versionOffered || !info?.build || Date.now() - versionChecked < 60_000) return;
+  versionChecked = Date.now();
+  try {
+    const now = await api.info();
+    if (!now.build || now.build === info.build || versionOffered) return;
+  } catch {
+    return; // offline: the next check will tell
+  }
+  versionOffered = true;
+  const bar = h(
+    "div",
+    { class: "update", role: "status" },
+    h("span", { text: "En ny version av mesg finns." }),
+    h("button", { class: "btn small primary", text: "Ladda om", onclick: () => location.reload() }),
+    h("button", { class: "btn small ghost", text: "Senare", onclick: () => bar.remove() }),
+  );
+  document.body.append(bar);
+}
+setInterval(checkVersion, 15 * 60_000);
+
 /** Turn notifications on (from a click) or off. Returns a text for the user. */
 async function setNotifications(on) {
   if (!on) {
@@ -642,6 +693,7 @@ async function setNotifications(on) {
   const r = await notify.request();
   if (r !== "granted") return r === "denied" ? "Notiser är blockerade för den här sidan. Tillåt dem i webbläsarens inställningar för sidan och försök igen." : "Notiser slogs inte på.";
   setSetting("notify", true);
+  setSetting("notifyPrompted", true);
   try {
     const endpoint = await notify.pushEndpoint(info.push_key);
     if (!endpoint) return "Notiser är på medan mesg är öppet i bakgrunden. Den här webbläsaren eller servern stöder inte push, så en stängd app väcks inte.";
@@ -859,15 +911,16 @@ function renderWelcome() {
     err,
     send,
   );
-  const asked = settings().askedNotify || settings().notify || notify.support() !== "ok" || notify.permission() === "denied";
-  const offer = asked
+  // Wanted (the default) but the browser's question was dismissed: offer it again here.
+  const offered = settings().notify && settings().notifyPrompted && notify.support() === "ok" && notify.permission() === "default";
+  const offer = !offered
     ? null
     : h(
         "div",
         { class: "card offer" },
         h("div", {}, h("strong", { text: "Notiser" }), h("div", { class: "hint", text: "Få veta när någon skriver, även när mesg är stängt." })),
-        h("button", { class: "btn small", text: "Inte nu", onclick: () => { setSetting("askedNotify", true); offer.remove(); } }),
-        h("button", { class: "btn small primary", text: "Slå på", onclick: async () => { setSetting("askedNotify", true); offer.remove(); toast(await setNotifications(true)); } }),
+        h("button", { class: "btn small", text: "Inte nu", onclick: () => { setSetting("notify", false); offer.remove(); } }),
+        h("button", { class: "btn small primary", text: "Slå på", onclick: async () => { offer.remove(); toast(await setNotifications(true)); } }),
       );
   put(ui.main,
     topbar(h("div", { class: "title", text: "Ny konversation" })),
@@ -1189,10 +1242,9 @@ async function showDevices() {
 async function logout(forget) {
   const account = messenger?.me.account;
   if (messenger && settings().notify) {
-    // A logged-out device is not woken any more.
+    // A logged-out device is not woken any more (the setting stays for the next login).
     await notify.unsubscribe().catch(() => {});
     await messenger.setPushEndpoint(null).catch(() => {});
-    setSetting("notify", false);
   }
   messenger?.stop();
   messenger = null;
