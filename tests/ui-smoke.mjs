@@ -86,6 +86,12 @@ try {
   await ch2.accept([`${shots}/sample.png`]);
   await b.waitForSelector(".msg img.inline", { timeout: 20000 });
   await sleep(1000);
+  // The picture opens full size and closes with the cross.
+  await b.click(".msg img.inline");
+  await b.waitForSelector("dialog.viewer .close", { visible: true, timeout: 5000 });
+  await b.screenshot({ path: `${shots}/b-6b-viewer.png` });
+  await b.click("dialog.viewer .close");
+  await b.waitForFunction(() => !document.querySelector("dialog.viewer"), { timeout: 5000 });
   await a.screenshot({ path: `${shots}/a-6-chat.png` });
   await b.screenshot({ path: `${shots}/b-6-chat.png` });
   await clickText(b, "Säkerhetskod");

@@ -46,6 +46,7 @@ const ICONS = {
   more: "M5 12h.01M12 12h.01M19 12h.01",
   back: "M15 5l-7 7 7 7",
   plus: "M12 5v14M5 12h14",
+  close: "M6 6l12 12M18 6L6 18",
 };
 
 function icon(name) {
@@ -730,6 +731,13 @@ function closeConversation() {
   else openConversation(null);
 }
 addEventListener("popstate", () => {
+  // Back with a dialog open (a picture, a menu) closes the dialog and stays where it was.
+  const open = document.querySelector("dialog[open]");
+  if (open) {
+    open.close();
+    if (ui.shell?.classList.contains("chat")) history.pushState({ mesg: 1 }, "");
+    return;
+  }
   pushed = false;
   if (messenger && ui.shell) openConversation(null);
 });
@@ -988,6 +996,16 @@ function message(m) {
   return h("div", { class: `msg ${m.dir}${media}` }, body, meta);
 }
 
+/** A picture full size: closed by the cross, a tap anywhere, Escape or the back button. */
+function showImage(url, name) {
+  const d = dialog(
+    h("button", { class: "close", "aria-label": "Stäng", title: "Stäng", onclick: () => d.close() }, icon("close")),
+    h("img", { src: url, alt: name }),
+  );
+  d.classList.add("viewer");
+  d.addEventListener("click", () => d.close());
+}
+
 function fileView(m) {
   const f = m.file;
   if (f.have && p.inlineImage(f.mime, f.size)) {
@@ -1000,7 +1018,7 @@ function fileView(m) {
         if (ui.scroll && ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < img.height + 160) ui.scroll.scrollTop = ui.scroll.scrollHeight;
       });
       img.src = url;
-      img.addEventListener("click", () => dialog(h("img", { src: url, alt: f.name })).classList.add("viewer"));
+      img.addEventListener("click", () => showImage(url, f.name));
     });
     return img;
   }
