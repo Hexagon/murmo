@@ -79,7 +79,7 @@ client/        the web client: plain ES modules, no build step, no dependencies 
   js/core.js       the messenger engine (requests, sync, history, files)
   js/app.js        the interface
   vendor/rootcard  rootcard 0.3.4 from npm, unmodified (npm tarball SHA-256 433607bb…b1c92b)
-docs/          DESIGN.md (protocol), THREAT_MODEL.md, PLAN.md
+docs/          DESIGN.md (protocol), THREAT_MODEL.md, PLAN.md, BACKLOG.md (work queue)
 tests/         protocol tests, end-to-end test (two servers, real client engine), browser smoke test
 ```
 

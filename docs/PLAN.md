@@ -16,6 +16,8 @@
 
 ## Phase 1: hardening
 
+The concrete findings of the 0.1 review, in priority order, are in [BACKLOG.md](BACKLOG.md).
+
 - [ ] Retention settings per conversation in the UI
 - [ ] Signed, reproducible client release with published hashes; installable copy not served by the server
 - [ ] Persistent rate limits behind a reverse proxy (`X-Forwarded-For` only from a trusted proxy)
