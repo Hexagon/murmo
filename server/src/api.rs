@@ -94,17 +94,18 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
             realms.push(r.as_str().into());
         }
     }
-    json(
-        200,
-        &Map::new()
-            .with("v", 1i64)
-            .with("origin", app.cfg.origin.as_str())
-            .with("home", app.local_home())
-            .with("realm", app.cfg.realm.as_str())
-            .with("realms", Value::Array(realms))
-            .with("homes", homes)
-            .into(),
-    )
+    let mut m = Map::new()
+        .with("v", 1i64)
+        .with("origin", app.cfg.origin.as_str())
+        .with("home", app.local_home())
+        .with("realm", app.cfg.realm.as_str())
+        .with("realms", Value::Array(realms))
+        .with("homes", homes)
+        .with("file_queue", app.cfg.file_queue > 0);
+    if app.push.enabled() {
+        m.insert("push_key", app.push.public.as_str().into());
+    }
+    json(200, &m.into())
 }
 
 /// `POST /api/v1/challenge`: a single-use challenge for a rootcard proof.

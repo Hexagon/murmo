@@ -22,6 +22,7 @@ mod app;
 mod db;
 mod devices;
 mod error;
+mod push;
 mod rc;
 mod remote;
 mod ws;
@@ -83,6 +84,15 @@ fn list(s: &str) -> Vec<String> {
         .collect()
 }
 
+fn megabytes(name: &str, default: i64) -> i64 {
+    env(name, &default.to_string())
+        .parse::<i64>()
+        .unwrap_or(default)
+        .clamp(0, 1 << 30)
+        * 1024
+        * 1024
+}
+
 fn config() -> Config {
     Config {
         origin: env("MESG_ORIGIN", "http://127.0.0.1:8080")
@@ -104,6 +114,19 @@ fn config() -> Config {
             .any(|h| h == "*"),
         trust_proxy: env("MESG_TRUST_PROXY", "0") == "1",
         limit_scale: env("MESG_LIMIT_SCALE", "1").parse().unwrap_or(1),
+        file_queue: megabytes("MESG_FILE_QUEUE_MB", 150),
+        file_queue_total: megabytes("MESG_FILE_QUEUE_TOTAL_MB", 2048),
+        push_hosts: list(&env(
+            "MESG_PUSH_HOSTS",
+            "fcm.googleapis.com,updates.push.services.mozilla.com,*.push.apple.com,*.notify.windows.com",
+        ))
+        .into_iter()
+        .map(|h| h.trim_end_matches('/').to_ascii_lowercase())
+        .collect(),
+        push_contact: env("MESG_PUSH_CONTACT", "")
+            .chars()
+            .filter(|c| c.is_ascii_graphic() && *c != '"' && *c != '\\')
+            .collect(),
     }
 }
 
@@ -145,7 +168,7 @@ async fn security_headers(State(app): State<Arc<App>>, req: Request, next: Next)
     };
     let csp = format!(
         "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; \
-         connect-src 'self' {ws_origin} {homes}; manifest-src 'self'; base-uri 'none'; form-action 'none'; \
+         connect-src 'self' {ws_origin} {homes}; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; \
          frame-ancestors 'none'"
     );
     if let Ok(v) = HeaderValue::from_str(&csp) {
@@ -240,8 +263,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         MemoryChallengeStore::new(),
         MemorySessionStore::new(),
     );
+    let contact = if cfg.push_contact.is_empty() {
+        cfg.origin.clone()
+    } else {
+        cfg.push_contact.clone()
+    };
+    let push = push::Pusher::open(&db, cfg.push_hosts.clone(), contact)?;
     let app = Arc::new(App {
         cfg: cfg.clone(),
+        push,
         db,
         host,
         hub: Hub::default(),

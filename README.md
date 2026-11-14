@@ -19,9 +19,12 @@ binary that stores as little as possible.
 - **Safety codes** to compare in person; device-list changes are gossiped inside messages and forks are refused.
 - **Several devices.** Messages go to all your devices; a newly linked device receives the history from the device
   that approved it.
-- **Files without server storage.** Files go live, encrypted, only to devices connected when the transfer starts,
-  through an in-memory relay. Images (PNG, JPEG, GIF, WebP) show inline. Your own devices can later fetch a file from
-  each other.
+- **Files.** Files go live, encrypted, to connected devices through an in-memory relay. For devices that are away the
+  server can keep the encrypted chunks until they are fetched (at most 14 days; the sender can turn this off, and so
+  can the operator); otherwise the file is sent when both are connected. Images (PNG, JPEG, GIF, WebP) show inline.
+  Your own devices can later fetch a file from each other.
+- **Notifications** in the browser and the installed app (PWA), off by default: an empty Web Push wakes the browser,
+  the notification says only "Nytt meddelande", and being woken does not make the device look connected.
 - **Encrypted local storage** unlocked by the rootcard password: a secret in the rootcard vault unlocks each device's
   local data, but the E2E private keys never enter the vault (docs/DESIGN.md §8).
 - **Calm interface** with light, dark and automatic themes; works on phones.
@@ -29,8 +32,9 @@ binary that stores as little as possible.
 ## What the server stores
 
 rootcard data for its own identities (log, encrypted vault, profile), verified logs of connected identities from
-other homes, device lists and current prekeys, and ciphertext addressed to devices until it is delivered (at most
-14 days). No message history, no contact lists, no files, no access logs with addresses. Details:
+other homes, device lists and current prekeys, ciphertext addressed to devices until it is delivered (at most
+14 days), encrypted file chunks for devices that are away (same limit, can be turned off), and push endpoints of
+devices that asked for notifications. No message history, no contact lists, no files, no access logs with addresses. Details:
 [docs/DESIGN.md §11](docs/DESIGN.md).
 
 ## Run it
@@ -55,6 +59,10 @@ Configuration (environment):
 | `MESG_REMOTE_HOMES` | `https://rootcard.org` | other homes whose identities may log in (comma-separated origins, `*` for any https host, empty for none) |
 | `MESG_REALMS` | `global` | realms accepted from other homes |
 | `MESG_TRUST_PROXY` | `0` | take the client address from `X-Forwarded-For` (only behind your own proxy) |
+| `MESG_FILE_QUEUE_MB` | `150` | encrypted file chunks kept per device that is away (`0`: files only go live) |
+| `MESG_FILE_QUEUE_TOTAL_MB` | `2048` | file chunks kept in total |
+| `MESG_PUSH_HOSTS` | the push services of Chrome, Firefox, Safari, Edge | push-service hosts accepted for notifications (`*.` for subdomains, empty: no push) |
+| `MESG_PUSH_CONTACT` | `MESG_ORIGIN` | contact sent to push services (`mailto:` or `https:` URL) |
 
 The `MESG_ORIGIN` goes into users' signed rootcard logs as their home address: choose it once.
 

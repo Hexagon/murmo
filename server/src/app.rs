@@ -42,6 +42,14 @@ pub struct Config {
     pub trust_proxy: bool,
     /// Multiplier for every rate limit (1 in production).
     pub limit_scale: u32,
+    /// Bytes of encrypted file chunks kept per device that is not connected (0: files only go live).
+    pub file_queue: i64,
+    /// Bytes of queued file chunks kept in total.
+    pub file_queue_total: i64,
+    /// Push services whose endpoints are accepted for notifications (empty: no push).
+    pub push_hosts: Vec<String>,
+    /// Contact in push requests (`mailto:` or `https:` URL); the origin by default.
+    pub push_contact: String,
 }
 
 /// Seconds since the epoch.
@@ -326,6 +334,8 @@ pub struct App {
     pub limits: Limiter,
     /// Challenges for rootcard proofs.
     pub challenges: Challenges,
+    /// Web Push wake-ups.
+    pub push: crate::push::Pusher,
 }
 
 /// The current state of an account as far as mesg is concerned.

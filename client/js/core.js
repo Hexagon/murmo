@@ -2,7 +2,8 @@
 // file transfer (docs/DESIGN.md). No DOM: the UI listens to events.
 //
 // Events: "status" (online/offline), "contacts", "messages" ({ conv }), "link" ({ request, code }), "file" ({ f }),
-// "removed" (this device was removed), "error" ({ message }).
+// "incoming" ({ conv, kind }: something from a contact the user should hear about), "removed" (this device was
+// removed), "error" ({ message }).
 
 import * as rc from "../vendor/rootcard/src/index.js";
 import * as p from "./protocol.js";
@@ -15,6 +16,12 @@ const LIST_TTL = 60_000;
 const NOTE_MAX = 500;
 const TEXT_MAX = 8000;
 const HISTORY_CHUNK = 40 * 1024;
+/** Message kinds the recipient should be notified about (the server only sees the flag, DESIGN.md §10.1). */
+const NOTIFY_KINDS = ["request", "text", "file"];
+/** A file nobody could take is offered again for this long (the mailbox lifetime). */
+const FILE_RETRY = 14 * 24 * 3600;
+const FILE_RETRY_EVERY = 60_000;
+const OFFLINE = ["offline", "disconnected", "timeout"];
 
 /**
  * Prepare this browser as a device of the account after a login (docs/DESIGN.md §4.2, §4.3).
@@ -82,8 +89,12 @@ async function loadDevice(store) {
 }
 
 export class Messenger extends EventTarget {
-  constructor({ api, store, account, handle, home, realms }) {
+  /** `fileQueue()`: whether the server may keep encrypted file chunks for devices that are away (a setting). */
+  constructor({ api, store, account, handle, home, realms, fileQueue = () => true }) {
     super();
+    this.fileQueue = fileQueue;
+    this.pendingFiles = []; // [{ conv, id, time }] files some device has not been given yet
+    this.missed = new Map(); // f → Set(device): "relay-missed" during a transfer
     this.api = api;
     this.store = store;
     this.me = { account, device: null };
@@ -110,6 +121,7 @@ export class Messenger extends EventTarget {
       this.prekeys.set(s.id, { privateKey: await p.importPrivate("X25519", s.pkcs8), publicRaw: s.publicRaw, time: s.time, pkcs8: s.pkcs8 });
     }
     for (const c of await this.store.contacts()) this.contacts.set(c.account, c);
+    this.pendingFiles = (await this.store.secret("pendingFiles")) ?? [];
     this.ws = new Socket(this.api.wsUrl(), async (nonce) => ({
       account: this.me.account,
       device: this.me.device,
@@ -122,6 +134,11 @@ export class Messenger extends EventTarget {
     });
     this.ws.addEventListener("msg", (e) => this.onEnvelope(e.detail));
     this.ws.addEventListener("relay", (e) => this.onRelay(e.detail).catch(() => {}));
+    this.ws.addEventListener("relay-missed", (e) => {
+      const set = this.missed.get(e.detail.ref);
+      if (set) for (const d of e.detail.devices ?? []) set.add(d);
+    });
+    this.retryTimer = setInterval(() => this.flushFiles().catch(() => {}), FILE_RETRY_EVERY);
     this.ws.addEventListener("link", (e) => this.onLink(e.detail.request).catch(() => {}));
     this.ws.addEventListener("devices", (e) => {
       this.lists.delete(e.detail.account);
@@ -135,8 +152,19 @@ export class Messenger extends EventTarget {
   }
 
   stop() {
+    clearInterval(this.retryTimer);
     this.ws?.close();
     this.store.close();
+  }
+
+  /** The page is visible again or the network came back: check the connection now. */
+  wake() {
+    this.ws?.wake();
+  }
+
+  /** Tell the server where this device is woken by push (`null`: nowhere). */
+  setPushEndpoint(endpoint) {
+    return this.ws.pushSubscription(endpoint);
   }
 
   fail(err) {
@@ -206,6 +234,7 @@ export class Messenger extends EventTarget {
 
   async onOnline() {
     await this.rotatePrekey();
+    await this.flushFiles();
   }
 
   async rotatePrekey() {
@@ -305,9 +334,20 @@ export class Messenger extends EventTarget {
         { id, kind, time, from: { ...this.me }, to: { account: t.account, device: t.device }, conv, heads, body },
         this.device.privateKey,
       );
-      to.push({ device: t.device, env: await p.seal(t.device, t.prekey, bytes) });
+      const item = { device: t.device, env: await p.seal(t.device, t.prekey, bytes) };
+      if (t.account !== this.me.account && NOTIFY_KINDS.includes(kind)) item.notify = true;
+      to.push(item);
     }
-    if (to.length) await this.ws.sendEnvelopes(to);
+    if (to.length) {
+      try {
+        await this.ws.sendEnvelopes(to);
+      } catch (e) {
+        // The connection broke on the way (a page that was in the background): once more on the new connection.
+        // Recipients ignore a message id they already have.
+        if (!OFFLINE.includes(e?.message) || !(await this.ws.whenReady())) throw e;
+        await this.ws.sendEnvelopes(to);
+      }
+    }
     return { id, time };
   }
 
@@ -401,6 +441,7 @@ export class Messenger extends EventTarget {
         await this.saveContact(c);
         if (note) await this.record({ id: m.id, conv: peer, dir: "in", time: m.time, kind: "text", text: note });
         if (c.state === "accepted") await this.send(peer, "accept", {});
+        this.emit("incoming", { conv: peer, kind: "request" });
         return;
       }
       case "accept":
@@ -414,10 +455,11 @@ export class Messenger extends EventTarget {
       case "text":
         if (c?.state !== "accepted" || (await this.store.hasMessage(m.id))) return;
         await this.record({ id: m.id, conv: peer, dir: "in", time: m.time, kind: "text", text: String(m.body?.text ?? "").slice(0, TEXT_MAX), device: m.from.device });
+        this.emit("incoming", { conv: peer, kind: "text" });
         return;
       case "file":
         if (c?.state !== "accepted") return;
-        await this.onFileMeta(m, peer, "in");
+        if (await this.onFileMeta(m, peer, "in")) this.emit("incoming", { conv: peer, kind: "file" });
         return;
       default:
         return;
@@ -551,7 +593,11 @@ export class Messenger extends EventTarget {
 
   // ── files (DESIGN.md §9) ──────────────────────────────────────────────────────────────────────────────────────
 
-  /** Send a file live to the devices connected now. Returns how many devices it went to. */
+  /**
+   * Send a file: live to the devices connected now and, unless the user turned that off, as encrypted chunks the
+   * server keeps for the devices that are away. Devices that got neither are tried again when they are connected.
+   * Returns `{ live, queued, waiting }` (numbers of the recipient's devices).
+   */
   async sendFile(conv, file) {
     const c = this.contacts.get(conv);
     if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
@@ -566,27 +612,100 @@ export class Messenger extends EventTarget {
     };
     const peers = await this.peerTargets(conv);
     const owns = await this.ownTargets();
-    const online = await this.ws.presence([...peers, ...owns].map((t) => t.device));
+    const all = [...peers, ...owns].map((t) => t.device);
+    const online = await this.ws.presence(all);
+    const away = all.filter((d) => !online.includes(d));
+    // Asked before the transfer, so that a file is queued whole or not at all.
+    const queued = this.fileQueue() ? await this.ws.relaySpace(away, Math.ceil(bytes.length * 1.4) + n * 256) : [];
     await this.store.putFile(f, bytes);
     const { id, time } = await this.deliver([...peers, ...owns], "file", conv, meta);
-    await this.record({ id, conv, dir: "out", time, kind: "file", file: { ...meta, have: true }, device: this.me.device });
-    if (online.length) await this.streamFile(meta, bytes, online);
-    return online.length;
+    const m = { id, conv, dir: "out", time, kind: "file", file: { ...meta, have: true }, device: this.me.device };
+    m.file.missed = away.filter((d) => !queued.includes(d));
+    m.file.peers = peers.map((t) => t.device);
+    await this.record(m);
+    const to = [...online, ...queued];
+    if (to.length) m.file.missed.push(...(await this.streamFile(meta, bytes, to, queued.length > 0)));
+    await this.settleFile(m);
+    const isPeer = (d) => m.file.peers.includes(d);
+    return {
+      live: online.filter((d) => isPeer(d) && !m.file.missed.includes(d)).length,
+      queued: queued.filter((d) => isPeer(d) && !m.file.missed.includes(d)).length,
+      waiting: m.file.missed.filter(isPeer).length,
+    };
   }
 
-  async streamFile(meta, bytes, devices) {
+  /** Stream the chunks of a file to devices; returns the devices the server could not give them to. */
+  async streamFile(meta, bytes, devices, store = false) {
     const key = p.unb64(meta.key);
-    for (let i = 0; i < meta.n; i++) {
-      const data = await p.encryptChunk(key, meta.f, i, meta.n, bytes.subarray(i * p.CHUNK, (i + 1) * p.CHUNK));
-      await this.ws.drain();
-      this.ws.relay(devices, data);
+    const ref = `${meta.f}.${p.b64(p.random(6))}`;
+    const missed = new Set();
+    this.missed.set(ref, missed);
+    try {
+      for (let i = 0; i < meta.n; i++) {
+        const data = await p.encryptChunk(key, meta.f, i, meta.n, bytes.subarray(i * p.CHUNK, (i + 1) * p.CHUNK));
+        await this.ws.drain();
+        this.ws.relay(devices, data, { store, ref });
+      }
+      await this.ws.presence([this.me.device]); // answered after every chunk before it was handled
+    } catch {
+      return devices; // the connection broke: nobody got all of it for certain
+    } finally {
+      this.missed.delete(ref);
     }
+    return [...missed];
+  }
+
+  /** Save which devices still miss a file and keep it on the list of files to offer again. */
+  async settleFile(m) {
+    m.file.missed = [...new Set(m.file.missed)];
+    await this.store.putMessage(m);
+    const rest = this.pendingFiles.filter((x) => x.id !== m.id);
+    if (m.file.missed.length) rest.push({ conv: m.conv, id: m.id, time: m.time });
+    if (rest.length !== this.pendingFiles.length || m.file.missed.length) {
+      this.pendingFiles = rest;
+      await this.store.setSecret("pendingFiles", rest);
+    }
+    this.emit("messages", { conv: m.conv });
+  }
+
+  /** Whether none of the recipient's devices has been given this (outgoing) file yet. */
+  static undelivered(m) {
+    const f = m?.file;
+    return m?.dir === "out" && !!f?.peers?.length && f.peers.every((d) => f.missed?.includes(d));
+  }
+
+  /** Offer files again to the devices that missed them and are connected now. Returns how many devices got one. */
+  async flushFiles() {
+    if (this.flushing || !this.pendingFiles.length || this.status !== "online") return 0;
+    this.flushing = true;
+    let sent = 0;
+    try {
+      for (const entry of [...this.pendingFiles]) {
+        const m = (await this.store.messages(entry.conv)).find((x) => x.id === entry.id);
+        const bytes = m?.file && (await this.store.file(m.file.f));
+        if (!m || !bytes || p.now() - entry.time > FILE_RETRY || !m.file.missed?.length) {
+          this.pendingFiles = this.pendingFiles.filter((x) => x.id !== entry.id);
+          await this.store.setSecret("pendingFiles", this.pendingFiles);
+          continue;
+        }
+        const online = await this.ws.presence(m.file.missed);
+        if (!online.length) continue;
+        const failed = await this.streamFile(m.file, bytes, online);
+        sent += online.length - failed.length;
+        m.file.missed = m.file.missed.filter((d) => !online.includes(d) || failed.includes(d));
+        await this.settleFile(m);
+      }
+    } finally {
+      this.flushing = false;
+    }
+    return sent;
   }
 
   async onFileMeta(m, conv, dir) {
     const b = m.body ?? {};
     if (typeof b.f !== "string" || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.n) || b.size > p.MAX_FILE) return;
-    if (!(await this.store.hasMessage(m.id))) {
+    const fresh = !(await this.store.hasMessage(m.id));
+    if (fresh) {
       const have = await this.store.hasFile(b.f);
       await this.record({ id: m.id, conv, dir, time: m.time, kind: "file", file: { ...b, have }, device: m.from.device });
     }
@@ -595,6 +714,7 @@ export class Messenger extends EventTarget {
     t.message = { id: m.id, conv };
     this.files.set(b.f, t);
     await this.tryAssemble(b.f);
+    return fresh;
   }
 
   async onRelay(f) {
@@ -606,7 +726,13 @@ export class Messenger extends EventTarget {
     }
     if (r.k === "chunk") {
       if (typeof r.f !== "string" || !Number.isSafeInteger(r.i) || !Number.isSafeInteger(r.n) || r.i < 0 || r.i >= r.n || r.n > 4096) return;
-      const t = this.files.get(r.f) ?? { chunks: [], got: 0 };
+      let t = this.files.get(r.f);
+      if (!t && (await this.store.hasFile(r.f))) {
+        if (f.id) this.ws.relayAck([f.id]); // a queued copy of a file we already have
+        return;
+      }
+      t = this.files.get(r.f) ?? t ?? { chunks: [], got: 0 };
+      if (f.id) (t.ids ??= []).push(f.id); // from the server's queue: acknowledged when the file is complete
       if (!t.chunks[r.i]) {
         t.chunks[r.i] = r;
         t.got++;
@@ -633,25 +759,29 @@ export class Messenger extends EventTarget {
   async tryAssemble(f) {
     const t = this.files.get(f);
     if (!t?.meta || t.got < t.meta.n) return;
+    // Complete, good or bad: the server may forget its queued copy.
+    const drop = () => {
+      this.files.delete(f);
+      if (t.ids?.length) this.ws.relayAck(t.ids);
+    };
     const key = p.unb64(t.meta.key);
     const parts = [];
     try {
       for (let i = 0; i < t.meta.n; i++) parts.push(await p.decryptChunk(key, t.chunks[i]));
     } catch {
-      this.files.delete(f);
-      return;
+      return drop();
     }
     const total = parts.reduce((a, b) => a + b.length, 0);
-    if (total !== t.meta.size) return this.files.delete(f);
+    if (total !== t.meta.size) return drop();
     const bytes = new Uint8Array(total);
     let o = 0;
     for (const x of parts) {
       bytes.set(x, o);
       o += x.length;
     }
-    if (p.b64(await p.sha256(bytes)) !== t.meta.sha256) return this.files.delete(f);
+    if (p.b64(await p.sha256(bytes)) !== t.meta.sha256) return drop();
     await this.store.putFile(f, bytes);
-    this.files.delete(f);
+    drop();
     const msgs = await this.store.messages(t.message.conv);
     const m = msgs.find((x) => x.id === t.message.id);
     if (m) {

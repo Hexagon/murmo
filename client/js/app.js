@@ -5,6 +5,7 @@ import { Api, ApiError } from "./api.js";
 import * as id from "./identity.js";
 import { Messenger, Store, setupDevice } from "./core.js";
 import { accounts } from "./store.js";
+import * as notify from "./notify.js";
 import * as rc from "../vendor/rootcard/src/index.js";
 
 const api = new Api(location.origin);
@@ -43,6 +44,9 @@ const ICONS = {
   menu: "M4 6h16M4 12h16M4 18h16",
   shield: "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z",
   more: "M5 12h.01M12 12h.01M19 12h.01",
+  back: "M15 5l-7 7 7 7",
+  plus: "M12 5v14M5 12h14",
+  close: "M6 6l12 12M18 6L6 18",
 };
 
 function icon(name) {
@@ -78,7 +82,9 @@ const MESSAGES = {
   not_accepted: "Konversationen är inte accepterad ännu.",
   fork: "Den här kontaktens enhetslista har ändrats på ett sätt som inte går att verifiera. Kontrollera säkerhetskoden.",
   too_large: "Filen är för stor (högst 100 MB).",
-  offline: "Ingen anslutning till servern just nu.",
+  offline: "Ingen anslutning till servern just nu. Försök igen om en stund.",
+  disconnected: "Anslutningen bröts. Försök igen.",
+  timeout: "Servern svarade inte. Försök igen.",
   unsupported_browser: "Webbläsaren saknar stöd för Ed25519/X25519 i WebCrypto.",
   home_not_allowed: "Den här mesg-servern tar inte emot identiteter från den rootcard-servern.",
   home_unreachable: "Det gick inte att nå rootcard-servern.",
@@ -139,10 +145,24 @@ function dayLabel(t) {
   return d.toLocaleDateString("sv-SE", { day: "numeric", month: "long", year: d.getFullYear() === today.getFullYear() ? undefined : "numeric" });
 }
 
-function greeting(name) {
-  const hr = new Date().getHours();
-  const part = hr < 5 ? "God natt" : hr < 10 ? "God morgon" : hr < 18 ? "Hej" : "God kväll";
-  return `${part}, ${name}`;
+// ── settings of this browser, per account ───────────────────────────────────────────────────────────────────────
+
+const DEFAULTS = { notify: false, fileQueue: true, askedNotify: false };
+
+function settings() {
+  try {
+    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(`mesg-settings:${messenger?.me.account}`) ?? "{}") };
+  } catch {
+    return { ...DEFAULTS };
+  }
+}
+
+function setSetting(k, v) {
+  try {
+    localStorage.setItem(`mesg-settings:${messenger.me.account}`, JSON.stringify({ ...settings(), [k]: v }));
+  } catch {
+    // storage may be unavailable; the setting then keeps its default
+  }
 }
 
 // ── theme: auto (system), light or dark ─────────────────────────────────────────────────────────────────────────
@@ -189,6 +209,79 @@ function homeLabel(home) {
   } catch {
     return home;
   }
+}
+
+// ── how it works ────────────────────────────────────────────────────────────────────────────────────────────────
+
+const FACTS = [
+  "Krypteras i webbläsaren, separat till varje mottagande enhet (X25519 och AES-GCM), och signeras av den skickande enheten (Ed25519).",
+  "Servern håller bara krypterade meddelanden tills de levererats, högst 14 dagar. Ingen historik, inga kontaktlistor.",
+  "Ingen sökning: man når någon bara med exakt identifierare, och första meddelandet är en förfrågan.",
+  "En ny enhet godkänns på en enhet du redan har. Ett lösenord räcker inte.",
+  "Identiteten är en rootcard-identitet. Lösenordet lämnar aldrig webbläsaren.",
+];
+
+/** The short version, for the start page. */
+function about() {
+  return h(
+    "div",
+    { class: "about" },
+    h("ul", {}, FACTS.map((t) => h("li", { text: t }))),
+    h("button", { class: "link", type: "button", text: "Säkerhet och integritet i detalj", onclick: showHelp }),
+  );
+}
+
+const HELP = [
+  ["Kryptering", [
+    "Varje meddelande krypteras på din enhet innan det skickas, en gång för varje enhet som ska läsa det: mottagarens enheter och dina egna andra enheter. Bara de enheterna har nycklarna. Servern, nätverket och den som driver tjänsten ser bara chiffertext.",
+    "Varje meddelande signeras med den skickande enhetens nyckel. Mottagaren kontrollerar att det kommer från en enhet som finns i avsändarens enhetslista och att det var avsett för just den konversationen.",
+    "Nycklarna som tar emot meddelanden byts varje vecka och raderas efter tre veckor. Den som senare stjäl en enhet kan alltså inte läsa äldre inspelad trafik, men meddelanden från de senaste veckorna kan läsas med en stulen, upplåst enhet.",
+  ]],
+  ["Identitet och enheter", [
+    "Du identifieras med en rootcard-identitet, till exempel Namn#TAGG. Lösenordet används bara i webbläsaren för att låsa upp dina nycklar; det skickas aldrig till servern.",
+    "Återställningskortet styr identiteten. Den som har det kan ta över den, så förvara det offline.",
+    "En ny enhet läggs bara till när en av dina befintliga enheter godkänner den, efter att ni jämfört en kod. Ett stulet lösenord räcker alltså inte för att läsa dina meddelanden.",
+    "Säkerhetskoden i en konversation beräknas från båda parters enhetslistor. Är den likadan hos er båda sitter ingen – inte heller servern – mellan er. Koden ändras när någon lägger till eller tar bort en enhet, och du ser då en varning.",
+  ]],
+  ["Vad servern ser och sparar", [
+    "Sparar: din identitet (för konton skapade här), varje kontos lista över enheter med publika nycklar, och krypterade meddelanden tills de hämtats, högst 14 dagar.",
+    "Sparar inte: meddelandehistorik, kontaktlistor, vem du har accepterat eller blockerat, IP-adresser i loggar.",
+    "Ser i stunden: vilken enhet som skickar till vilka enheter, när och hur mycket. Det är ett krav för att leverera, men det skrivs inte ner.",
+    "Den som känner till din identifierare kan se när dina enheter är anslutna (det behövs för att skicka filer direkt).",
+  ]],
+  ["Filer", [
+    "Filer krypteras med en egen nyckel som bara finns i det krypterade meddelandet om filen.",
+    "Är mottagaren ansluten går filen direkt, via servern, utan att sparas. Är den inte ansluten kan servern hålla den krypterad tills mottagaren hämtat den, högst 14 dagar. Det går att stänga av under Konto och inställningar; då skickas filen i stället när ni båda är anslutna samtidigt. Servern ser filens ungefärliga storlek, aldrig namn eller innehåll.",
+  ]],
+  ["Notiser", [
+    "Notiser är av tills du slår på dem, och gäller bara den enhet du gör det på.",
+    "När mesg är stängt skickar servern ett tomt meddelande via webbläsarens pushtjänst (Google, Mozilla eller Apple), som väcker webbläsaren. Pushtjänsten får veta att din webbläsare fick något från den här servern och när – inget om innehåll eller avsändare. Notisen säger bara ”Nytt meddelande”.",
+    "Att väckas gör inte att du visas som ansluten: webbläsaren ansluter inte till servern förrän du öppnar mesg.",
+  ]],
+  ["På din enhet", [
+    "Historik, kontakter och nycklar sparas krypterat i webbläsaren och låses upp med ditt lösenord.",
+    "Med ”Kom ihåg den här enheten” sparar webbläsaren en upplåsningsnyckel, så att mesg öppnas utan lösenord. Den som kommer åt webbläsaren kan då läsa dina meddelanden. Använd det inte på delade datorer.",
+    "Utan någon kvarvarande enhet är historiken borta. Det finns ingen säkerhetskopia på servern.",
+  ]],
+  ["Begränsningar", [
+    "Sidan hämtas från servern. Den som kontrollerar servern kan i princip leverera ändrad kod, och det gäller alla webbappar.",
+    "mesg och rootcard är tidiga versioner som inte har granskats av någon utomstående.",
+    "Krypteringen skyddar inte mot en enhet som redan är infekterad, eller mot någon som tittar på din skärm.",
+  ]],
+];
+
+function showHelp() {
+  const d = dialog(
+    h("h2", { text: "Säkerhet och integritet" }),
+    h(
+      "div",
+      { class: "help" },
+      HELP.map(([title, items]) => h("section", {}, h("h3", { text: title }), h("ul", {}, items.map((t) => h("li", { text: t }))))),
+    ),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: "Stäng", onclick: () => d.close() })),
+  );
+  d.classList.add("wide");
+  d.scrollTop = 0;
 }
 
 // ── start ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -239,6 +332,7 @@ function showAuth(tab = "login", prefill = "") {
         h("h1", { class: "brand" }, h("img", { src: "icon.svg", alt: "" }), "mesg"),
         h("p", { class: "tagline", text: "Krypterade meddelanden mellan dina enheter och dina kontakter." }),
         h("div", { class: "card" }, tabs, body, err),
+        about(),
         h("div", { class: "auth-foot" }, themePicker()),
       ),
     ),
@@ -483,10 +577,14 @@ function showLinkWait(setup, handle) {
 // ── the main view ───────────────────────────────────────────────────────────────────────────────────────────────
 
 async function enter({ store, account, handle, home }) {
-  messenger = new Messenger({ api, store, account, handle, home, realms: info.realms });
-  messenger.addEventListener("contacts", () => renderSidebar());
+  messenger = new Messenger({ api, store, account, handle, home, realms: info.realms, fileQueue: () => settings().fileQueue });
+  messenger.addEventListener("contacts", () => { renderSidebar(); refreshConversation(); });
   messenger.addEventListener("messages", (e) => { if (e.detail.conv === current) renderThread(); renderSidebar(); });
-  messenger.addEventListener("status", () => renderSidebar());
+  messenger.addEventListener("status", (e) => {
+    renderSidebar();
+    if (e.detail === "online") syncPush().catch((x) => console.warn("push", x?.message ?? x));
+  });
+  messenger.addEventListener("incoming", (e) => onIncoming(e.detail));
   messenger.addEventListener("link", (e) => showLinkRequest(e.detail));
   messenger.addEventListener("error", (e) => console.warn(e.detail.message));
   messenger.addEventListener("removed", async () => {
@@ -495,6 +593,64 @@ async function enter({ store, account, handle, home }) {
   });
   await messenger.start();
   renderShell();
+}
+
+// A page that was in the background comes back with a dead connection: check it at once.
+function wake() {
+  if (document.visibilityState !== "visible") return;
+  messenger?.wake();
+  notify.clear().catch(() => {});
+}
+document.addEventListener("visibilitychange", wake);
+addEventListener("pageshow", wake);
+addEventListener("focus", wake);
+addEventListener("online", wake);
+
+// ── notifications ───────────────────────────────────────────────────────────────────────────────────────────────
+
+const unread = new Set(); // conversations with something new since the page was last looked at
+
+function onIncoming({ conv, kind }) {
+  const looking = document.visibilityState === "visible" && document.hasFocus();
+  if (looking && conv === current) return;
+  unread.add(conv);
+  renderSidebar();
+  if (looking || !settings().notify) return;
+  const who = messenger.contacts.get(conv)?.handle ?? "någon";
+  const text = kind === "request" ? `Ny förfrågan från ${who}` : kind === "file" ? `Ny fil från ${who}` : `Nytt meddelande från ${who}`;
+  notify.show(text).catch(() => {});
+}
+
+/** Keep the server's push endpoint for this device in step with the setting. */
+async function syncPush() {
+  if (!messenger || !settings().notify || notify.permission() !== "granted") return;
+  const endpoint = await notify.pushEndpoint(info.push_key);
+  if (endpoint) await messenger.setPushEndpoint(endpoint);
+}
+
+/** Turn notifications on (from a click) or off. Returns a text for the user. */
+async function setNotifications(on) {
+  if (!on) {
+    setSetting("notify", false);
+    await notify.unsubscribe().catch(() => {});
+    await messenger.setPushEndpoint(null).catch(() => {});
+    return "Notiser är av.";
+  }
+  const s = notify.support();
+  if (s === "ios-install") return "På iPhone och iPad fungerar notiser när mesg ligger på hemskärmen: välj Dela → Lägg till på hemskärmen och slå på notiser där.";
+  if (s !== "ok") return "Den här webbläsaren stöder inte notiser.";
+  const r = await notify.request();
+  if (r !== "granted") return r === "denied" ? "Notiser är blockerade för den här sidan. Tillåt dem i webbläsarens inställningar för sidan och försök igen." : "Notiser slogs inte på.";
+  setSetting("notify", true);
+  try {
+    const endpoint = await notify.pushEndpoint(info.push_key);
+    if (!endpoint) return "Notiser är på medan mesg är öppet i bakgrunden. Den här webbläsaren eller servern stöder inte push, så en stängd app väcks inte.";
+    await messenger.setPushEndpoint(endpoint);
+    return "Notiser är på, även när mesg är stängt.";
+  } catch (x) {
+    console.warn("push", x?.message ?? x);
+    return "Notiser är på medan mesg är öppet i bakgrunden. Push gick inte att slå på just nu, så en stängd app väcks inte.";
+  }
 }
 
 const ui = {};
@@ -509,8 +665,12 @@ function renderShell() {
     h(
       "aside",
       { class: "sidebar" },
-      h("div", { class: "side-top" }, h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "mesg")),
-      h("button", { class: "btn newchat", onclick: () => openConversation(null) }, h("span", { class: "plus", text: "+" }), "Ny konversation"),
+      h(
+        "div",
+        { class: "side-top" },
+        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "mesg"),
+        h("button", { class: "icon-btn", "aria-label": "Ny konversation", title: "Ny konversation", onclick: () => openConversation(null, true) }, icon("plus")),
+      ),
       ui.sideList,
       ui.foot,
     ),
@@ -522,7 +682,7 @@ function renderShell() {
 }
 
 function renderSidebar() {
-  if (!ui.sideList) return;
+  if (!ui.sideList || !messenger) return;
   const all = messenger.contactList().sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
   const incoming = all.filter((c) => c.state === "incoming");
   const convs = all.filter((c) => c.state === "accepted" || c.state === "outgoing");
@@ -531,10 +691,12 @@ function renderSidebar() {
     const [name, tag] = splitHandle(c.handle);
     return h(
       "button",
-      { class: `conv${c.account === current ? " on" : ""}`, onclick: () => { openConversation(c.account); ui.shell.classList.remove("open"); } },
+      { class: `conv${c.account === current ? " on" : ""}`, onclick: () => openConversation(c.account) },
+      h("span", { class: "avatar small", text: name.slice(0, 1).toUpperCase() }),
       h("span", { class: "name" }, name, h("span", { class: "tag", text: tag })),
       c.state === "incoming" ? h("span", { class: "badge", text: "ny" }) : null,
       c.state === "outgoing" ? h("span", { class: "badge muted", text: "väntar" }) : null,
+      c.state === "accepted" && unread.has(c.account) ? h("span", { class: "unread", "aria-label": "Oläst" }) : null,
       c.fork ? h("span", { class: "badge", text: "!" }) : null,
     );
   };
@@ -542,7 +704,9 @@ function renderSidebar() {
     incoming.length ? h("div", { class: "side-head", text: "Förfrågningar" }) : null,
     ...incoming.map(item),
     h("div", { class: "side-head", text: "Konversationer" }),
-    ...(convs.length ? convs.map(item) : [h("div", { class: "hint", style: "padding:4px 10px", text: "Inga ännu." })]),
+    ...(convs.length
+      ? convs.map(item)
+      : [h("div", { class: "empty" }, h("p", { class: "hint", text: "Inga konversationer ännu." }), h("button", { class: "btn primary", text: "Ny konversation", onclick: () => openConversation(null, true) }), about())]),
     blocked.length ? h("div", { class: "side-head", text: "Blockerade" }) : null,
     ...blocked.map(item),
   );
@@ -555,33 +719,79 @@ function renderSidebar() {
       h("div", { class: "h", text: messenger.handle, title: "Klicka för att kopiera", onclick: () => navigator.clipboard?.writeText(messenger.handle).then(() => toast("Identifieraren kopierad.")) }),
       h("div", { class: "s" }, h("span", { class: `dot${messenger.status === "online" ? " on" : ""}` }), messenger.status === "online" ? "Ansluten" : "Ansluter…", homeLabel(messenger.home) ? ` · ${homeLabel(messenger.home)}` : ""),
     ),
-    h("button", { class: "icon-btn", "aria-label": "Konto", title: "Konto", onclick: showAccountMenu }, icon("more")),
+    h("button", { class: "icon-btn", "aria-label": "Konto och inställningar", title: "Konto och inställningar", onclick: showAccountMenu }, icon("more")),
   );
 }
+
+// On a narrow screen the list of conversations is the start page and a conversation covers it; the browser's back
+// button (and the arrow) lead back to the list.
+let pushed = false;
+function closeConversation() {
+  if (pushed) history.back();
+  else openConversation(null);
+}
+addEventListener("popstate", () => {
+  // Back with a dialog open (a picture, a menu) closes the dialog and stays where it was.
+  const open = document.querySelector("dialog[open]");
+  if (open) {
+    open.close();
+    if (ui.shell?.classList.contains("chat")) history.pushState({ mesg: 1 }, "");
+    return;
+  }
+  pushed = false;
+  if (messenger && ui.shell) openConversation(null);
+});
 
 function topbar(...children) {
   return h(
     "div",
     { class: "topbar" },
-    h("button", { class: "icon-btn menu-btn", "aria-label": "Meny", onclick: () => ui.shell.classList.toggle("open") }, icon("menu")),
+    h("button", { class: "icon-btn back-btn", "aria-label": "Tillbaka till konversationerna", onclick: closeConversation }, icon("back")),
     ...children,
   );
 }
 
-function openConversation(account) {
-  current = account;
+/** What of a contact decides how its conversation is drawn (besides the messages). */
+function shape(c) {
+  return c ? `${c.account}|${c.state}|${!!c.fork}|${c.devicesChanged ?? 0}` : "";
+}
+
+/** The open contact changed (a request was accepted, a block, new devices): draw the conversation again. */
+function refreshConversation() {
+  if (!current || !ui.main) return;
+  const c = messenger.contacts.get(current);
+  if (shape(c) === ui.shape) return;
+  const draft = ui.main.querySelector(".composer textarea")?.value ?? "";
+  openConversation(c && c.state !== "declined" ? current : null);
+  const ta = ui.main.querySelector(".composer textarea");
+  if (ta && draft) {
+    ta.value = draft;
+    ta.dispatchEvent(new Event("input"));
+  }
+}
+
+/** Open a conversation, or with `null` the start (`form`: the new-conversation form, also on a narrow screen). */
+function openConversation(account, form = false) {
+  current = account && messenger.contacts.has(account) ? account : null;
   for (const u of objectUrls.values()) URL.revokeObjectURL(u);
   objectUrls.clear();
+  const covering = !!current || form;
+  ui.shell.classList.toggle("chat", covering);
+  if (covering && !pushed) {
+    history.pushState({ mesg: 1 }, "");
+    pushed = true;
+  }
+  if (current) unread.delete(current);
   renderSidebar();
-  if (!account) return renderWelcome();
-  const c = messenger.contacts.get(account);
+  const c = current && messenger.contacts.get(current);
+  ui.shape = shape(c);
   if (!c) return renderWelcome();
   const [name, tag] = splitHandle(c.handle);
   ui.thread = h("div", { class: "thread" });
   ui.scroll = h("div", { class: "scroll" }, ui.thread);
   const head = topbar(
     h("div", { class: "title" }, name, h("span", { class: "tag", text: tag }), homeLabel(c.home) ? h("span", { class: "home", text: ` · ${homeLabel(c.home)}` }) : null),
-    c.state === "accepted" ? h("button", { class: "btn ghost small", onclick: () => showSafety(c) }, icon("shield"), "Säkerhetskod") : null,
+    c.state === "accepted" ? h("button", { class: "btn ghost small", onclick: () => showSafety(c) }, icon("shield"), h("span", { class: "wide", text: "Säkerhetskod" })) : null,
     h("button", { class: "icon-btn", "aria-label": "Fler val", onclick: () => showContactMenu(c) }, icon("more")),
   );
   const parts = [head];
@@ -595,6 +805,7 @@ function openConversation(account) {
   else if (c.state === "blocked") parts.push(h("div", { class: "request-box" }, h("span", { text: "Blockerad. " }), h("button", { class: "btn small", text: "Häv blockering", onclick: () => messenger.setState(c.account, "accepted").then(() => openConversation(c.account)) })));
   else parts.push(composer(c));
   put(ui.main,...parts);
+  renderSeq = 0;
   renderThread();
 }
 
@@ -615,44 +826,65 @@ function requestBox(c) {
   );
 }
 
+/** The start of the main pane: add a conversation by exact identifier. */
 function renderWelcome() {
-  const [name] = splitHandle(messenger.handle);
-  const input = h("textarea", { rows: 1, placeholder: "Skriv en identifierare, till exempel Alice#3F9C", spellcheck: "false" });
-  const note = h("input", { class: "input", placeholder: "Valfri hälsning (skickas med förfrågan)", maxlength: 500, style: "margin-top:10px" });
-  const err = h("div", { class: "error", style: "margin-top:8px" });
-  const send = h("button", { class: "send", "aria-label": "Skicka förfrågan" }, icon("send"));
-  const go = async () => {
-    err.textContent = "";
-    if (!input.value.trim()) return;
-    send.disabled = true;
-    try {
-      const c = await messenger.request(input.value.trim(), note.value.trim());
-      openConversation(c.account);
-    } catch (x) {
-      err.textContent = say(x);
-      send.disabled = false;
-    }
-  };
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); go(); } });
-  note.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
-  send.addEventListener("click", go);
+  ui.thread = null;
+  const input = h("input", { class: "input", id: "new-handle", placeholder: "Namn#TAGG", spellcheck: "false", autocomplete: "off", autocapitalize: "off", enterkeyhint: "next" });
+  const note = h("input", { class: "input", id: "new-note", placeholder: "Hej, det är jag!", maxlength: 500, enterkeyhint: "send" });
+  const err = h("div", { class: "error" });
+  const send = h("button", { class: "btn primary", type: "submit", text: "Skicka förfrågan" });
+  const copy = () => navigator.clipboard?.writeText(messenger.handle).then(() => toast("Identifieraren kopierad."));
+  const form = h(
+    "form",
+    {
+      class: "card newconv",
+      onsubmit: async (e) => {
+        e.preventDefault();
+        err.textContent = "";
+        if (!input.value.trim()) return input.focus();
+        send.disabled = true;
+        try {
+          const c = await messenger.request(input.value.trim(), note.value.trim());
+          openConversation(c.account);
+        } catch (x) {
+          err.textContent = say(x);
+          send.disabled = false;
+        }
+      },
+    },
+    h("h1", { text: "Ny konversation" }),
+    h("p", { class: "hint", text: "Skriv personens identifierare exakt. Det går inte att söka, och mottagaren måste acceptera innan ni kan skriva till varandra." }),
+    h("div", { class: "field" }, h("label", { for: "new-handle", text: "Identifierare" }), input),
+    h("div", { class: "field" }, h("label", { for: "new-note", text: "Hälsning (valfri, skickas med förfrågan)" }), note),
+    err,
+    send,
+  );
+  const asked = settings().askedNotify || settings().notify || notify.support() !== "ok" || notify.permission() === "denied";
+  const offer = asked
+    ? null
+    : h(
+        "div",
+        { class: "card offer" },
+        h("div", {}, h("strong", { text: "Notiser" }), h("div", { class: "hint", text: "Få veta när någon skriver, även när mesg är stängt." })),
+        h("button", { class: "btn small", text: "Inte nu", onclick: () => { setSetting("askedNotify", true); offer.remove(); } }),
+        h("button", { class: "btn small primary", text: "Slå på", onclick: async () => { setSetting("askedNotify", true); offer.remove(); toast(await setNotifications(true)); } }),
+      );
   put(ui.main,
-    topbar(h("div", { class: "title" })),
+    topbar(h("div", { class: "title", text: "Ny konversation" })),
     h(
       "div",
       { class: "welcome" },
       h(
         "div",
         { class: "welcome-inner" },
-        h("h1", { text: greeting(name) }),
-        h("div", { class: "composer" }, input, h("div", { class: "row" }, h("span", { class: "grow", text: "Ny konversation – mottagaren måste acceptera innan ni kan skriva." }), send)),
-        note,
-        err,
-        h("p", { class: "hint", style: "margin-top:18px" }, "Din identifierare är ", h("strong", { text: messenger.handle }), ". Dela den med dem du vill höra av." ),
+        form,
+        h("div", { class: "card mine" }, h("div", {}, h("div", { class: "hint", text: "Din identifierare – dela den med dem du vill höra av" }), h("strong", { text: messenger.handle })), h("button", { class: "btn small", text: "Kopiera", onclick: copy })),
+        offer,
+        about(),
       ),
     ),
   );
-  input.focus();
+  if (matchMedia("(min-width: 761px)").matches || ui.shell.classList.contains("chat")) input.focus();
 }
 
 function composer(c) {
@@ -680,8 +912,10 @@ function composer(c) {
   const sendFiles = async (files) => {
     for (const f of files) {
       try {
-        const n = await messenger.sendFile(c.account, f);
-        toast(n ? `${f.name} skickad till ${n} ansluten${n === 1 ? "" : "a"} enhet${n === 1 ? "" : "er"}.` : `${f.name}: ingen mottagarenhet var ansluten, så filen överfördes inte.`);
+        const r = await messenger.sendFile(c.account, f);
+        if (r.live) toast(`${f.name} skickad.`);
+        else if (r.queued) toast(`${f.name} väntar krypterad på servern tills mottagaren ansluter.`);
+        else toast(`${f.name} är inte skickad än: mottagaren är inte ansluten. Den skickas när ni båda är anslutna.`);
       } catch (x) {
         toast(say(x));
       }
@@ -702,17 +936,17 @@ function composer(c) {
     h(
       "div",
       { class: "row" },
-      h("button", { class: "icon-btn", "aria-label": "Bifoga fil", title: "Skicka fil (bara till enheter som är anslutna nu)", onclick: () => file.click() }, icon("clip")),
+      h("button", { class: "icon-btn", "aria-label": "Bifoga fil", title: "Skicka fil", onclick: () => file.click() }, icon("clip")),
       h("span", { class: "grow" }),
       send,
     ),
     file,
   );
-  const wrap = h("div", { class: "composer-wrap" }, box, h("div", { class: "foot-note", text: "Krypterat från enhet till enhet. Servern sparar inga meddelanden efter leverans och aldrig filer." }));
+  const wrap = h("div", { class: "composer-wrap" }, box, h("div", { class: "foot-note", text: "Krypterat från enhet till enhet. Servern sparar inget efter leverans." }));
   wrap.addEventListener("dragover", (e) => { e.preventDefault(); box.classList.add("drop"); });
   wrap.addEventListener("dragleave", () => box.classList.remove("drop"));
   wrap.addEventListener("drop", (e) => { e.preventDefault(); box.classList.remove("drop"); sendFiles([...e.dataTransfer.files]); });
-  setTimeout(() => ta.focus());
+  if (matchMedia("(hover: hover)").matches) setTimeout(() => ta.focus()); // not on touch: it would open the keyboard
   return wrap;
 }
 
@@ -742,7 +976,34 @@ async function renderThread() {
 function message(m) {
   const body = m.kind === "file" ? fileView(m) : h("div", { class: "body", text: m.text ?? "" });
   const media = m.kind === "file" ? " media" : "";
-  return h("div", { class: `msg ${m.dir}${media}` }, body, h("div", { class: "meta", text: clock(m.time) }));
+  const meta = h("div", { class: "meta", text: clock(m.time) });
+  if (Messenger.undelivered(m)) {
+    meta.append(
+      h("span", { class: "pending", text: " · Inte skickad än – skickas när mottagaren är ansluten " }),
+      h("button", {
+        class: "link",
+        text: "Försök nu",
+        onclick: async () => {
+          try {
+            toast((await messenger.flushFiles()) ? "Skickad." : "Mottagaren är inte ansluten just nu.");
+          } catch (x) {
+            toast(say(x));
+          }
+        },
+      }),
+    );
+  }
+  return h("div", { class: `msg ${m.dir}${media}` }, body, meta);
+}
+
+/** A picture full size: closed by the cross, a tap anywhere, Escape or the back button. */
+function showImage(url, name) {
+  const d = dialog(
+    h("button", { class: "close", "aria-label": "Stäng", title: "Stäng", onclick: () => d.close() }, icon("close")),
+    h("img", { src: url, alt: name }),
+  );
+  d.classList.add("viewer");
+  d.addEventListener("click", () => d.close());
 }
 
 function fileView(m) {
@@ -757,7 +1018,7 @@ function fileView(m) {
         if (ui.scroll && ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < img.height + 160) ui.scroll.scrollTop = ui.scroll.scrollHeight;
       });
       img.src = url;
-      img.addEventListener("click", () => dialog(h("img", { src: url, alt: f.name })).classList.add("viewer"));
+      img.addEventListener("click", () => showImage(url, f.name));
     });
     return img;
   }
@@ -766,7 +1027,7 @@ function fileView(m) {
     : h("button", {
         class: "btn small",
         text: "Hämta från mina enheter",
-        title: "Filen överfördes bara till enheter som var anslutna. Den här frågar dina andra anslutna enheter.",
+        title: "Filen har inte kommit till den här enheten. Den här frågar dina andra anslutna enheter.",
         onclick: async () => {
           try {
             const n = await messenger.fetchFromOwnDevices(current, f.f);
@@ -780,7 +1041,7 @@ function fileView(m) {
     "div",
     { class: "filecard" },
     h("div", { class: "ico", text: (f.name.split(".").pop() || "fil").slice(0, 4).toUpperCase() }),
-    h("div", { class: "fi" }, h("div", { class: "fn", text: f.name }), h("div", { class: "fs", text: f.have ? bytes(f.size) : `${bytes(f.size)} · inte mottagen på den här enheten` })),
+    h("div", { class: "fi" }, h("div", { class: "fn", text: f.name }), h("div", { class: "fs", text: f.have ? bytes(f.size) : `${bytes(f.size)} · ${m.dir === "in" ? "inte mottagen än" : "inte mottagen på den här enheten"}` })),
     action,
   );
 }
@@ -847,6 +1108,18 @@ function showLinkRequest({ request, code }) {
 }
 
 function showAccountMenu() {
+  const s = settings();
+  const notice = h("input", { type: "checkbox", checked: s.notify && notify.permission() === "granted" });
+  const noticeHint = h("span", { class: "hint", style: "display:block", text: "Visar bara att något har kommit och från vem – aldrig innehållet. När mesg är stängt väcker servern webbläsaren via dess pushtjänst (Google, Mozilla eller Apple) med ett tomt meddelande: tjänsten får veta att den här webbläsaren fick något från den här servern och när, inget mer." });
+  notice.addEventListener("change", async () => {
+    notice.disabled = true;
+    const text = await setNotifications(notice.checked).catch((x) => say(x));
+    notice.checked = settings().notify;
+    notice.disabled = false;
+    toast(text);
+  });
+  const queue = h("input", { type: "checkbox", checked: s.fileQueue, disabled: !info.file_queue });
+  queue.addEventListener("change", () => setSetting("fileQueue", queue.checked));
   const d = dialog(
     h("h2", { text: messenger.handle }),
     h("p", { class: "hint", text: `Din identifierare${homeLabel(messenger.home) ? ` (från ${homeLabel(messenger.home)})` : ""}. Den som vill nå dig behöver den exakt – det går inte att söka efter användare.` }),
@@ -855,6 +1128,19 @@ function showAccountMenu() {
       { style: "display:flex;flex-direction:column;gap:8px" },
       h("button", { class: "btn", text: "Kopiera identifierare", onclick: () => navigator.clipboard?.writeText(messenger.handle).then(() => { toast("Identifieraren kopierad."); d.close(); }) }),
       h("button", { class: "btn", text: "Enheter", onclick: () => { d.close(); showDevices(); } }),
+      h("button", { class: "btn", text: "Säkerhet och integritet", onclick: () => { d.close(); showHelp(); } }),
+      h("label", { class: "check" }, notice, h("span", {}, "Notiser på den här enheten", noticeHint)),
+      h(
+        "label",
+        { class: "check" },
+        queue,
+        h(
+          "span",
+          {},
+          "Låt servern hålla filer åt mottagare som inte är anslutna",
+          h("span", { class: "hint", style: "display:block", text: info.file_queue ? "Filen ligger krypterad på servern tills mottagarens enhet hämtat den, högst 14 dagar. Servern ser storlek och tidpunkt men inte innehåll eller namn. Av: filer går bara direkt mellan anslutna enheter och skickas annars när ni båda är anslutna." : "Avstängt på den här servern: filer går bara direkt mellan anslutna enheter." }),
+        ),
+      ),
       h("div", { class: "field", style: "margin:6px 0 0" }, h("label", { text: "Tema" }), themePicker()),
       h("button", { class: "btn danger", text: "Logga ut", onclick: () => { d.close(); logout(false); } }),
     ),
@@ -902,6 +1188,12 @@ async function showDevices() {
 
 async function logout(forget) {
   const account = messenger?.me.account;
+  if (messenger && settings().notify) {
+    // A logged-out device is not woken any more.
+    await notify.unsubscribe().catch(() => {});
+    await messenger.setPushEndpoint(null).catch(() => {});
+    setSetting("notify", false);
+  }
   messenger?.stop();
   messenger = null;
   current = null;

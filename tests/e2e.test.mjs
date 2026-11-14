@@ -10,6 +10,7 @@ import "fake-indexeddb/auto";
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +29,14 @@ let server, other, info;
 const api = new Api(ORIGIN);
 const otherApi = new Api(OTHER);
 const running = [];
+// A stand-in for a browser push service: records the wake-ups the server sends.
+const pushes = [];
+const PUSH_PORT = PORT + 2000;
+const pushService = createServer((req, res) => {
+  pushes.push({ url: req.url, auth: req.headers.authorization ?? "", ttl: req.headers.ttl });
+  req.resume();
+  res.writeHead(201).end();
+});
 
 function start(origin, port, name, extra = {}) {
   const bin = new URL("../target/debug/mesg-server", import.meta.url).pathname;
@@ -53,7 +62,8 @@ async function up(a) {
 }
 
 before(async () => {
-  server = start(ORIGIN, PORT, "mesg", { MESG_REMOTE_HOMES: OTHER });
+  await new Promise((r) => pushService.listen(PUSH_PORT, "127.0.0.1", r));
+  server = start(ORIGIN, PORT, "mesg", { MESG_REMOTE_HOMES: OTHER, MESG_PUSH_HOSTS: `http://127.0.0.1:${PUSH_PORT}` });
   other = start(OTHER, PORT + 1000, "other", { MESG_REMOTE_HOMES: "" });
   await up(api);
   await up(otherApi);
@@ -64,6 +74,7 @@ after(() => {
   for (const m of running) m.stop();
   server?.kill();
   other?.kill();
+  pushService.close();
 });
 
 function waitFor(target, type, pred = () => true, ms = 15000) {
@@ -200,27 +211,32 @@ test("link a second device: approval on the first, history handed over", async (
   await until(async () => (await alice2.messages(bob.me.account)).some((m) => m.text === "Från laptopen" && m.dir === "out"));
 });
 
-test("files go live to connected devices only, and own devices federate later", async () => {
+test("files go live to connected devices, wait for absent ones, and own devices federate later", async () => {
   const data = noise(150_000);
   const file = new File([data], "bild.png", { type: "image/png" });
   const bobGot = waitFor(bob, "file");
   const alice2Got = waitFor(alice2, "file");
   alice.lists.clear();
-  const n = await alice.sendFile(bob.me.account, file);
-  assert.equal(n, 2); // Bob's device and Alice's second device
+  const r = await alice.sendFile(bob.me.account, file);
+  assert.deepEqual(r, { live: 1, queued: 0, waiting: 0 }); // Bob's device (Alice's second device got it too)
   const { f } = await bobGot;
   await alice2Got;
   assert.deepEqual(await bob.store.file(f), data);
   assert.deepEqual(await alice2.store.file(f), data);
 
-  // Alice's second device goes offline; a new file reaches only Bob's connected device.
+  // Alice's second device goes offline and the server may not keep files (the setting is off): a new file reaches
+  // only Bob's connected device, and the second device is noted as still missing it.
   alice2.ws.close();
   await new Promise((r) => setTimeout(r, 300));
+  alice.fileQueue = () => false;
   const data2 = noise(70_000);
   const bobGot2 = waitFor(bob, "file");
-  const n2 = await alice.sendFile(bob.me.account, new File([data2], "dok.pdf", { type: "application/pdf" }));
-  assert.equal(n2, 1);
+  const r2 = await alice.sendFile(bob.me.account, new File([data2], "dok.pdf", { type: "application/pdf" }));
+  assert.deepEqual(r2, { live: 1, queued: 0, waiting: 0 });
   const { f: f2 } = await bobGot2;
+  const sent2 = (await alice.messages(bob.me.account)).find((m) => m.file?.f === f2);
+  assert.deepEqual(sent2.file.missed, [alice2.me.device]);
+  alice.fileQueue = () => true;
 
   // Back online, the second device knows the file but has no content; it asks its own devices.
   alice2.stop();
@@ -239,6 +255,53 @@ test("files go live to connected devices only, and own devices federate later", 
   assert.equal(await a2.fetchFromOwnDevices(bob.me.account, f2), 1);
   await fed;
   assert.deepEqual(await a2.store.file(f2), data2);
+
+  // A file for a recipient that is not connected waits, encrypted, on the server and arrives when it connects.
+  bob.ws.close();
+  await new Promise((r) => setTimeout(r, 300));
+  const data3 = noise(120_000);
+  const r3 = await alice.sendFile(bob.me.account, new File([data3], "foto.jpg", { type: "image/jpeg" }));
+  assert.deepEqual(r3, { live: 0, queued: 1, waiting: 0 });
+  const db = new DatabaseSync(DB, { readOnly: true });
+  assert.ok(db.prepare("SELECT COUNT(*) AS n FROM relay_queue").get().n > 0);
+  db.close();
+  const sent3 = (await alice.messages(bob.me.account)).find((m) => m.file?.name === "foto.jpg");
+  assert.equal(Messenger.undelivered(sent3), false);
+  clearInterval(bob.retryTimer);
+  const bobGot3 = waitFor(bob, "file", (d) => d.f === sent3.file.f, 20000);
+  const back = waitFor(bob, "status", (s) => s === "online");
+  await bob.start();
+  await back;
+  await bobGot3;
+  assert.deepEqual(await bob.store.file(sent3.file.f), data3);
+  await until(() => {
+    const d = new DatabaseSync(DB, { readOnly: true });
+    const n = d.prepare("SELECT COUNT(*) AS n FROM relay_queue").get().n;
+    d.close();
+    return n === 0;
+  });
+});
+
+test("a message to a device that is away wakes it with an empty push", async () => {
+  assert.ok(info.push_key, "the server offers push");
+  await bob.setPushEndpoint(`http://127.0.0.1:${PUSH_PORT}/sub/bob`);
+  await assert.rejects(bob.setPushEndpoint("https://evil.example/sub"), /push_host_not_allowed/);
+  bob.ws.close();
+  await new Promise((r) => setTimeout(r, 300));
+  const before = pushes.length;
+  await alice.sendText(bob.me.account, "Är du där?");
+  await until(() => pushes.length > before, 10000);
+  const push = pushes.at(-1);
+  assert.equal(push.url, "/sub/bob");
+  assert.match(push.auth, /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]{87}$/);
+  // Alice's own devices are not woken for her own messages.
+  assert.ok(pushes.slice(before).every((x) => x.url === "/sub/bob"));
+  clearInterval(bob.retryTimer);
+  const back = waitFor(bob, "status", (s) => s === "online");
+  await bob.start();
+  await back;
+  await until(async () => (await bob.messages(alice.me.account)).some((m) => m.text === "Är du där?"));
+  await bob.setPushEndpoint(null);
 });
 
 test("an identity from another rootcard home (like rootcard.org) logs in and talks", async () => {
@@ -280,5 +343,14 @@ test("the server keeps no delivered messages and no files", async () => {
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name).sort();
   db.close();
   assert.equal(left, 0);
-  assert.deepEqual(tables, ["changes", "device_lists", "identities", "mailbox", "prekeys", "remote_ids", "sqlite_sequence"]);
+  const queued = db2count("relay_queue");
+  assert.equal(queued, 0);
+  assert.deepEqual(tables, ["changes", "device_lists", "identities", "mailbox", "prekeys", "push_subs", "relay_queue", "remote_ids", "settings", "sqlite_sequence"]);
 });
+
+function db2count(table) {
+  const db = new DatabaseSync(DB, { readOnly: true });
+  const n = db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+  db.close();
+  return n;
+}

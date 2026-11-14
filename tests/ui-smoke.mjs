@@ -52,8 +52,8 @@ try {
   const bobHandle = await register(b, "Bob", "b");
   console.log("handles", aliceHandle, bobHandle);
   // Alice requests Bob by exact identifier.
-  await a.type(".welcome textarea", bobHandle);
-  await a.type(".welcome input", "Hej Bob! Det är Alice.");
+  await a.type("#new-handle", bobHandle);
+  await a.type("#new-note", "Hej Bob! Det är Alice.");
   await a.keyboard.press("Enter");
   await a.waitForSelector(".topbar .title .tag", { timeout: 20000 });
   await sleep(500);
@@ -65,6 +65,8 @@ try {
   await b.screenshot({ path: `${shots}/b-5-request.png` });
   await clickText(b, "Acceptera");
   await b.waitForSelector(".composer textarea", { timeout: 20000 });
+  // Alice's open conversation turns into a chat by itself once Bob accepts (no reload).
+  await a.waitForSelector(".composer textarea", { timeout: 20000 });
   await b.type(".composer textarea", "Hej Alice! Kul att höras.\nAndra raden.");
   await b.keyboard.press("Enter");
   // Alice opens the conversation and replies; sends an image.
@@ -84,6 +86,12 @@ try {
   await ch2.accept([`${shots}/sample.png`]);
   await b.waitForSelector(".msg img.inline", { timeout: 20000 });
   await sleep(1000);
+  // The picture opens full size and closes with the cross.
+  await b.click(".msg img.inline");
+  await b.waitForSelector("dialog.viewer .close", { visible: true, timeout: 5000 });
+  await b.screenshot({ path: `${shots}/b-6b-viewer.png` });
+  await b.click("dialog.viewer .close");
+  await b.waitForFunction(() => !document.querySelector("dialog.viewer"), { timeout: 5000 });
   await a.screenshot({ path: `${shots}/a-6-chat.png` });
   await b.screenshot({ path: `${shots}/b-6-chat.png` });
   await clickText(b, "Säkerhetskod");
@@ -100,6 +108,21 @@ try {
   await b.setViewport({ width: 400, height: 760 });
   await sleep(300);
   await b.screenshot({ path: `${shots}/b-8-dark-mobile.png` });
+  // On a phone the start page is the list of conversations; back leads there from a conversation.
+  await b.goBack();
+  await b.waitForFunction(() => getComputedStyle(document.querySelector(".sidebar")).display !== "none" && getComputedStyle(document.querySelector(".main")).display === "none", { timeout: 5000 });
+  await b.screenshot({ path: `${shots}/b-9-mobile-list.png` });
+  await b.click(".side-top .icon-btn");
+  await b.waitForSelector("#new-handle", { visible: true, timeout: 5000 });
+  await b.screenshot({ path: `${shots}/b-10-mobile-new.png` });
+  await clickText(b, "Säkerhet och integritet i detalj");
+  await b.waitForSelector("dialog .help", { timeout: 5000 });
+  await b.screenshot({ path: `${shots}/b-11-help.png` });
+  await b.keyboard.press("Escape");
+  // A page that comes back from the background reconnects at once.
+  await a.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await sleep(500);
+  await a.waitForFunction(() => document.querySelector(".me .s")?.textContent.includes("Ansluten"), { timeout: 10000 });
   if (codeA !== codeB) throw new Error("safety codes differ");
 } catch (e) {
   console.log("FAILED", e.message);
