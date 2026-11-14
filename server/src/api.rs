@@ -136,7 +136,9 @@ fn client_build(dir: &str) -> Option<String> {
     if dir.is_empty() {
         return None;
     }
-    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((at, build)) = cache.as_ref()
         && at.elapsed() < Duration::from_secs(30)
     {
