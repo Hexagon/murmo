@@ -231,18 +231,18 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .thread { width: min(768px, calc(100% - 32px)); margin: 0 auto; padding: 12px 0 24px; display: flex; flex-direction: column; gap: 6px; }
 .day { align-self: center; font-size: 12px; color: var(--faint); }
 
-/* a message: received ones stand free on the left, sent ones in a bubble on the right */
+/* a message: received ones in a bubble on the left, sent ones in a tinted bubble on the right */
 .msg { position: relative; max-width: 85%; white-space: pre-wrap; overflow-wrap: anywhere; }
-.msg.in { align-self: flex-start; }
+.msg.in { align-self: flex-start; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line); padding: 6px 10px 7px; border-radius: 14px 14px 14px 4px; }
 .msg.in + .msg.out, .msg.out + .msg.in { margin-top: 4px; } /* extra breathing room when the sender changes */
 .msg .body, .msg .fn { unicode-bidi: isolate; } /* text from others cannot reorder what is around it */
 .msg.out { align-self: flex-end; background: var(--bubble); padding: 6px 10px 7px; border-radius: 14px 14px 4px 14px; }
 .msg.found { outline: 2px solid transparent; outline-offset: 4px; border-radius: 14px; animation: found 2.5s ease-out; }
 @keyframes found { 0%, 40% { outline-color: var(--accent); } 100% { outline-color: transparent; } }
 @media (prefers-reduced-motion: reduce) { .msg.found { animation: none; outline-color: var(--accent); } }
-.msg.out.media { background: transparent; padding: 0; }
+.msg.media { background: transparent; box-shadow: none; padding: 0; }
 .msg .body.jumbo { font-size: 40px; line-height: 1.2; }
-.msg.out:has(.body.jumbo) { background: transparent; padding: 0; }
+.msg:has(.body.jumbo) { background: transparent; box-shadow: none; padding: 0; }
 .msg.retracted .body { font-style: italic; color: var(--muted); }
 
 /* the time and what goes with it */
@@ -321,7 +321,7 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .msg .meta .fuse-wrap { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; vertical-align: -2px; line-height: 1; color: var(--accent); font-variant-numeric: tabular-nums; }
 .msg .meta .fuse-wrap.waiting { color: var(--faint); }
 .msg .meta .fuse-wrap svg { flex: none; }
-.msg.ephemeral.out { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+.msg.ephemeral { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
 /* The last 3 s (DISSOLVE in app.js): fade and blur away, then the row folds so the thread closes up. */
 .msg.dissolve { overflow: hidden; animation: dissolve 3s ease-in forwards; pointer-events: none; }
 @keyframes dissolve {
@@ -386,6 +386,7 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .upload progress::-webkit-progress-bar { background: var(--line); }
 .upload progress::-webkit-progress-value { background: var(--accent); transition: width .2s; }
 .upload progress::-moz-progress-bar { background: var(--accent); }
+.upload .note { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
 .upload .mark { width: 16px; text-align: center; font-weight: 700; }
 .upload.ok .mark { color: var(--ok); }
 .upload.wait .mark { color: var(--muted); }

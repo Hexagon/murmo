@@ -111,6 +111,20 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
     if !env!("MURMO_COMMIT").is_empty() {
         m.insert("commit", env!("MURMO_COMMIT").into());
     }
+    if app.cfg.file_queue > 0 {
+        // Bytes of queued chunk text (encrypted chunks as sent), not of the file itself: the client knows how much
+        // a file grows. Upper bounds; whether a file fits now is still asked with `relay-space`.
+        let l = app.cfg.queue_limits();
+        m.insert(
+            "file_queue_limits",
+            Map::new()
+                .with("file", l.largest_file())
+                .with("device", l.device)
+                .with("sender", l.pair)
+                .with("account", l.account)
+                .into(),
+        );
+    }
     if app.push.enabled() {
         m.insert("push_key", app.push.public.as_str().into());
     }
