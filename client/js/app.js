@@ -604,7 +604,7 @@ async function loginAndEnter(homeInput, handle, password, remember) {
     }
     session = { token: login.token, home };
     if (!setup.ready) {
-      const ok = await showLinkWait(setup, login.state.handle);
+      const ok = await showLinkWait(setup, login.state.handle, home);
       if (!ok) {
         store.close();
         showAuth("login", login.state.handle);
@@ -633,31 +633,84 @@ async function loginAtOldHome(homes, handle, password, first) {
   throw first;
 }
 
-function showLinkWait(setup, handle) {
+function showLinkWait(setup, handle, home) {
   return new Promise((resolve) => {
     const ctl = new AbortController();
-    inApp(true);
-    root.replaceChildren(
-      h(
-        "div",
-        { class: "center" },
-        h(
-          "div",
-          { class: "auth" },
-          h("h1", { class: "brand", text: "Länka den här enheten" }),
-          h(
-            "div",
-            { class: "card" },
-            h("p", { text: `${handle} används redan på en annan enhet. Öppna Murmo där och godkänn den här enheten. Kontrollera att koden är densamma på båda skärmarna.` }),
-            h("div", { class: "code", text: setup.code }),
-            h("p", { class: "hint" }, h("span", { class: "spinner" }), " Väntar på godkännande… (giltigt i 10 minuter)"),
-            h("button", { class: "btn ghost", text: "Avbryt", onclick: () => { ctl.abort(); resolve(false); } }),
-          ),
-        ),
-      ),
+    const help = h("div", { class: "recover", hidden: true }, ...recoveryHelp(home, handle));
+    const toggle = h("button", {
+      class: "link",
+      type: "button",
+      text: "Jag har ingen annan enhet kvar",
+      onclick: () => { help.hidden = !help.hidden; },
+    });
+    const card = h(
+      "div",
+      { class: "card" },
+      h("p", { text: `${handle} används redan på en annan enhet. Öppna Murmo där och godkänn den här enheten. Kontrollera att koden är densamma på båda skärmarna.` }),
+      h("div", { class: "code", text: setup.code }),
+      h("p", { class: "hint" }, h("span", { class: "spinner" }), " Väntar på godkännande… (giltigt i 10 minuter)"),
+      h("button", { class: "btn ghost", text: "Avbryt", onclick: () => { ctl.abort(); resolve(false); } }),
+      toggle,
+      help,
     );
-    setup.waitForApproval(ctl.signal).then(resolve, () => resolve(false));
+    inApp(true);
+    root.replaceChildren(h("div", { class: "center" }, h("div", { class: "auth" }, h("h1", { class: "brand", text: "Länka den här enheten" }), card)));
+    setup.waitForApproval(ctl.signal).then(
+      (ok) => {
+        if (ok || ctl.signal.aborted) return resolve(ok);
+        // Nobody approved in time: most likely no other device is left. Say what can be done instead.
+        card.replaceChildren(
+          h("p", { text: "Ingen enhet godkände den här i tid, och begäran har gått ut." }),
+          h("p", { class: "hint", text: "Har du en annan enhet där du är inloggad? Öppna Murmo på den och logga in här igen, så får du en ny kod." }),
+          h("div", { class: "recover" }, ...recoveryHelp(home, handle)),
+          h("button", { class: "btn primary", text: "Tillbaka till inloggningen", onclick: () => resolve(false) }),
+        );
+      },
+      () => resolve(false),
+    );
   });
+}
+
+/** Whether an identity's home is this server, also under a domain the server had before a move. */
+function homeIsHere(home) {
+  return home === api.base || (info.origins ?? []).some((o) => home === `${o}/id`);
+}
+
+function hostOf(home) {
+  try {
+    return new URL(home).host;
+  } catch {
+    return home;
+  }
+}
+
+/**
+ * What to do when no device of the account is left (docs/DESIGN.md §4.1): only the recovery card can start a new
+ * device list, by making a new rootcard instance. That is done outside Murmo, in rootcard's key tool or at the home.
+ */
+function recoveryHelp(home, handle) {
+  const host = hostOf(home);
+  const intro = [
+    h("p", { text: "Utan en annan enhet kan ingen godkänna den här – ett lösenord räcker inte, det är det som skyddar kontot. Vägen tillbaka är ditt återställningskort." }),
+    h("p", { class: "hint", text: "När du återställer identiteten med kortet börjar kontot om, och nästa enhet du loggar in på blir den första. Identifieraren är densamma, men meddelandehistoriken går inte att få tillbaka (den fanns bara på dina enheter), och dina kontakter ser att dina nycklar har ändrats." }),
+  ];
+  if (!homeIsHere(home)) {
+    return [
+      ...intro,
+      h("p", { text: `Din identitet finns hos ${host}. Gå dit och återställ den med ditt återställningskort (glömt lösenord). Logga sedan in här igen.` }),
+    ];
+  }
+  return [
+    ...intro,
+    h(
+      "ol",
+      {},
+      h("li", {}, "Ladda ner rootcards nyckelverktyg – en fristående sida – och öppna filen i webbläsaren på din dator. ", h("a", { href: "vendor/rootcard/keytool.html", download: "rootcard-keytool.html", text: "Ladda ner nyckelverktyget" })),
+      h("li", { text: `Öppna identiteten med ditt återställningskort – kortfilen, eller användarnamnet ${handle.split("#")[0]} och återställningsnyckeln – och ange ${host} som värdadress.` }),
+      h("li", { text: `Välj "Reset forgotten password" och ett nytt lösenord.` }),
+      h("li", { text: "Logga sedan in här igen med det nya lösenordet." }),
+    ),
+  ];
 }
 
 // ── the main view ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -1019,11 +1072,42 @@ function renderWelcome() {
         form,
         h("div", { class: "card mine" }, h("div", {}, h("div", { class: "hint", text: "Din identifierare – dela den med dem du vill höra av" }), h("strong", { text: messenger.handle })), h("button", { class: "btn small", text: "Kopiera", onclick: copy })),
         offer,
+        singleDeviceReminder(),
         about(),
       ),
     ),
   );
   if (matchMedia("(min-width: 761px)").matches || ui.shell.classList.contains("chat")) input.focus();
+}
+
+/**
+ * A reminder while the account has only this device: if its browser data is lost, nobody can approve a new device,
+ * and only the recovery card (with the history lost) gets the account back. Filled in once the list is known.
+ */
+function singleDeviceReminder() {
+  const slot = h("div", { hidden: true });
+  if (settings().singleDeviceSeen) return slot;
+  messenger.ownList().then(
+    (own) => {
+      if (own.present.length !== 1) return;
+      slot.hidden = false;
+      slot.replaceChildren(
+        h(
+          "div",
+          { class: "card offer" },
+          h(
+            "div",
+            {},
+            h("strong", { text: "Du har bara den här enheten" }),
+            h("div", { class: "hint", text: "Om webbläsarens data rensas kan ingen enhet godkänna en ny. Då behövs återställningskortet, och historiken går förlorad. Länka gärna en enhet till: logga in på den och godkänn den här." }),
+          ),
+          h("button", { class: "btn small", text: "Inte nu", onclick: () => { setSetting("singleDeviceSeen", true); slot.remove(); } }),
+        ),
+      );
+    },
+    () => {},
+  );
+  return slot;
 }
 
 function composer(c) {
@@ -1353,6 +1437,9 @@ async function showDevices() {
     const own = await messenger.ownList(true);
     put(
       list,
+      own.present.length === 1
+        ? h("p", { class: "lone", text: "Det här är din enda enhet. Om webbläsarens data rensas kan ingen godkänna en ny enhet: då behövs återställningskortet, och historiken går förlorad. Länka gärna en enhet till." })
+        : null,
       ...own.present.map((dev) =>
         h(
           "div",

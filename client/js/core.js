@@ -26,6 +26,8 @@ const FILE_RETRY_EVERY = 60_000;
 const EARLY_SENDER = 16 * 1024 * 1024;
 const EARLY_TOTAL = 64 * 1024 * 1024;
 const EARLY_KEEP = 10 * 60_000;
+/** How long the server keeps a link request (docs/DESIGN.md §4.3). */
+const LINK_TTL = 10 * 60_000;
 const MAX_CHUNK_TEXT = Math.ceil((p.CHUNK + 16) / 3) * 4; // base64url of one encrypted chunk
 const IMAGE_HEAD = 256 * 1024; // where the dimensions of an image must be found
 const OFFLINE = ["offline", "disconnected", "timeout"];
@@ -43,7 +45,9 @@ export function validRetention(r) {
 
 /**
  * Prepare this browser as a device of the account after a login (docs/DESIGN.md §4.2, §4.3).
- * Returns `{ ready: true }`, or `{ ready: false, code, waitForApproval() }` while another device must approve.
+ * Returns `{ ready: true }`, or `{ ready: false, code, expires, waitForApproval() }` while another device must approve.
+ * `waitForApproval` resolves to true once approved, false when cancelled or when the request has expired (`expires`,
+ * ms since the epoch: the server keeps link requests for 10 minutes).
  */
 export async function setupDevice({ api, store, state, login, label }) {
   const account = state.account;
@@ -82,11 +86,13 @@ export async function setupDevice({ api, store, state, login, label }) {
   const { proof, nonce } = await proveToServer(api, state, login.unlocked.contents.accountSeed);
   await api.link(account, request, proof, nonce);
   const code = await p.linkCode(account, deviceValue.key, request.id);
+  const expires = Date.now() + LINK_TTL;
   return {
     ready: false,
     code,
+    expires,
     async waitForApproval(signal) {
-      while (!signal?.aborted) {
+      while (!signal?.aborted && Date.now() < expires) {
         await new Promise((r) => setTimeout(r, 3000));
         const r = await api.devices(account);
         if (r.entries.length) {
