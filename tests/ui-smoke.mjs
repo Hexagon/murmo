@@ -1,10 +1,11 @@
 // Browser smoke test of the real UI with two users in headless Chrome (puppeteer-core, no browser download).
 //
 //   MURMO_ORIGIN=http://127.0.0.1:18100 MURMO_BIND=127.0.0.1:18100 MURMO_DB=/tmp/ui.sqlite MURMO_HOST_KEY_FILE=/tmp/ui.key \
-//     MURMO_LIMIT_SCALE=10 cargo run &
+//     MURMO_LIMIT_SCALE=10 MURMO_GIPHY_KEY=testkey cargo run &
 //   CHROME=/usr/bin/google-chrome node tests/ui-smoke.mjs   (screenshots in $SHOTS, default /tmp/murmo-shots)
 //
-// It fails on any console error or warning, so CSP violations show up here.
+// It fails on any console error or warning, so CSP violations show up here. Requests to GIPHY never leave the test:
+// they are answered here (after the page's CSP has allowed them), and they are recorded to check what was sent.
 
 import puppeteer from "puppeteer-core";
 const BASE = process.env.MURMO_URL ?? "http://127.0.0.1:18100/";
@@ -12,10 +13,25 @@ const shots = process.env.SHOTS ?? "/tmp/murmo-shots";
 (await import("node:fs")).mkdirSync(shots, { recursive: true });
 const browser = await puppeteer.launch({ executablePath: process.env.CHROME ?? "/usr/bin/google-chrome", headless: true, args: ["--no-sandbox"] });
 const problems = [];
+const GIF_2X2 = Buffer.from("R0lGODlhAgACAIAAAP///wAAACH5BAEAAAAALAAAAAACAAIAAAIChFEAOw==", "base64");
+const giphyRequests = [];
+function giphy(req) {
+  const url = new URL(req.url());
+  giphyRequests.push({ url, headers: req.headers() });
+  const cors = { "access-control-allow-origin": "*" };
+  if (url.hostname === "api.giphy.com") {
+    const media = (n) => ({ url: `https://media2.giphy.com/media/test/${n}?cid=track&rid=x`, size: String(GIF_2X2.length), width: "2", height: "2" });
+    const data = [1, 2, 3].map((i) => ({ id: `g${i}`, title: `Test ${i}`, images: { fixed_width_small: media("100w.gif"), original: media("giphy.gif") } }));
+    return req.respond({ status: 200, headers: cors, contentType: "application/json", body: JSON.stringify({ data }) });
+  }
+  return req.respond({ status: 200, headers: cors, contentType: "image/gif", body: GIF_2X2 });
+}
 async function page(name) {
   const ctx = await browser.createBrowserContext();
   const pg = await ctx.newPage();
   await pg.setViewport({ width: 1280, height: 800 });
+  await pg.setRequestInterception(true);
+  pg.on("request", (req) => (/\.giphy\.com$/.test(new URL(req.url()).hostname) ? giphy(req) : req.continue()));
   pg.on("console", (m) => { if (["error", "warning"].includes(m.type())) problems.push(`${name} console ${m.type()}: ${m.text()}`); });
   pg.on("pageerror", (e) => problems.push(`${name} pageerror: ${e.message}`));
   await pg.goto(BASE, { waitUntil: "networkidle0" });
@@ -102,6 +118,79 @@ try {
   await ch3.accept([`${shots}/bomb.png`]);
   await b.waitForFunction(() => [...document.querySelectorAll(".msg .filecard .fs")].some((e) => /50000 × 50000/.test(e.textContent)), { timeout: 20000 });
   if ((await b.$$(".msg img.inline")).length !== 1) throw new Error("the oversized image was shown inline");
+  // Emoji: picked from the panel into the text, and a message of only emoji is shown larger.
+  await a.click('.composer .icon-btn[aria-label="Emoji"]');
+  await a.waitForSelector(".picker .emoji-grid .emoji", { visible: true, timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-6c-emoji.png` });
+  await a.click(".picker .emoji-grid .emoji");
+  await a.click(".picker .emoji-grid .emoji");
+  await a.focus(".composer textarea");
+  await a.keyboard.press("Enter");
+  await b.waitForSelector(".msg .body.jumbo", { timeout: 20000 });
+  if (await a.$(".picker:not(.hidden)")) await a.keyboard.press("Escape");
+  // GIFs: picked from a file (and kept in the collection), then saved by the recipient from the viewer and resent.
+  fs.writeFileSync(`${shots}/tiny.gif`, Buffer.from("R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==", "base64"));
+  await a.click(".composer .gif-btn");
+  await a.waitForSelector(".picker .gif-grid", { visible: true, timeout: 5000 });
+  const [ch4] = await Promise.all([a.waitForFileChooser(), clickText(a, "Välj GIF-fil…")]);
+  await ch4.accept([`${shots}/tiny.gif`]);
+  await a.waitForSelector(".picker .gif-grid .gif img", { timeout: 10000 });
+  await a.screenshot({ path: `${shots}/a-6d-gifs.png` });
+  await b.waitForFunction(() => document.querySelectorAll(".msg img.inline").length === 2, { timeout: 20000 });
+  await sleep(500);
+  // "Spara GIF" right under a received GIF; it turns into "✓ Sparad" (by content, so on every copy of that GIF).
+  if ((await b.$$(".msg .save-gif-inline")).length !== 1) throw new Error("no save button under the received GIF");
+  await b.click(".msg .save-gif-inline");
+  await b.waitForSelector(".msg .save-gif-inline.saved", { timeout: 10000 });
+  await b.screenshot({ path: `${shots}/b-6d-gif-saved.png` });
+  // The viewer offers the same, and says it is already there.
+  const imgs = await b.$$(".msg img.inline");
+  await imgs[imgs.length - 1].click();
+  await b.waitForSelector("dialog.viewer .save-gif", { visible: true, timeout: 5000 });
+  await b.click("dialog.viewer .save-gif");
+  await b.waitForFunction(() => !document.querySelector("dialog.viewer"), { timeout: 5000 });
+  await b.waitForFunction(() => [...document.querySelectorAll(".toast")].some((t) => /redan/.test(t.textContent)), { timeout: 5000 });
+  await b.click(".composer .gif-btn");
+  await b.waitForSelector(".picker .gif-grid .gif img", { timeout: 10000 });
+  await b.click(".picker .gif-grid .gif-send");
+  await a.waitForFunction(() => document.querySelectorAll(".msg img.inline").length === 3, { timeout: 20000 });
+  // The toasts ("GIF:en skickad.") go away by themselves; later steps click where they were.
+  for (const pg of [a, b]) await pg.waitForFunction(() => !document.querySelector(".toast"), { timeout: 10000 });
+  // Reactions: Bob reacts from the quick row, Alice sees it and adds the same by tapping the chip.
+  if (await a.$(".picker:not(.hidden)")) await a.click(".composer .gif-btn"); // the GIF panel from before closes
+  const bobMsgs = await b.$$(".msg");
+  const target = bobMsgs[bobMsgs.length - 1];
+  await target.hover();
+  await (await target.$(".react-btn")).click();
+  await b.waitForSelector(".react-menu button", { visible: true, timeout: 5000 });
+  await b.screenshot({ path: `${shots}/b-6e-react-menu.png` });
+  await b.click(".react-menu button");
+  await a.waitForSelector(".msg .reaction", { timeout: 20000 });
+  await a.click(".msg .reaction");
+  await b.waitForFunction(() => document.querySelector(".msg .reaction .n")?.textContent === "2", { timeout: 20000 });
+  await b.screenshot({ path: `${shots}/b-6f-reactions.png` });
+  // GIPHY search: nothing is asked before typing; the warning is there; a tap saves into the collection.
+  await a.click(".composer .gif-btn");
+  await clickText(a, "Sök på GIPHY");
+  await a.waitForSelector(".warn-note", { visible: true, timeout: 5000 });
+  if (giphyRequests.length) throw new Error("GIPHY was asked before anything was typed");
+  await a.type(".gif-body input", "katt");
+  await a.waitForFunction(() => document.querySelectorAll(".gif-body .gif-grid img[src^='blob:']").length === 3, { timeout: 10000 });
+  await a.screenshot({ path: `${shots}/a-6g-giphy.png` });
+  const before = await a.evaluate(() => document.querySelectorAll(".msg").length);
+  await a.click(".gif-body .gif-grid .gif-send");
+  await a.waitForSelector(".gif-body .gif-send.saved", { timeout: 10000 });
+  const searches = giphyRequests.filter((r) => r.url.hostname === "api.giphy.com");
+  if (searches.length !== 1 || searches[0].url.searchParams.get("q") !== "katt") throw new Error(`unexpected searches: ${searches.map((r) => r.url)}`);
+  for (const r of giphyRequests) {
+    if (r.headers.cookie || r.headers.referer) throw new Error(`cookie or referrer sent to GIPHY: ${r.url}`);
+    if (r.url.hostname !== "api.giphy.com" && r.url.search) throw new Error(`tracking parameters kept: ${r.url}`);
+  }
+  await clickText(a, "Mina GIF:ar");
+  await a.waitForFunction(() => document.querySelectorAll(".gif-body .gif-grid .gif img").length === 2, { timeout: 10000 });
+  if ((await a.evaluate(() => document.querySelectorAll(".msg").length)) !== before) throw new Error("saving from GIPHY sent something");
+  await a.keyboard.press("Escape");
+  for (const pg of [a, b]) await pg.waitForFunction(() => !document.querySelector(".toast"), { timeout: 10000 });
   await a.screenshot({ path: `${shots}/a-6-chat.png` });
   await b.screenshot({ path: `${shots}/b-6-chat.png` });
   await clickText(b, "Säkerhetskod");
