@@ -2013,7 +2013,9 @@ function message(m) {
   const canReact = ["text", "file", "ephemeral"].includes(m.kind) && messenger.contacts.get(m.conv)?.state === "accepted";
   if (canReact) meta.append(reactButton(m));
   meta.append(moreButton(m));
-  const node = h("div", { class: `msg ${m.dir}${media}${m.kind === "ephemeral" ? " ephemeral" : ""}` }, body, reactionsView(m, canReact), meta);
+  // A picture carries its time on itself; text ends with it on the last line, as long as it fits there.
+  const shown = media ? h("div", { class: "frame" }, body, meta) : [body, meta];
+  const node = h("div", { class: `msg ${m.dir}${media}${m.kind === "ephemeral" ? " ephemeral" : ""}` }, shown, reactionsView(m, canReact));
   if (m.kind === "ephemeral" && m.dir === "in" && !m.expires) node.dataset.unseen = m.id;
   return node;
 }
