@@ -679,31 +679,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "mesg-fuzz"
-version = "0.0.0"
-dependencies = [
- "libfuzzer-sys",
- "mesg-server",
-]
-
-[[package]]
-name = "mesg-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "futures-util",
- "getrandom 0.4.3",
- "p256",
- "rootcard",
- "rootcard-host",
- "rusqlite",
- "tokio",
- "tower-http",
- "ureq",
- "zeroize",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -728,6 +703,31 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "murmo-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "murmo-server",
+]
+
+[[package]]
+name = "murmo-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "getrandom 0.4.3",
+ "p256",
+ "rootcard",
+ "rootcard-host",
+ "rusqlite",
+ "tokio",
+ "tower-http",
+ "ureq",
+ "zeroize",
 ]
 
 [[package]]

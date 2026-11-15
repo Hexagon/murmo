@@ -10,6 +10,7 @@ use rootcard::encoding::{base64url_decode_fixed, base64url_encode};
 use rootcard::json::{Map, Value, canonical};
 use rootcard::keys::{KeyType, format_key, parse_key};
 
+// Signature labels keep the project's old name (mesg): changing them would invalidate existing device lists.
 /// Label of device-list entries.
 pub const DEVICES_LABEL: &str = "mesg/devices/v1";
 /// Label of signed prekeys.

@@ -1,14 +1,14 @@
 // Browser smoke test of the real UI with two users in headless Chrome (puppeteer-core, no browser download).
 //
-//   MESG_ORIGIN=http://127.0.0.1:18100 MESG_BIND=127.0.0.1:18100 MESG_DB=/tmp/ui.sqlite MESG_HOST_KEY_FILE=/tmp/ui.key \
-//     MESG_LIMIT_SCALE=10 cargo run &
-//   CHROME=/usr/bin/google-chrome node tests/ui-smoke.mjs   (screenshots in $SHOTS, default /tmp/mesg-shots)
+//   MURMO_ORIGIN=http://127.0.0.1:18100 MURMO_BIND=127.0.0.1:18100 MURMO_DB=/tmp/ui.sqlite MURMO_HOST_KEY_FILE=/tmp/ui.key \
+//     MURMO_LIMIT_SCALE=10 cargo run &
+//   CHROME=/usr/bin/google-chrome node tests/ui-smoke.mjs   (screenshots in $SHOTS, default /tmp/murmo-shots)
 //
 // It fails on any console error or warning, so CSP violations show up here.
 
 import puppeteer from "puppeteer-core";
-const BASE = process.env.MESG_URL ?? "http://127.0.0.1:18100/";
-const shots = process.env.SHOTS ?? "/tmp/mesg-shots";
+const BASE = process.env.MURMO_URL ?? "http://127.0.0.1:18100/";
+const shots = process.env.SHOTS ?? "/tmp/murmo-shots";
 (await import("node:fs")).mkdirSync(shots, { recursive: true });
 const browser = await puppeteer.launch({ executablePath: process.env.CHROME ?? "/usr/bin/google-chrome", headless: true, args: ["--no-sandbox"] });
 const problems = [];
