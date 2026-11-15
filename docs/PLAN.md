@@ -32,10 +32,11 @@
       above 40 MP, or unreadable, it is shown as a file card with "Spara"
 - [x] Paper key: a device on paper that, with the password, approves a new device when no other is left
       (`DESIGN.md` §4.5); a request from an accepted contact is answered with `accept`
+- [x] Relay limited in bytes, not only frames: 384 MiB/min per sending device (once per recipient device) and
+      96 MiB/min per sending account into one device; announced in `ready`, and the client paces transfers below them
 
 Open, in order of priority:
 
-- [ ] Rate limit relay bytes, not only frames (3000 frames/min ≈ 190 MiB/min per device into one recipient).
 - [ ] **Separate limits for live transfer and the file queue.** Today one client constant (100 MiB) governs both.
       Advertise the queue's per-file and per-device limits in `/api/v1/info`, show before sending whether a file can be
       queued, and let live transfer go further once it no longer needs the whole file in memory (Phase 2).
