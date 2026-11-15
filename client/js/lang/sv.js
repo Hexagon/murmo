@@ -261,6 +261,7 @@ export default {
   "conv.safety": "Säkerhetskod",
   "conv.more": "Fler val",
   "conv.devicesChanged": "{handle} har ändrat sina enheter. Säkerhetskoden har ändrats.",
+  "conv.dismiss": "Stäng",
   "conv.requested": "Förfrågan skickad. Du kan skriva när {handle} har accepterat.",
   "conv.blocked": "Blockerad. ",
   "conv.unblock": "Häv blockering",
