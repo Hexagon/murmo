@@ -218,6 +218,7 @@ come with the Double Ratchet in phase 2 (PLAN.md).
   "v": 1,
   "id": "<16 random bytes>",
   "kind": "request",              // "request" | "accept" | "text" | "file" | "sync" | "history" | "receipt"
+                                  // | "reaction" | "gifs" (own devices only)
   "from": { "account": "…", "device": "…" },
   "to":   { "account": "…", "device": "…" },
   "conv": "<account id of the other party>",
@@ -281,6 +282,14 @@ once one of the recipient's devices has it.
 - A receipt says *arrived on a device*, not *read*. A contact thereby learns when one of the user's devices was
   connected, which the live file transfer already shows (THREAT_MODEL T21). To the server a receipt is one more
   envelope in the other direction.
+
+### 6.5 Reactions
+
+A reaction is a `reaction` message `{ id, e }` to the other party and the own other devices: `id` is a message of
+that conversation (text or file), `e` one emoji (`""` takes the reaction back). Each account has at most one reaction
+per message; the one with the latest message time wins, and a taken-back reaction is kept as `""` with its time so
+that an older one arriving late does not come back. Reactions are stored on the message they belong to (§8.1), go
+along with the history to a newly linked device, and are only taken from accepted contacts. They do not notify.
 
 ## 7. Multi-device history
 
@@ -422,6 +431,58 @@ A file that does not fit is sent live later, when both devices are connected.
 Relay frames carry `{ k: "chunk", f, i, n, c }` or `{ k: "file-req", f }` as base64url canonical JSON. Chunks are
 authenticated by the file key from the signed `file` message and the final hash, so the relay needs no extra signature.
 
+### 9.1 Emoji
+
+Emoji are Unicode text in an ordinary `text` message; nothing in the protocol changes. The picker offers a fixed set
+compiled into the client (`client/js/emoji.js`) and the system's own emoji font draws them: no images, fonts or
+sprite sheets are loaded from anywhere, and text is still only ever set with `textContent`. A message of at most three
+emoji and nothing else is shown larger (a CSS class; the text is unchanged). The recently used emoji are kept in the
+device's encrypted store (§8.1, secret `recentEmoji`), not in `localStorage`.
+
+### 9.2 GIFs
+
+A GIF is an ordinary file (§9) and is shown inline like other images, within the same limits. There is no GIF search:
+services such as GIPHY or Tenor would learn every search term and the user's address as it is typed, and an image
+fetched from them would tell them when a conversation is open. The page's CSP would also have to allow them.
+Instead each device keeps the user's own collection:
+
+- New GIFs come from a file on the device (the GIF panel's *Välj GIF-fil…*, which also sends it) or from a GIF in a
+  conversation (*Spara GIF* under it, or *Spara i mina GIF:ar* in the image viewer; a GIF already in the
+  collection, by SHA-256, shows *✓ Sparad*). Only bytes that start with `GIF87a`/`GIF89a` are taken,
+  whatever type the sender claimed, at most 8 MiB each and 60 in all, and only when the header's dimensions pass the
+  same pixel limit as inline images. Duplicates (same SHA-256) are not stored twice.
+- The collection is stored encrypted like message files (§8.1): the list in the secret `gifs`, each GIF in parts
+  under the file id `gif:<random id>`, separate from message files, so a conversation's retention or deletion does
+  not remove it.
+- **Shared between the account's devices.** Saving or removing a GIF sends a `gifs` message `{ add: [entry] }` or
+  `{ remove: [id] }` to the own other devices only (a `gifs` message from anyone else is ignored). An entry carries
+  `id`, `size`, `n`, `width`, `height`, `sha256` and a file key of its own. The bytes are pulled, not pushed: a device
+  that has an entry but not its bytes asks its connected own devices with `file-req` (on receipt, on every connect and
+  every minute while some are missing), and they stream it over the file relay (§9) like any file. Pushing them
+  would leave chunks on devices that do not know `gifs` yet (§12). Entries are checked again on receipt (size,
+  dimensions, at most 60), and the bytes against `sha256`. A newly linked device gets the whole collection after the
+  history (§7).
+- Sending one is a new `file` message under the neutral name `animation.gif`; the recipient sees nothing that marks it
+  as coming from a collection.
+
+### 9.3 GIF search at GIPHY (optional)
+
+When the operator sets `MURMO_GIPHY_KEY`, the GIF panel gets a *Sök på GIPHY* tab for filling the collection. (Tenor,
+the other large service, closed its API to other platforms on 30 June 2026.) The trade-off is the user's, and the
+panel says it every time, above the search field: the search and the GIFs are fetched by the browser directly from
+GIPHY, which sees the user's IP address and search terms, and that traffic is protected by HTTPS only, not by the
+end-to-end encryption.
+
+- Only then does the CSP's `connect-src` list GIPHY's API and media hosts (`app::GIPHY_HOSTS`); without a key the page
+  cannot reach GIPHY at all. `/api/v1/info` hands the key and the content rating (`MURMO_GIPHY_RATING`, default
+  `pg-13`) to the client. The Murmo server never makes or sees a search.
+- Nothing is asked before the user types (at least two characters, one request per pause in typing). Requests carry
+  no cookies and no referrer; result URLs are used only when they are https on GIPHY's media hosts, with their query
+  (tracking ids) removed. Previews are fetched as blobs, so no `<img>` points at GIPHY.
+- A tap saves the GIF in the collection with the same checks as any other (§9.2); nothing is sent to the
+  conversation until the user sends it from *Mina GIF:ar*, as an ordinary encrypted file.
+- A beta key allows 100 requests an hour for the whole server; when GIPHY refuses, the panel says so.
+
 ## 10. Server API (v1)
 
 All bodies are canonical JSON. Errors are `{ "error": "<code>" }`.
@@ -506,3 +567,23 @@ never leaves the device.
 | network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
 
 No access logs with addresses are written by default (`MURMO_LOG=info` logs no addresses or account ids).
+
+## 12. Mixed versions
+
+Devices are updated when the page is reloaded (the client offers it when the server's build changes), so a
+conversation can for a while have devices from before and after a change. The rule that keeps this safe: a device
+checks `kind` against the kinds it knows (`KINDS` in `protocol.js`) before anything else, and acknowledges and drops a
+message whose kind it does not know. Nothing is shown, stored or answered, and nothing breaks. So a new kind must
+never be needed for an old one to work, and what a new kind adds is lost on devices that do not know it.
+
+What clients from before emoji, reactions and the shared GIF collection get from newer ones:
+
+| From a newer device | On an older device |
+|---|---|
+| emoji in text | ordinary text, shown as before (not enlarged) |
+| a GIF (from the collection or GIPHY) | an ordinary `file` message `animation.gif`; `image/gif` was already shown inline, within the same limits |
+| `reaction` | dropped. The older device never shows it, also not after a later update (the message was acknowledged). The sender sees its reaction at once and cannot tell. Reactions do not notify, so nothing is woken for it either |
+| `reactions` on messages in a history hand-over (§7) | stored with the message and not shown; shown once that device is updated |
+| `gifs` to an own older device | dropped; that device has no collection until it is updated, and then gets only GIFs saved after that. The bytes are pulled with `file-req` (§9.2), so no chunks are pushed to it; a `file-req` for `gif:…` sent to an older device finds no file message and is ignored |
+
+An older device sends nothing new, so a newer device has nothing to handle from it.

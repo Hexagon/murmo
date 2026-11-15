@@ -57,7 +57,24 @@ pub struct Config {
     pub push_hosts: Vec<String>,
     /// Contact in push requests (`mailto:` or `https:` URL); the origin by default.
     pub push_contact: String,
+    /// GIPHY API key for GIF search in the browser (empty: no search). Handed to every client and used by the
+    /// browser directly, never by this server.
+    pub giphy_key: String,
+    /// GIPHY content rating for searches (`g`, `pg`, `pg-13` or `r`).
+    pub giphy_rating: String,
 }
+
+/// The hosts a browser talks to for GIPHY search (the API and its media), allowed by the CSP only when a key is set.
+pub const GIPHY_HOSTS: &[&str] = &[
+    "https://api.giphy.com",
+    "https://media.giphy.com",
+    "https://media0.giphy.com",
+    "https://media1.giphy.com",
+    "https://media2.giphy.com",
+    "https://media3.giphy.com",
+    "https://media4.giphy.com",
+    "https://i.giphy.com",
+];
 
 impl Config {
     /// The byte limits of the file queue.

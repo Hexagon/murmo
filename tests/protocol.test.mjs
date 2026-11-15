@@ -3,6 +3,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as rc from "../client/vendor/rootcard/src/index.js";
 import * as p from "../client/js/protocol.js";
+import * as emoji from "../client/js/emoji.js";
+import * as giphy from "../client/js/giphy.js";
+import { validReaction } from "../client/js/core.js";
 
 async function device(label) {
   const kp = await p.newKeyPair("Ed25519");
@@ -177,4 +180,46 @@ test("paper key: written form, typing errors, and both the paper and the local s
   const e1 = await p.newEntry({ account, accountKey: ak.key, entries: [e0], op: "add", device: dev, signer: { id: d1.id, key: d1.privateKey } });
   const e2 = await p.newEntry({ account, accountKey: ak.key, entries: [e0, e1], op: "add", device: d2.value, signer: { id: dev.id, key: seed } });
   assert.equal((await p.verifyDevices(account, ak.key, [e0, e1, e2])).present.length, 3);
+});
+
+test("GIF signature", () => {
+  assert.ok(p.isGif(p.utf8("GIF89a....")));
+  assert.ok(p.isGif(p.utf8("GIF87a")));
+  assert.ok(!p.isGif(p.utf8("GIF8")));
+  assert.ok(!p.isGif(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])));
+});
+
+test("emoji: only-emoji messages and the recent list", () => {
+  for (const t of ["👍", "😀 😀😀", "🇸🇪", "1️⃣", "👨‍👩‍👧", "🏳️‍🌈", " ❤️\n"]) assert.ok(emoji.emojiOnly(t), t);
+  for (const t of ["", "  ", "hej 😀", "😀😀😀😀", "abc", ":)", "1", "😀".repeat(40)]) assert.ok(!emoji.emojiOnly(t), t);
+  let r = [];
+  for (const e of ["😀", "👍", "😀", "<b>", "❤️"]) r = emoji.remember(r, e);
+  assert.deepEqual(r, ["❤️", "😀", "👍"]); // newest first, no duplicates, only emoji from the picker
+  for (let i = 0; i < 100; i++) r = emoji.remember(r, emoji.CATEGORIES[0].emoji[i % 90]);
+  assert.equal(r.length, emoji.RECENT_MAX);
+});
+
+test("reactions are one emoji or empty", () => {
+  for (const e of ["", "👍", "❤️", "🏳️‍🌈"]) assert.ok(validReaction(e), e);
+  for (const e of ["👍👍", "a", "<b>", null, 1, "👍 ", "😀".repeat(20)]) assert.ok(!validReaction(e), String(e));
+});
+
+test("GIPHY: only its media hosts, without tracking parameters, within the size limit", () => {
+  assert.equal(giphy.mediaUrl("https://media2.giphy.com/media/abc/giphy.gif?cid=x&rid=y"), "https://media2.giphy.com/media/abc/giphy.gif");
+  for (const u of ["http://media2.giphy.com/a.gif", "https://evil.example/a.gif", "https://media2.giphy.com.evil.example/a.gif", "https://media2.giphy.com:8443/a.gif", "javascript:alert(1)", "", null]) {
+    assert.equal(giphy.mediaUrl(u), null, String(u));
+  }
+  const im = (host, size) => ({ url: `https://${host}/media/x/a.gif?cid=1`, size: String(size) });
+  const json = {
+    data: [
+      { id: "a", title: "Katt", images: { fixed_width_small: im("media1.giphy.com", 10), original: im("media1.giphy.com", 20e6), downsized: im("media1.giphy.com", 1e6) } },
+      { id: "b", images: { fixed_width_small: im("evil.example", 10), original: im("media1.giphy.com", 10) } },
+      { id: "c", images: { fixed_width_small: im("i.giphy.com", 10), original: im("i.giphy.com", 20e6) } },
+      "junk",
+    ],
+  };
+  const r = giphy.parseResults(json, 8 * 1024 * 1024);
+  assert.equal(r.length, 1);
+  assert.deepEqual(r[0], { id: "a", title: "Katt", preview: "https://media1.giphy.com/media/x/a.gif", full: "https://media1.giphy.com/media/x/a.gif" });
+  assert.deepEqual(giphy.parseResults(null, 1), []);
 });

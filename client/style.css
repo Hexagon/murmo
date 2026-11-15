@@ -236,6 +236,88 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .send[disabled] { opacity: .4; cursor: default; }
 .foot-note { text-align: center; font-size: 12px; color: var(--faint); margin-top: 8px; }
 
+/* emoji and GIF panel, above the composer */
+.composer-wrap { position: relative; }
+.icon-btn.gif-btn { font: 600 11px/1 var(--sans); letter-spacing: .02em; color: var(--muted); }
+.icon-btn[aria-expanded="true"] { background: var(--bubble); }
+.picker {
+  width: min(768px, 100%); margin: 0 auto 8px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 16px; box-shadow: var(--shadow); padding: 10px 12px; max-height: min(340px, 45dvh);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.picker-head { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.picker-title { font-size: 12px; color: var(--muted); }
+.picker .hint { margin: 0; }
+.picker-tabs { display: flex; gap: 2px; overflow-x: auto; flex: none; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.picker-tabs button { border: 0; background: transparent; border-radius: 8px; min-width: 34px; height: 32px; font-size: 18px; display: grid; place-items: center; color: var(--muted); }
+.picker-tabs button.on, .picker-tabs button:hover { background: var(--bubble); }
+.emoji-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); overflow-y: auto; min-height: 0; }
+.emoji-grid .emoji { border: 0; background: transparent; border-radius: 8px; height: 38px; font-size: 24px; line-height: 1; padding: 0; }
+.emoji-grid .emoji:hover, .emoji-grid .emoji:focus-visible { background: var(--bubble); }
+/* rows sized by their tiles: a tile with overflow hidden may otherwise shrink to nothing and overlap the next */
+.gif-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); grid-auto-rows: max-content; align-content: start; gap: 6px; overflow-y: auto; min-height: 0; flex: 1; }
+.gif-grid .hint { grid-column: 1 / -1; }
+.gif { position: relative; }
+.gif-send { display: block; width: 100%; aspect-ratio: 1; padding: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--bubble); }
+.gif-send img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gif-remove { position: absolute; top: 4px; right: 4px; width: 24px; height: 24px; border-radius: 50%; border: 0; background: #000000a0; color: #fff; display: grid; place-items: center; padding: 0; opacity: 0; }
+.gif:hover .gif-remove, .gif-remove:focus-visible { opacity: 1; }
+@media (hover: none) { .gif-remove { opacity: 1; } }
+.gif-remove svg { width: 14px; height: 14px; }
+.msg .body.jumbo { font-size: 40px; line-height: 1.2; }
+
+/* reactions: chips under a message, a quiet button by the time, a row of quick choices */
+.msg { position: relative; }
+.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; white-space: normal; }
+.msg.out .reactions { justify-content: flex-end; }
+.reaction { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 1px 8px; font-size: 15px; line-height: 22px; }
+.reaction .n { font-size: 12px; color: var(--muted); }
+.reaction.mine { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.reaction[disabled] { cursor: default; }
+.save-gif-inline { border: 0; background: transparent; color: var(--accent); font-size: 11px; padding: 0 2px; margin-left: 8px; text-decoration: underline; }
+.save-gif-inline.saved { color: var(--ok); text-decoration: none; cursor: default; }
+.react-btn { border: 0; background: transparent; color: var(--faint); padding: 0 2px; margin-left: 6px; vertical-align: -4px; border-radius: 6px; opacity: 0; }
+.react-btn svg { width: 16px; height: 16px; }
+.msg:hover .react-btn, .react-btn:focus-visible, .react-btn[aria-expanded="true"] { opacity: 1; }
+.react-btn:hover { color: var(--text); }
+@media (hover: none) { .react-btn { opacity: .75; padding: 2px 4px; } .react-btn svg { width: 18px; height: 18px; } }
+.react-menu {
+  position: absolute; bottom: calc(100% + 4px); z-index: 5; display: flex; gap: 2px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px; box-shadow: var(--shadow); white-space: nowrap;
+}
+.msg.in .react-menu { left: 0; }
+.msg.out .react-menu { right: 0; }
+.react-menu button { border: 0; background: transparent; width: 36px; height: 36px; border-radius: 50%; font-size: 21px; padding: 0; display: grid; place-items: center; color: var(--muted); }
+.react-menu button:hover, .react-menu button:focus-visible, .react-menu button.on { background: var(--bubble); }
+.picker.in-dialog { box-shadow: none; border: 0; padding: 0; margin: 0; width: 100%; max-height: min(380px, 60dvh); }
+
+/* GIF panel: tabs, the GIPHY note, results */
+.gif-tabs { flex: none; }
+.gif-body { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+.gif-body .input { flex: none; }
+.warn-note { flex: none; font-size: 12px; line-height: 1.45; padding: 6px 10px; border-radius: 10px; background: color-mix(in srgb, #c98a00 14%, var(--panel)); border: 1px solid color-mix(in srgb, #c98a00 35%, var(--line)); color: var(--text); }
+.gif-send.wait { display: grid; place-items: center; font-size: 12px; color: var(--muted); }
+.gif-send { position: relative; }
+.gif-send.busy { opacity: .5; cursor: progress; }
+.gif-ok { display: none; position: absolute; right: 6px; bottom: 6px; width: 22px; height: 22px; border-radius: 50%; background: var(--ok); color: #fff; font-size: 13px; line-height: 22px; text-align: center; }
+.gif-send.saved .gif-ok { display: block; }
+.warn-note summary { cursor: pointer; }
+.warn-note p { margin: 6px 0 2px; }
+.gif-status { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex: none; font-size: 12px; }
+.gif-status .hint { margin: 0; font-size: 12px; }
+.giphy-mark { color: var(--faint); font-size: 11px; white-space: nowrap; }
+.picker-head .hint { font-size: 12px; }
+/* as tall as the window allows next to the bar and the composer, also with the phone's keyboard up */
+.picker { max-height: min(460px, calc(100dvh - 210px)); min-height: min(240px, calc(100dvh - 210px)); }
+@media (max-width: 640px) {
+  .composer-wrap:has(.picker:not(.hidden)) .foot-note { display: none; }
+  .composer-wrap:has(.picker:not(.hidden)) { padding-bottom: 8px; }
+  .picker { padding: 8px; gap: 6px; max-height: min(60dvh + 60px, calc(100dvh - 180px)); min-height: min(220px, calc(100dvh - 180px)); }
+  .gif-tabs button { padding: 5px 8px; font-size: 13px; }
+}
+
+.msg.out:has(.body.jumbo) { background: transparent; padding: 0; }
+
 .request-box { width: min(768px, calc(100% - 32px)); margin: 8px auto 18px; border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; background: var(--panel); }
 .request-box .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 
@@ -263,6 +345,7 @@ dialog.wide { width: min(640px, calc(100% - 24px)); max-height: calc(100dvh - 32
 dialog.viewer { width: fit-content; max-width: 95vw; padding: 0; border: 0; background: transparent; box-shadow: none; overflow: visible; cursor: zoom-out; }
 dialog.viewer::backdrop { background: #000000b3; }
 dialog.viewer img { max-width: 92vw; max-height: 86dvh; display: block; border-radius: 10px; }
+dialog.viewer .save-gif { display: block; margin: 10px auto 0; cursor: pointer; }
 dialog.viewer .close {
   position: fixed; top: max(12px, env(safe-area-inset-top)); right: 12px; width: 44px; height: 44px; border-radius: 50%;
   border: 0; background: #000000a6; color: #fff; display: grid; place-items: center; z-index: 1;
@@ -275,7 +358,7 @@ dialog.viewer .close svg { width: 22px; height: 22px; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px 8px 14px;
   font-size: 14px; box-shadow: var(--shadow);
 }
-.toasts { position: fixed; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 10; }
+.toasts { pointer-events: none; position: fixed; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 10; }
 .toast { background: var(--text); color: var(--bg); padding: 9px 14px; border-radius: 10px; font-size: 14px; box-shadow: var(--shadow); }
 
 .drop { outline: 2px dashed var(--accent); outline-offset: -8px; }

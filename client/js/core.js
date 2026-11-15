@@ -11,6 +11,7 @@ import { Store } from "./store.js";
 import { Socket } from "./net.js";
 import { fetchState, lookup, proveToServer } from "./identity.js";
 import { ApiError } from "./api.js";
+import { emojiOnly } from "./emoji.js";
 
 const LIST_TTL = 60_000;
 const NOTE_MAX = 500;
@@ -37,6 +38,29 @@ const RECEIPT_MAX = 200;
 /** Longest retention a conversation can be set to (seconds); 0 keeps messages until the conversation is deleted. */
 export const RETENTION_MAX = 10 * 365 * 24 * 3600;
 const PRUNE_EVERY = 60_000;
+/** The user's own GIF collection, kept encrypted on this device only (docs/DESIGN.md §9.2). */
+export const GIF_MAX_BYTES = 8 * 1024 * 1024;
+export const GIF_MAX_COUNT = 60;
+/** The file id a saved GIF is stored and streamed under (apart from the files of messages). */
+const gifFile = (id) => `gif:${id}`;
+/** Message kinds a reaction can be given to. */
+const REACTABLE = ["text", "file"];
+
+/** A reaction is one emoji (`""` takes one's reaction back). */
+export function validReaction(e) {
+  return e === "" || (typeof e === "string" && e.length <= 32 && !/\s/u.test(e) && emojiOnly(e, 1));
+}
+
+/** A GIF of the collection as another own device describes it ("gifs" message), or null when it is not well formed. */
+function gifEntry(g) {
+  if (!g || typeof g !== "object") return null;
+  const { id, size, n, sha256, key, width, height } = g;
+  if (typeof id !== "string" || !/^[A-Za-z0-9_-]{22}$/.test(id)) return null;
+  if (!Number.isSafeInteger(size) || size < 1 || size > GIF_MAX_BYTES || n !== Math.max(1, Math.ceil(size / p.CHUNK))) return null;
+  if (typeof sha256 !== "string" || sha256.length > 64 || typeof key !== "string" || key.length > 64) return null;
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || !p.imageFits({ width, height })) return null;
+  return { id, size, n, sha256, key, width, height };
+}
 
 /** Whether `r` is a retention in seconds this client accepts (0: keep). */
 export function validRetention(r) {
@@ -202,7 +226,10 @@ export class Messenger extends EventTarget {
     // A second start (after the connection was closed) replaces the timers instead of adding to them.
     clearInterval(this.retryTimer);
     clearInterval(this.pruneTimer);
-    this.retryTimer = setInterval(() => this.flushFiles().catch(() => {}), FILE_RETRY_EVERY);
+    this.retryTimer = setInterval(() => {
+      this.flushFiles().catch(() => {});
+      this.fetchMissingGifs().catch(() => {}); // a device that has them may have connected since
+    }, FILE_RETRY_EVERY);
     this.pruneTimer = setInterval(() => this.prune().catch(() => {}), PRUNE_EVERY);
     this.prune().catch(() => {});
     this.ws.addEventListener("link", (e) => this.onLink(e.detail.request).catch(() => {}));
@@ -304,6 +331,7 @@ export class Messenger extends EventTarget {
     await this.rotatePrekey();
     await this.flushReceipts();
     await this.flushFiles();
+    await this.fetchMissingGifs();
   }
 
   async rotatePrekey() {
@@ -628,6 +656,9 @@ export class Messenger extends EventTarget {
       case "receipt":
         if (c?.state === "accepted" && Array.isArray(m.body?.ids)) await this.markDelivered(peer, m.body.ids);
         return;
+      case "reaction":
+        if (c?.state === "accepted") await this.applyReaction(peer, m.body?.id, peer, m.body?.e, m.time);
+        return;
       case "file":
         if (c?.state !== "accepted") return;
         if (await this.onFileMeta(m, peer, "in")) this.emit("incoming", { conv: peer, kind: "file" });
@@ -687,6 +718,12 @@ export class Messenger extends EventTarget {
       }
       case "history":
         await this.mergeHistory(m.body);
+        return;
+      case "reaction":
+        await this.applyReaction(conv, m.body?.id, this.me.account, m.body?.e, m.time);
+        return;
+      case "gifs":
+        if (conv === this.me.account) await this.mergeGifs(m.body);
         return;
       default:
         return;
@@ -794,6 +831,8 @@ export class Messenger extends EventTarget {
       }
     }
     await this.deliver(target, "history", this.me.account, batch);
+    const gifs = await this.gifs();
+    if (gifs.length) await this.deliver(target, "gifs", this.me.account, { add: gifs });
   }
 
   async mergeHistory(body) {
@@ -892,6 +931,9 @@ export class Messenger extends EventTarget {
   /** Save which devices still miss a file and keep it on the list of files to offer again. */
   async settleFile(m) {
     m.file.missed = [...new Set(m.file.missed)];
+    // Reactions may have come while the file was on its way; `m` is from before them.
+    const cur = await this.store.message(m.id);
+    if (cur?.reactions) m.reactions = cur.reactions;
     await this.store.putMessage(m);
     const rest = this.pendingFiles.filter((x) => x.id !== m.id);
     if (m.file.missed.length) rest.push({ conv: m.conv, id: m.id, time: m.time });
@@ -1066,9 +1108,9 @@ export class Messenger extends EventTarget {
       // Later federation: serve our own other devices only.
       const own = await this.ownList();
       if (!own.present.some((d) => d.id === f.from)) return;
-      const m = await this.findFileMessage(r.f, r.conv);
-      const read = await this.store.fileReader(r.f);
-      if (m && read) await this.streamFile(m.file, read, [f.from]);
+      const meta = typeof r.f === "string" && r.f.startsWith("gif:") ? await this.gifMeta(r.f.slice(4)) : (await this.findFileMessage(r.f, r.conv))?.file;
+      const read = meta && (await this.store.fileReader(r.f));
+      if (read) await this.streamFile(meta, read, [f.from]);
     }
   }
 
@@ -1135,7 +1177,8 @@ export class Messenger extends EventTarget {
       if (m.dir === "in" && this.contacts.get(m.conv)?.state === "accepted") this.queueReceipt(m.conv, m.id);
     }
     this.emit("file", { f });
-    this.emit("messages", { conv: t.message.conv });
+    if (f.startsWith("gif:")) this.emit("gifs");
+    else this.emit("messages", { conv: t.message.conv });
   }
 
   async findFileMessage(f, conv) {
@@ -1171,6 +1214,174 @@ export class Messenger extends EventTarget {
 
   async messages(conv) {
     return this.store.messages(conv);
+  }
+
+  // ── reactions (DESIGN.md §6.5) ────────────────────────────────────────────────────────────────────────────────
+
+  /** React to a message of a conversation with one emoji, or take the reaction back with `""`. */
+  async react(conv, id, e) {
+    const c = this.contacts.get(conv);
+    if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
+    if (!validReaction(e)) throw new ApiError(400, "bad_reaction");
+    const m = await this.store.message(id);
+    if (!m || m.conv !== conv || !REACTABLE.includes(m.kind)) throw new ApiError(404, "no_message");
+    const { time } = await this.send(conv, "reaction", { id, e });
+    await this.applyReaction(conv, id, this.me.account, e, time);
+  }
+
+  /**
+   * Record `who`'s reaction to message `id` of conversation `conv`: one per account, the latest wins (a taken-back
+   * reaction stays as `""` with its time, so an older one that arrives late does not come back).
+   */
+  async applyReaction(conv, id, who, e, time) {
+    if (typeof id !== "string" || !validReaction(e) || !Number.isSafeInteger(time)) return;
+    const m = await this.store.message(id);
+    if (!m || m.conv !== conv || !REACTABLE.includes(m.kind)) return;
+    const r = { ...(m.reactions ?? {}) };
+    if ((r[who]?.t ?? 0) > time) return;
+    r[who] = { e, t: time };
+    m.reactions = r;
+    await this.store.putMessage(m);
+    this.emit("messages", { conv });
+  }
+
+  // ── the user's GIF collection (DESIGN.md §9.2) ────────────────────────────────────────────────────────────────
+  //
+  // Encrypted like everything else in the store: the list in a secret, each GIF as a file under its own id
+  // (`gif:<id>`), apart from the files of messages so that pruning a conversation keeps it. The account's devices
+  // keep the same collection: additions and removals go to the own devices as "gifs" messages, and the bytes go with
+  // the file relay like any file, encrypted under a key of their own (or are asked for later with file-req).
+
+  /** The saved GIFs, newest first: `[{ id, size, n, width, height, sha256, key }]`. */
+  async gifs() {
+    const list = await this.store.secret("gifs");
+    if (!Array.isArray(list)) return [];
+    // Entries saved before the collection was shared between devices have no file key yet.
+    if (list.some((g) => !g.key)) {
+      for (const g of list) {
+        g.key ??= p.b64(await p.newFileKey());
+        g.n ??= Math.max(1, Math.ceil(g.size / p.CHUNK));
+      }
+      await this.store.setSecret("gifs", list);
+    }
+    return list;
+  }
+
+  /** What a GIF is streamed as (Messenger.streamFile, expectFile), or null when it is not in the collection. */
+  async gifMeta(id) {
+    const g = (await this.gifs()).find((x) => x.id === id);
+    return g ? { f: gifFile(g.id), key: g.key, n: g.n, size: g.size, sha256: g.sha256 } : null;
+  }
+
+  /**
+   * Save a GIF (a Blob) in the collection, and on the account's other devices. Only a real GIF is taken (by its
+   * header, whatever its type says), at most GIF_MAX_BYTES and with dimensions that fit (p.imageFits). Returns
+   * `"saved"` or `"exists"`; throws `not_gif`, `gif_too_large`, `too_big_image` or `gifs_full`.
+   */
+  async saveGif(blob) {
+    if (!blob || blob.size > GIF_MAX_BYTES) throw new ApiError(413, blob ? "gif_too_large" : "not_gif");
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    if (!p.isGif(bytes)) throw new ApiError(400, "not_gif");
+    const size = p.imageSize(bytes.subarray(0, IMAGE_HEAD));
+    if (!p.imageFits(size)) throw new ApiError(400, "too_big_image");
+    const hash = new p.Sha256();
+    hash.update(bytes);
+    const sha256 = p.b64(hash.digest());
+    const list = await this.gifs();
+    if (list.some((g) => g.sha256 === sha256)) return "exists";
+    if (list.length >= GIF_MAX_COUNT) throw new ApiError(409, "gifs_full");
+    const g = {
+      id: p.b64(p.random(16)), size: bytes.length, n: Math.max(1, Math.ceil(bytes.length / p.CHUNK)),
+      width: size.width, height: size.height, sha256, key: p.b64(await p.newFileKey()),
+    };
+    await this.store.putFile(gifFile(g.id), bytes);
+    await this.store.setSecret("gifs", [g, ...list]);
+    this.emit("gifs");
+    this.shareGif(g).catch(() => {}); // the other devices can also ask for it later
+    return "saved";
+  }
+
+  /**
+   * Tell the own other devices about a new GIF. The bytes are not pushed: each device asks for them (file-req) once it
+   * knows the entry. A device from before the collection was shared drops the "gifs" message as an unknown kind, and
+   * chunks pushed to it would wait in its storage and come back from the server's queue for nothing.
+   */
+  async shareGif(g) {
+    const owns = await this.ownTargets();
+    if (owns.length) await this.deliver(owns, "gifs", this.me.account, { add: [g] });
+  }
+
+  /** "gifs" from an own device: `{ add: [entry], remove: [id] }`. */
+  async mergeGifs(body) {
+    let list = await this.gifs();
+    const removed = (Array.isArray(body?.remove) ? body.remove : []).filter((id) => typeof id === "string" && list.some((g) => g.id === id));
+    for (const id of removed) await this.store.deleteFile(gifFile(id));
+    list = list.filter((g) => !removed.includes(g.id));
+    const added = [];
+    for (const raw of Array.isArray(body?.add) ? body.add.slice(0, GIF_MAX_COUNT) : []) {
+      const g = gifEntry(raw);
+      if (!g || list.length >= GIF_MAX_COUNT || list.some((x) => x.id === g.id || x.sha256 === g.sha256)) continue;
+      if (body.add.length === 1) list.unshift(g); // a new one: first, like on the device that saved it
+      else list.push(g); // the whole collection (a newly linked device): in its order
+      added.push(g);
+    }
+    if (!removed.length && !added.length) return;
+    await this.store.setSecret("gifs", list);
+    this.emit("gifs");
+    if (added.length) await this.fetchMissingGifs();
+  }
+
+  /**
+   * Make ready for the GIFs of the collection whose bytes are not here yet, and ask the own connected devices for
+   * them. Returns how many were asked for.
+   */
+  async fetchMissingGifs() {
+    const missing = [];
+    for (const g of await this.gifs()) {
+      const f = gifFile(g.id);
+      if (await this.store.hasFile(f)) continue;
+      const meta = { f, key: g.key, n: g.n, size: g.size, sha256: g.sha256 };
+      await this.serial(() => this.expectFile(meta, { id: f, conv: this.me.account }));
+      if (!(await this.store.hasFile(f))) missing.push(f);
+    }
+    if (!missing.length || this.status !== "online") return 0;
+    const own = (await this.ownTargets()).map((x) => x.device);
+    const online = own.length ? await this.ws.presence(own) : [];
+    if (!online.length) return 0;
+    for (const f of missing) this.ws.relay(online, p.pack({ k: "file-req", f }));
+    return missing.length;
+  }
+
+  /** The bytes of a saved GIF as a Blob of type image/gif, or null (not here yet). */
+  async gifBlob(id) {
+    return this.fileBlob(gifFile(id), "image/gif");
+  }
+
+  /** Remove a GIF from the collection, here and on the own other devices. */
+  async removeGif(id) {
+    await this.store.setSecret("gifs", (await this.gifs()).filter((g) => g.id !== id));
+    await this.store.deleteFile(gifFile(id));
+    this.emit("gifs");
+    const owns = await this.ownTargets();
+    if (owns.length) await this.deliver(owns, "gifs", this.me.account, { remove: [id] });
+  }
+
+  /** Send a saved GIF: an ordinary file message, under a neutral name. */
+  async sendGif(conv, id) {
+    const blob = await this.gifBlob(id);
+    if (!blob) throw new ApiError(404, "gif_missing");
+    return this.sendFile(conv, new File([blob], "animation.gif", { type: "image/gif" }));
+  }
+
+  // ── recently used emoji, encrypted on this device ──────────────────────────────────────────────────────────────
+
+  async recentEmoji() {
+    const r = await this.store.secret("recentEmoji");
+    return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
+  }
+
+  async setRecentEmoji(list) {
+    await this.store.setSecret("recentEmoji", list);
   }
 }
 

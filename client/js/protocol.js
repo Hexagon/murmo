@@ -252,7 +252,7 @@ export async function open(myDevice, prekeys, packed) {
 
 // ── messages (DESIGN.md §5.3) ───────────────────────────────────────────────────────────────────────────────────
 
-export const KINDS = ["request", "accept", "text", "file", "sync", "history", "receipt"];
+export const KINDS = ["request", "accept", "text", "file", "sync", "history", "receipt", "reaction", "gifs"];
 
 /** A signed message as bytes. */
 export async function signMessage(fields, deviceKey) {
@@ -459,6 +459,13 @@ export function safeMime(mime) {
 /** Whether a file of this type and size is shown inline. */
 export function inlineImage(mime, size) {
   return IMAGE_TYPES.includes(mime) && size <= 25 * 1024 * 1024;
+}
+
+/** Whether bytes start like a GIF file ("GIF87a" or "GIF89a"), whatever type the sender claimed. */
+export function isGif(b) {
+  if (!b || b.length < 6) return false;
+  const sig = String.fromCharCode(...b.subarray(0, 6));
+  return sig === "GIF87a" || sig === "GIF89a";
 }
 
 /** Inline images larger than this many pixels are offered only for saving (a small file can decode to gigabytes). */

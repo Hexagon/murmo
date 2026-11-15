@@ -16,6 +16,8 @@
 //! | `MURMO_REALMS` | `global` | realms accepted for identities from other homes (comma-separated) |
 //! | `MURMO_TRUST_PROXY` | `0` | reverse proxies whose `X-Forwarded-For` is believed: `0` none, `1` loopback and private networks, or a comma-separated list of addresses and CIDR ranges |
 //! | `MURMO_LIMIT_SCALE` | `1` | multiply every rate limit (tests only) |
+//! | `MURMO_GIPHY_KEY` | empty | GIPHY API key: lets browsers search GIPHY directly for their GIF collection (empty: no search) |
+//! | `MURMO_GIPHY_RATING` | `pg-13` | GIPHY content rating for searches (`g`, `pg`, `pg-13`, `r`) |
 //!
 //! Each variable is also read under its old name, `MESG_…`, when the `MURMO_…` name is not set. The default files
 //! `murmo.sqlite` and `murmo-host.key` fall back to `mesg.sqlite` and `mesg-host.key` when only those exist.
@@ -168,6 +170,15 @@ fn config() -> Result<Config, String> {
             .chars()
             .filter(|c| c.is_ascii_graphic() && *c != '"' && *c != '\\')
             .collect(),
+        giphy_key: env("MURMO_GIPHY_KEY", "")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(128)
+            .collect(),
+        giphy_rating: match env("MURMO_GIPHY_RATING", "pg-13").to_ascii_lowercase().as_str() {
+            r @ ("g" | "pg" | "pg-13" | "r") => r.to_string(),
+            _ => "pg-13".to_string(),
+        },
     })
 }
 
@@ -218,9 +229,15 @@ async fn security_headers(State(app): State<Arc<App>>, req: Request, next: Next)
             .collect::<Vec<_>>()
             .join(" ")
     };
+    // GIPHY only when the operator configured a key: the browser fetches search results and GIFs itself.
+    let giphy = if app.cfg.giphy_key.is_empty() {
+        String::new()
+    } else {
+        app::GIPHY_HOSTS.join(" ")
+    };
     let csp = format!(
         "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; \
-         connect-src 'self' {ws_origin} {homes}; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; \
+         connect-src 'self' {ws_origin} {homes} {giphy}; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; \
          frame-ancestors 'none'"
     );
     if let Ok(v) = HeaderValue::from_str(&csp) {
