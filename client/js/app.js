@@ -74,14 +74,47 @@ function reconcile(el, nodes) {
   }
 }
 
+/** Properties `h` never sets: they take markup, or run what they are given. */
+const NO_PROPS = new Set(["innerhtml", "outerhtml", "srcdoc", "insertadjacenthtml"]);
+/** Attributes that load or open a URL; `h` lets them name only this origin, a blob of it or an https page. */
+const URL_PROPS = new Set(["href", "src", "action", "formaction", "poster", "data", "xlink:href", "ping", "background", "cite"]);
+
+/** `v` if it is a URL `h` may put in an attribute (see URL_PROPS); throws otherwise (`javascript:`, `data:`, …). */
+function safeUrl(k, v) {
+  const s = String(v);
+  let u;
+  try {
+    u = new URL(s, location.href);
+  } catch {
+    throw new TypeError(`h: ${k} is not a URL`);
+  }
+  const ok =
+    u.origin === location.origin && (u.protocol === "https:" || u.protocol === "http:" || u.protocol === "blob:")
+      ? true
+      : u.protocol === "https:" && k === "href"; // a link to another site (opened with rel=noopener), never a resource
+  if (!ok) throw new TypeError(`h: ${k} may not be ${u.protocol} here`);
+  return s;
+}
+
+/**
+ * Make an element. `props` must be written in the code, never taken from data: `on…` keys add listeners, and
+ * the rest become attributes or properties. As a second line of defence it refuses markup properties (innerHTML,
+ * srcdoc, …), non-function `on…` values, and URL attributes outside this origin's own pages and blobs (only an
+ * https `href` may lead elsewhere). Text from others goes in as `text` or as children, which are always text nodes.
+ */
 function h(tag, props = {}, ...children) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props ?? {})) {
     if (v === undefined || v === null || v === false) continue;
+    const lk = k.toLowerCase();
+    if (NO_PROPS.has(lk)) throw new TypeError(`h: ${k} is not allowed`);
     if (k === "class") el.className = v;
     else if (k === "text") el.textContent = v;
     else if (k === "style") el.style.cssText = v; // CSSOM, allowed by the CSP (no style attributes)
-    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (lk.startsWith("on")) {
+      if (typeof v !== "function") throw new TypeError(`h: ${k} must be a function`);
+      el.addEventListener(lk.slice(2), v);
+    } else if (URL_PROPS.has(lk)) el.setAttribute(k, safeUrl(lk, v));
     else if (k in el && typeof v !== "string") el[k] = v;
     else el.setAttribute(k, v === true ? "" : v);
   }

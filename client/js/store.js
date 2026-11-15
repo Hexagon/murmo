@@ -345,14 +345,14 @@ export class Store {
     return (await req(this.db.transaction("files").objectStore("files").count(k))) > 0;
   }
   /** Store a whole file (in parts). */
-  async putFile(f, bytes) {
+  async putFile(f, bytes, sha256 = p.b64(new p.Sha256().update(bytes).digest())) {
     const n = p.chunkCount(bytes.length);
     for (let from = 0; from < n; from += PART_BATCH) {
       const parts = [];
       for (let i = from; i < Math.min(n, from + PART_BATCH); i++) parts.push(bytes.subarray(i * p.CHUNK, (i + 1) * p.CHUNK));
       await this.putParts(f, from, parts);
     }
-    await this.finishFile(f, n, bytes.length);
+    await this.finishFile(f, n, bytes.length, sha256);
   }
   async putPart(f, i, bytes) {
     await this.putParts(f, i, [bytes]);
@@ -388,12 +388,35 @@ export class Store {
     const byKey = new Map(rows.map((r) => [r.k, r.v]));
     return Promise.all(keys.map((pk) => (byKey.has(pk) ? p.decryptLocal(this.key, byKey.get(pk), `part:${pk}`) : undefined)));
   }
-  /** Mark a file complete once all its parts are stored. */
-  async finishFile(f, n, size) {
+  /** Mark a file complete once all its parts are stored; `sha256` (base64) is kept so that a later message naming the same id can be checked. */
+  async finishFile(f, n, size, sha256) {
     const k = await this.tag("file", f);
     const tx = this.db.transaction("files", "readwrite");
-    tx.objectStore("files").put({ k, n, size });
+    tx.objectStore("files").put(typeof sha256 === "string" ? { k, n, size, sha256 } : { k, n, size });
     await done(tx);
+  }
+  /**
+   * `{ size, sha256 }` of a stored file, or undefined. Files stored before the hash was kept are hashed once here
+   * and the hash is saved in their header.
+   */
+  async fileDigest(f) {
+    const r = await this.fileHeader(f);
+    if (!r) return undefined;
+    if (typeof r.sha256 === "string") return { size: r.size, sha256: r.sha256 };
+    const read = await this.fileReader(f);
+    if (!read) return undefined;
+    const hash = new p.Sha256();
+    for (let i = 0; i < read.n; i++) {
+      const x = await read(i);
+      if (!x) return undefined;
+      hash.update(x);
+    }
+    const sha256 = p.b64(hash.digest());
+    const { k, ...rest } = r;
+    const tx = this.db.transaction("files", "readwrite");
+    tx.objectStore("files").put({ ...rest, k, size: read.size, sha256 });
+    await done(tx);
+    return { size: read.size, sha256 };
   }
   /** Delete a file: its header, its parts and anything still incoming for it. */
   async deleteFile(f) {

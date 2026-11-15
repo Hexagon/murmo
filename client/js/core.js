@@ -1101,7 +1101,7 @@ export class Messenger extends EventTarget {
     // Asked before the transfer, so that a file is queued whole or not at all; not at all when it can never fit.
     const tooBig = this.fileQueue() && p.queuedBytes(size) > this.queueLimit();
     const queued = this.fileQueue() && !tooBig ? await this.ws.relaySpace(away, p.queuedBytes(size)) : [];
-    await this.store.finishFile(f, n, size);
+    await this.store.finishFile(f, n, size, meta.sha256);
     const { id, time } = await this.deliver([...peers, ...owns], "file", conv, meta);
     const m = { id, conv, dir: "out", time, kind: "file", file: { ...meta, have: true }, device: this.me.device, delivered: 0 };
     m.file.missed = away.filter((d) => !queued.includes(d));
@@ -1212,7 +1212,13 @@ export class Messenger extends EventTarget {
   async onFileMeta(m, conv, dir) {
     const b = m.body ?? {};
     if (typeof b.f !== "string" || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.n) || b.size < 0 || b.size > p.MAX_FILE) return;
+    if (typeof b.sha256 !== "string" || typeof b.key !== "string") return;
     if (b.n !== p.chunkCount(b.size)) return;
+    // A file id this device already has may only be named for the same content: otherwise a contact who learned the
+    // id (the server sees it in relayed chunks) could make another conversation's file, or a saved GIF, appear as
+    // theirs, under a name and type of their choosing.
+    const stored = await this.store.fileDigest(b.f);
+    if (stored && (stored.sha256 !== b.sha256 || stored.size !== b.size)) return;
     b.name = p.safeFileName(b.name);
     b.mime = p.safeMime(b.mime);
     if (await this.superseded({ id: m.id, conv, dir, time: m.time, device: m.from.device })) return false;
@@ -1268,7 +1274,10 @@ export class Messenger extends EventTarget {
     }
     let t = this.files.get(f);
     if (t?.meta && t.meta.key !== meta.key) {
-      // Another file message with this id: start again with the newer one.
+      // A file message from another conversation may not take over a transfer under way (it would put its own
+      // content under the first message's file id).
+      if (t.message?.conv !== message?.conv) return;
+      // Another file message with this id in the same conversation: start again with the newer one.
       await this.dropTransfer(f, t);
       t = undefined;
     }
@@ -1403,7 +1412,7 @@ export class Messenger extends EventTarget {
     if (!good) return this.dropTransfer(f, t, true);
     const m = await this.store.message(t.message.id);
     if (m && TOMBSTONES.includes(m.kind)) return this.dropTransfer(f, t, true); // taken back meanwhile
-    await this.store.finishFile(f, t.meta.n, t.meta.size);
+    await this.store.finishFile(f, t.meta.n, t.meta.size, t.meta.sha256);
     await this.dropTransfer(f, t);
     if (m?.file) {
       m.file.have = true;
@@ -1693,7 +1702,7 @@ export class Messenger extends EventTarget {
       id: p.b64(p.random(16)), size: bytes.length, n: p.chunkCount(bytes.length),
       width: size.width, height: size.height, sha256, key: p.b64(await p.newFileKey()),
     };
-    await this.store.putFile(gifFile(g.id), bytes);
+    await this.store.putFile(gifFile(g.id), bytes, sha256);
     await this.store.setSecret("gifs", [g, ...list]);
     this.emit("gifs");
     this.shareGif(g).catch(() => {}); // the other devices can also ask for it later
