@@ -166,6 +166,15 @@ function clock(t) {
   return new Date(t * 1000).toLocaleTimeString("sv-SE", { hour: "2-digit", minute: "2-digit" });
 }
 
+/** When a device was last connected, for the device list (`undefined`: not known). */
+function lastSeen(t) {
+  if (t === undefined) return "Senast ansluten: okänt";
+  if (t === 0) return "Ansluten nu";
+  const day = dayLabel(t);
+  const days = Math.floor((Date.now() / 1000 - t) / 86400);
+  return `Senast ansluten ${day === "Idag" || day === "Igår" ? day.toLowerCase() + " " + clock(t) : day}${days >= 2 ? ` (${days} dagar sedan)` : ""}`;
+}
+
 function dayLabel(t) {
   const d = new Date(t * 1000);
   const today = new Date();
@@ -1890,7 +1899,7 @@ async function showDevices() {
     h("div", { class: "actions" }, h("button", { class: "btn", text: "Stäng", onclick: () => d.close() })),
   );
   const render = async () => {
-    const own = await messenger.ownList(true);
+    const [own, seen] = await Promise.all([messenger.ownList(true), messenger.ownSeen()]);
     put(
       list,
       own.present.length === 1
@@ -1900,7 +1909,13 @@ async function showDevices() {
         h(
           "div",
           { class: "dev" },
-          h("div", { class: "l" }, h("div", { text: dev.label + (dev.id === messenger.me.device ? " (den här)" : "") }), h("div", { class: "id", text: dev.id })),
+          h(
+            "div",
+            { class: "l" },
+            h("div", { text: dev.label + (dev.id === messenger.me.device ? " (den här)" : "") }),
+            h("div", { class: "seen", text: lastSeen(dev.id === messenger.me.device ? 0 : seen[dev.id]) }),
+            h("div", { class: "id", text: dev.id }),
+          ),
           dev.id === messenger.me.device
             ? null
             : h("button", {

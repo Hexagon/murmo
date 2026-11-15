@@ -68,6 +68,10 @@ CREATE TABLE IF NOT EXISTS push_subs (
   device   TEXT PRIMARY KEY,
   endpoint TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS device_seen (
+  device TEXT PRIMARY KEY,
+  seen   INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rate_limits (
   key    BLOB PRIMARY KEY,
@@ -184,6 +188,8 @@ impl Db {
                 .map_err(store_err)?;
             tx.execute("DELETE FROM mailbox WHERE device = ?1", params![d])
                 .map_err(store_err)?;
+            tx.execute("DELETE FROM device_seen WHERE device = ?1", params![d])
+                .map_err(store_err)?;
         }
         tx.commit().map_err(store_err)?;
         Ok(true)
@@ -200,6 +206,8 @@ impl Db {
             c.execute("DELETE FROM relay_queue WHERE device = ?1", params![d])
                 .map_err(store_err)?;
             c.execute("DELETE FROM push_subs WHERE device = ?1", params![d])
+                .map_err(store_err)?;
+            c.execute("DELETE FROM device_seen WHERE device = ?1", params![d])
                 .map_err(store_err)?;
         }
         Ok(())
@@ -544,6 +552,30 @@ impl Db {
         .map_err(store_err)
     }
 
+    /// Record that a device was connected at `t` (seconds).
+    pub fn set_seen(&self, device: &str, t: i64) -> Result<(), StoreError> {
+        self.conn()?
+            .execute(
+                "INSERT INTO device_seen (device, seen) VALUES (?1, ?2)
+                 ON CONFLICT (device) DO UPDATE SET seen = MAX(seen, excluded.seen)",
+                params![device, t],
+            )
+            .map(|_| ())
+            .map_err(store_err)
+    }
+
+    /// When a device was last connected, if it ever was since this was recorded.
+    pub fn seen(&self, device: &str) -> Result<Option<i64>, StoreError> {
+        self.conn()?
+            .query_row(
+                "SELECT seen FROM device_seen WHERE device = ?1",
+                params![device],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(store_err)
+    }
+
     /// A server setting.
     pub fn setting(&self, key: &str) -> Result<Option<String>, StoreError> {
         self.conn()?
@@ -872,6 +904,17 @@ mod tests {
     fn put(db: &Db, to: &str, from_account: &str, n: usize) -> bool {
         db.relay_enqueue(to, "dev", from_account, &"x".repeat(n), 10, &LIMITS)
             .expect("enqueue")
+    }
+
+    #[test]
+    fn seen_only_moves_forward_and_goes_with_the_device() {
+        let db = db();
+        assert_eq!(db.seen("b1").expect("seen"), None);
+        db.set_seen("b1", 100).expect("set");
+        db.set_seen("b1", 50).expect("set");
+        assert_eq!(db.seen("b1").expect("seen"), Some(100));
+        db.drop_devices(&["b1".to_string()]).expect("drop");
+        assert_eq!(db.seen("b1").expect("seen"), None);
     }
 
     #[test]

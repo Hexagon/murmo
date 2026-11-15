@@ -457,6 +457,7 @@ WebSocket frames (JSON):
 | client → server | `{ t: "relay", to, data, ref, store: true }`: as above, and chunks for devices that are not connected are queued |
 | client → server | `{ t: "relay-space", devices, bytes, ref }` → `{ t: "relay-space", ok, ref }` (room in the file queue) |
 | client → server | `{ t: "relay-ack", ids }` (deletes queued chunks) |
+| client → server | `{ t: "seen", ref }` → `{ t: "seen", devices: { device: seconds }, ref }`: when the account's own devices were last connected (`0`: now), for cleaning up the device list; never for other accounts |
 | client → server | `{ t: "push-sub", endpoint?, ref }` → `{ t: "ok", ref }`: set or remove this device's push endpoint |
 | client → server | `{ t: "ping" }` → `{ t: "pong" }` (the client's heartbeat; browsers drop sockets of background pages silently) |
 | server → client | `{ t: "link", request }`, `{ t: "devices", account, head }` |

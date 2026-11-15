@@ -172,6 +172,7 @@ export class Socket extends EventTarget {
         return;
       case "sent":
       case "presence":
+      case "seen":
       case "prekey-ok":
       case "relay-space":
       case "ok":
@@ -241,6 +242,13 @@ export class Socket extends EventTarget {
     const ref = p.b64(p.random(12));
     const r = await this.call({ t: "presence", devices: devices.slice(0, 32), ref }, ref);
     return r.online ?? [];
+  }
+
+  /** When the account's own devices were last connected: `{ device: seconds }`, `0` for connected now. */
+  async seen() {
+    const ref = p.b64(p.random(12));
+    const r = await this.call({ t: "seen", ref }, ref, 10000);
+    return r.devices ?? {};
   }
 
   /** Which of `devices` the server can keep `bytes` of file chunks for while they are away. */

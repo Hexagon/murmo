@@ -371,6 +371,11 @@ test("the GIF collection: only real GIFs, encrypted locally, sent as an ordinary
 test("a GIF saved while another own device is away reaches it later", async () => {
   alice2.ws.close();
   await new Promise((r) => setTimeout(r, 300));
+  // The device list shows when the other device was last connected; only the account's own devices are reported.
+  const seen = await alice.ownSeen();
+  assert.equal(seen[alice.me.device], 0);
+  assert.ok(Math.abs(seen[alice2.me.device] - Date.now() / 1000) < 10);
+  assert.equal(Object.keys(await bob.ownSeen()).includes(alice.me.device), false);
   const gif = Uint8Array.from(Buffer.from("R0lGODlhAgACAIAAAP///wAAACH5BAEAAAAALAAAAAACAAIAAAIChFEAOw==", "base64")); // 2 × 2
   alice.fileQueue = () => false; // nothing kept on the server: the device asks for the bytes itself
   assert.equal(await alice.saveGif(new Blob([gif])), "saved");
@@ -521,7 +526,7 @@ test("the server keeps no delivered messages and no files", async () => {
   assert.equal(left, 0);
   const queued = db2count("relay_queue");
   assert.equal(queued, 0);
-  assert.deepEqual(tables, ["changes", "device_lists", "identities", "mailbox", "prekeys", "push_subs", "rate_limits", "relay_queue", "remote_ids", "settings", "sqlite_sequence"]);
+  assert.deepEqual(tables, ["changes", "device_lists", "device_seen", "identities", "mailbox", "prekeys", "push_subs", "rate_limits", "relay_queue", "remote_ids", "settings", "sqlite_sequence"]);
 });
 
 function db2count(table) {

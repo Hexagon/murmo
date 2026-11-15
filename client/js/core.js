@@ -723,6 +723,11 @@ export class Messenger extends EventTarget {
     await this.sendHistory(request.device.id);
   }
 
+  /** When this account's devices were last connected (`{}` while offline: the list works without it). */
+  async ownSeen() {
+    return this.ws.seen().catch(() => ({}));
+  }
+
   async removeDevice(id) {
     const own = await this.ownList(true);
     const d = own.present.find((x) => x.id === id);
