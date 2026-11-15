@@ -64,6 +64,11 @@ function localeFor(l) {
   }
 }
 
+/** The language the user picked on this browser, or null when it follows the browser. */
+export function chosenLanguage() {
+  return stored();
+}
+
 export function language() {
   return lang;
 }

@@ -448,7 +448,6 @@ export default {
   "page.check2": "Identitet med rootcard, lösenordet lämnar aldrig webbläsaren",
   "page.check3": "Ingen sökning, inga kontaktlistor på servern",
   "page.check4": "Öppen källkod – granska koden eller kör en egen server",
-  "page.noscript": "Murmo körs i webbläsaren och behöver JavaScript.",
   "page.step1Title": "Skapa en identitet",
   "page.step1": "Välj ett namn och ett lösenord. Du får ett återställningskort att spara offline – det är nyckeln till din identitet, och det enda som kan återställa den.",
   "page.step2Title": "Dela din identifierare",
