@@ -216,6 +216,24 @@ test("link a second device: approval on the first, history handed over", async (
   for (const dev of [alice, alice2]) await until(async () => (await dev.messages(bob.me.account)).find((m) => m.text === "Från laptopen")?.delivered > 0);
 });
 
+test("retention: old messages are deleted on all own devices, new ones kept", async () => {
+  const conv = bob.me.account;
+  const old = Math.floor(Date.now() / 1000) - 3 * 86400;
+  for (const dev of [alice, alice2]) await dev.store.putMessage({ id: `old-${dev.me.device}`, conv, dir: "in", time: old, kind: "text", text: "gammalt" });
+  assert.ok((await alice2.messages(conv)).some((m) => m.text === "gammalt"));
+  await alice.setRetention(conv, 86400);
+  assert.ok(!(await alice.messages(conv)).some((m) => m.text === "gammalt"));
+  // The setting reaches the other device, which prunes too; recent messages stay.
+  await until(async () => alice2.contacts.get(conv)?.retention === 86400);
+  await until(async () => !(await alice2.messages(conv)).some((m) => m.text === "gammalt"));
+  assert.ok((await alice2.messages(conv)).some((m) => m.text === "Från laptopen"));
+  // A message older than the retention is not stored at all.
+  await alice.record({ id: "too-old", conv, dir: "in", time: old, kind: "text", text: "för gammalt" });
+  assert.ok(!(await alice.store.hasMessage("too-old")));
+  await alice.setRetention(conv, 0);
+  await until(async () => alice2.contacts.get(conv)?.retention === 0);
+});
+
 test("files go live to connected devices, wait for absent ones, and own devices federate later", async () => {
   const data = noise(150_000);
   const file = new File([data], "bild.png", { type: "image/png" });

@@ -370,6 +370,26 @@ export async function decryptChunk(fileKeyRaw, p) {
   );
 }
 
+/**
+ * A file name that is safe to show and to save: no control or bidirectional-formatting characters (which can make
+ * `photo\u202Egpj.exe` look like `photoexe.jpg`), no path separators, not empty, at most 200 characters.
+ */
+export function safeFileName(name) {
+  const s = String(name ?? "")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff\ufff9-\ufffb]/g, "")
+    .replace(/[\/\\]/g, "_")
+    .trim()
+    .replace(/^\.+/, "")
+    .slice(0, 200);
+  return s || "fil";
+}
+
+/** A MIME type as sent by another device, or `application/octet-stream` when it is not a plain `type/subtype`. */
+export function safeMime(mime) {
+  const s = String(mime ?? "").toLowerCase().slice(0, 100);
+  return /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(s) ? s : "application/octet-stream";
+}
+
 /** Whether a file of this type and size is shown inline. */
 export function inlineImage(mime, size) {
   return IMAGE_TYPES.includes(mime) && size <= 25 * 1024 * 1024;

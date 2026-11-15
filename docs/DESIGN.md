@@ -291,6 +291,13 @@ Database `mesg-<account>`:
 | `messages` | encrypted messages, indexed by conversation and time |
 | `files` | encrypted file contents, by file id |
 
+**Retention per conversation.** A contact record can carry `retention` (seconds; 0 or absent: keep). Messages of
+that conversation sent before *now − retention* are deleted from IndexedDB together with their files: when the
+setting changes, every minute while the app runs, and at start. A message that is already older when it arrives (from
+the mailbox or in a history hand-over) is not stored. The setting is synced to the account's own devices (`sync` with
+`{ contact: { account, retention } }`) and travels with the contact records in a history hand-over. It applies only
+to this account's devices: the other party decides about their copies, and nothing is sent to them.
+
 ## 9. Files
 
 Files go live between connected devices. For devices that are not connected the server may keep the encrypted
@@ -314,7 +321,13 @@ it off for the whole server (`MESG_FILE_QUEUE_MB=0`).
    sender is connected and they are too (every minute and on reconnect, for 14 days). The interface shows a file that
    no device of the recipient has yet as *not sent yet*.
 4. Receivers check every chunk and the final hash, store the file encrypted locally and show images inline
-   (PNG, JPEG, GIF, WebP; never SVG).
+   (PNG, JPEG, GIF, WebP; never SVG). Relay chunks are accepted only from the account's own devices and from contacts
+   in state accepted or outgoing; others are dropped (and, if they came from the file queue, acknowledged so the server
+   deletes them). Once the file key is known, every chunk is decrypted on arrival and a chunk that fails is dropped
+   instead of spoiling the file. The file name and type in a `file` message are cleaned on receipt: control and
+   bidirectional-formatting characters and path separators are removed (so `photo‮gpj.exe` cannot pose as a JPEG),
+   and a type that is not a plain `type/subtype` becomes `application/octet-stream`. Files are always saved as
+   `application/octet-stream`; user text is shown in bidi-isolated elements.
 5. **Later federation between one account's devices:** a device that has the metadata but not the content can ask its
    own connected devices (`file-req` over the relay). A device that has the file streams it back the same way. Only
    devices in the account's own verified device list are served.

@@ -102,6 +102,14 @@ try {
   await a.waitForFunction(() => /\d{4}/.test(document.querySelector("dialog .code")?.textContent ?? ""), { timeout: 20000 });
   const codeA = await a.$eval("dialog .code", (e) => e.textContent);
   console.log("safety codes equal:", codeA === codeB);
+  // Retention: chosen in the contact menu, shown in the conversation's title.
+  await a.keyboard.press("Escape");
+  await a.click('.topbar [aria-label="Fler val"]');
+  await a.waitForSelector("dialog #retention", { timeout: 5000 });
+  await a.select("dialog #retention", String(7 * 86400));
+  await a.waitForFunction(() => document.querySelector(".topbar .title")?.textContent.includes("raderas efter 1 vecka"), { timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-7-retention.png` });
+  await a.keyboard.press("Escape");
   // Dark mode and narrow screen.
   await b.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }]);
   await b.keyboard.press("Escape");

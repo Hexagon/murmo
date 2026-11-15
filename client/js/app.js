@@ -3,7 +3,7 @@
 import * as p from "./protocol.js";
 import { Api, ApiError } from "./api.js";
 import * as id from "./identity.js";
-import { Messenger, Store, setupDevice } from "./core.js";
+import { Messenger, Store, setupDevice, validRetention } from "./core.js";
 import { accounts } from "./store.js";
 import * as notify from "./notify.js";
 import * as rc from "../vendor/rootcard/src/index.js";
@@ -114,6 +114,20 @@ function dialog(...children) {
   document.body.append(d);
   d.showModal();
   return d;
+}
+
+/** Choices for how long a conversation's messages are kept (seconds; 0: until the conversation is deleted). */
+const RETENTIONS = [
+  [0, "Tills vidare"],
+  [3600, "1 timme"],
+  [86400, "1 dag"],
+  [7 * 86400, "1 vecka"],
+  [30 * 86400, "30 dagar"],
+  [365 * 86400, "1 år"],
+];
+
+function retentionLabel(r) {
+  return RETENTIONS.find(([s]) => s === r)?.[1] ?? `${Math.round(r / 86400)} dagar`;
 }
 
 function splitHandle(handle) {
@@ -807,7 +821,7 @@ function topbar(...children) {
 
 /** What of a contact decides how its conversation is drawn (besides the messages). */
 function shape(c) {
-  return c ? `${c.account}|${c.state}|${!!c.fork}|${c.devicesChanged ?? 0}` : "";
+  return c ? `${c.account}|${c.state}|${!!c.fork}|${c.devicesChanged ?? 0}|${c.retention ?? 0}` : "";
 }
 
 /** The open contact changed (a request was accepted, a block, new devices): draw the conversation again. */
@@ -844,7 +858,7 @@ function openConversation(account, form = false) {
   ui.thread = h("div", { class: "thread" });
   ui.scroll = h("div", { class: "scroll" }, ui.thread);
   const head = topbar(
-    h("div", { class: "title" }, name, h("span", { class: "tag", text: tag }), homeLabel(c.home) ? h("span", { class: "home", text: ` · ${homeLabel(c.home)}` }) : null),
+    h("div", { class: "title" }, name, h("span", { class: "tag", text: tag }), homeLabel(c.home) ? h("span", { class: "home", text: ` · ${homeLabel(c.home)}` }) : null, c.retention ? h("span", { class: "home", title: "Meddelanden raderas från dina enheter efter den här tiden", text: ` · raderas efter ${retentionLabel(c.retention)}` }) : null),
     c.state === "accepted" ? h("button", { class: "btn ghost small", onclick: () => showSafety(c) }, icon("shield"), h("span", { class: "wide", text: "Säkerhetskod" })) : null,
     h("button", { class: "icon-btn", "aria-label": "Fler val", onclick: () => showContactMenu(c) }, icon("more")),
   );
@@ -1029,7 +1043,7 @@ async function renderThread() {
 }
 
 function message(m) {
-  const body = m.kind === "file" ? fileView(m) : h("div", { class: "body", text: m.text ?? "" });
+  const body = m.kind === "file" ? fileView(m) : h("div", { class: "body", dir: "auto", text: m.text ?? "" });
   const media = m.kind === "file" ? " media" : "";
   const meta = h("div", { class: "meta", text: clock(m.time) });
   if (Messenger.undelivered(m)) {
@@ -1108,7 +1122,7 @@ function fileView(m) {
     "div",
     { class: "filecard" },
     h("div", { class: "ico", text: (f.name.split(".").pop() || "fil").slice(0, 4).toUpperCase() }),
-    h("div", { class: "fi" }, h("div", { class: "fn", text: f.name }), h("div", { class: "fs", text: f.have ? bytes(f.size) : `${bytes(f.size)} · ${m.dir === "in" ? "inte mottagen än" : "inte mottagen på den här enheten"}` })),
+    h("div", { class: "fi" }, h("div", { class: "fn", dir: "auto", text: f.name }), h("div", { class: "fs", text: f.have ? bytes(f.size) : `${bytes(f.size)} · ${m.dir === "in" ? "inte mottagen än" : "inte mottagen på den här enheten"}` })),
     action,
   );
 }
@@ -1138,10 +1152,39 @@ function showContactMenu(c) {
       "div",
       { style: "display:flex;flex-direction:column;gap:8px" },
       c.state === "accepted" ? h("button", { class: "btn", text: "Visa säkerhetskod", onclick: () => { d.close(); showSafety(c); } }) : null,
+      retentionPicker(c),
       c.state !== "blocked" ? h("button", { class: "btn danger", text: "Blockera", onclick: () => messenger.setState(c.account, "blocked").then(() => { d.close(); openConversation(null); }) }) : null,
       h("button", { class: "btn danger", text: "Ta bort konversationen", onclick: () => messenger.setState(c.account, "declined").then(() => { d.close(); openConversation(null); }) }),
     ),
     h("div", { class: "actions" }, h("button", { class: "btn", text: "Stäng", onclick: () => d.close() })),
+  );
+}
+
+/** How long the messages of a conversation are kept on this account's devices. */
+function retentionPicker(c) {
+  const current = validRetention(c.retention) ? c.retention : 0;
+  const choices = RETENTIONS.some(([s]) => s === current) ? RETENTIONS : [...RETENTIONS, [current, retentionLabel(current)]];
+  const select = h(
+    "select",
+    {
+      class: "input",
+      id: "retention",
+      onchange: () => {
+        const r = Number(select.value);
+        messenger.setRetention(c.account, r).then(
+          () => toast(r ? `Meddelanden äldre än ${retentionLabel(r)} raderas nu från dina enheter.` : "Meddelandena sparas tills vidare."),
+          (x) => toast(say(x)),
+        );
+      },
+    },
+    ...choices.map(([s, label]) => h("option", { value: String(s), text: label, selected: s === current })),
+  );
+  return h(
+    "label",
+    { class: "field" },
+    h("span", { text: "Spara meddelanden" }),
+    select,
+    h("span", { class: "hint", text: "Gäller dina egna enheter, också texter och filer du redan har. Motparten bestämmer själv över sina kopior." }),
   );
 }
 

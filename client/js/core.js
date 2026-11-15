@@ -25,6 +25,14 @@ const OFFLINE = ["offline", "disconnected", "timeout"];
 /** Receipts are collected for this long and sent together (a mailbox read after a while away is one receipt). */
 const RECEIPT_WAIT = 400;
 const RECEIPT_MAX = 200;
+/** Longest retention a conversation can be set to (seconds); 0 keeps messages until the conversation is deleted. */
+export const RETENTION_MAX = 10 * 365 * 24 * 3600;
+const PRUNE_EVERY = 60_000;
+
+/** Whether `r` is a retention in seconds this client accepts (0: keep). */
+export function validRetention(r) {
+  return Number.isInteger(r) && r >= 0 && r <= RETENTION_MAX;
+}
 
 /**
  * Prepare this browser as a device of the account after a login (docs/DESIGN.md §4.2, §4.3).
@@ -144,6 +152,8 @@ export class Messenger extends EventTarget {
       if (set) for (const d of e.detail.devices ?? []) set.add(d);
     });
     this.retryTimer = setInterval(() => this.flushFiles().catch(() => {}), FILE_RETRY_EVERY);
+    this.pruneTimer = setInterval(() => this.prune().catch(() => {}), PRUNE_EVERY);
+    this.prune().catch(() => {});
     this.ws.addEventListener("link", (e) => this.onLink(e.detail.request).catch(() => {}));
     this.ws.addEventListener("devices", (e) => {
       this.lists.delete(e.detail.account);
@@ -158,6 +168,7 @@ export class Messenger extends EventTarget {
 
   stop() {
     clearInterval(this.retryTimer);
+    clearInterval(this.pruneTimer);
     clearTimeout(this.receiptTimer);
     this.ws?.close();
     this.store.close();
@@ -316,6 +327,34 @@ export class Messenger extends EventTarget {
     this.emit("messages", { conv: account });
   }
 
+  // ── retention (DESIGN.md §8.1) ────────────────────────────────────────────────────────────────────────────────
+
+  /** Keep the messages of a conversation for `seconds` (0: until the conversation is deleted); synced to own devices. */
+  async setRetention(account, seconds) {
+    const c = this.contacts.get(account);
+    if (!c || !validRetention(seconds)) return;
+    c.retention = seconds;
+    c.updated = p.now();
+    await this.saveContact(c);
+    await this.sendOwn("sync", account, { contact: { account, retention: seconds } });
+    await this.prune(account);
+  }
+
+  /** The time before which messages of `account` are deleted, or 0 when they are kept. */
+  cutoff(account) {
+    const r = this.contacts.get(account)?.retention;
+    return r && validRetention(r) ? p.now() - r : 0;
+  }
+
+  /** Delete the messages (and their files) that have outlived their conversation's retention. */
+  async prune(only = null) {
+    for (const c of [...this.contacts.values()]) {
+      if (only && c.account !== only) continue;
+      const before = this.cutoff(c.account);
+      if (before && (await this.store.pruneConversation(c.account, before))) this.emit("messages", { conv: c.account });
+    }
+  }
+
   async safetyCode(account) {
     const own = await this.ownList(true);
     const other = (await this.list(account, true)).list;
@@ -392,6 +431,8 @@ export class Messenger extends EventTarget {
   }
 
   async record(m) {
+    // Already past the conversation's retention (a message that waited long in the mailbox): not stored at all.
+    if (m.time < this.cutoff(m.conv)) return;
     // Local order within a second: when this device stored it (kept when history is handed over).
     m.at ??= Date.now();
     if (m.dir === "out" && this.early.delete(m.id)) m.delivered = p.now();
@@ -582,6 +623,12 @@ export class Messenger extends EventTarget {
           if (s.state === "declined") await this.store.deleteConversation(s.account);
           this.emit("messages", { conv: s.account });
         }
+        if (c && validRetention(s.retention)) {
+          c.retention = s.retention;
+          c.updated = Math.max(c.updated ?? 0, m.time);
+          await this.saveContact(c);
+          await this.prune(s.account);
+        }
         return;
       }
       case "history":
@@ -661,6 +708,7 @@ export class Messenger extends EventTarget {
     for (const m of body?.messages ?? []) {
       if (typeof m?.id !== "string" || typeof m.conv !== "string") continue;
       if (await this.store.hasMessage(m.id)) continue;
+      if (typeof m.time !== "number" || m.time < this.cutoff(m.conv)) continue;
       if (m.file) m.file.have = false;
       await this.store.putMessage(m);
       this.emit("messages", { conv: m.conv });
@@ -683,7 +731,7 @@ export class Messenger extends EventTarget {
     const key = await p.newFileKey();
     const n = Math.max(1, Math.ceil(bytes.length / p.CHUNK));
     const meta = {
-      f, name: String(file.name || "fil").slice(0, 200), mime: String(file.type || "application/octet-stream").slice(0, 100),
+      f, name: p.safeFileName(file.name), mime: p.safeMime(file.type),
       size: bytes.length, sha256: p.b64(await p.sha256(bytes)), key: p.b64(key), n,
     };
     const peers = await this.peerTargets(conv);
@@ -780,6 +828,8 @@ export class Messenger extends EventTarget {
   async onFileMeta(m, conv, dir) {
     const b = m.body ?? {};
     if (typeof b.f !== "string" || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.n) || b.size > p.MAX_FILE) return;
+    b.name = p.safeFileName(b.name);
+    b.mime = p.safeMime(b.mime);
     const fresh = !(await this.store.hasMessage(m.id));
     if (fresh) {
       const have = await this.store.hasFile(b.f);
@@ -806,10 +856,25 @@ export class Messenger extends EventTarget {
     }
     if (r.k === "chunk") {
       if (typeof r.f !== "string" || !Number.isSafeInteger(r.i) || !Number.isSafeInteger(r.n) || r.i < 0 || r.i >= r.n || r.n > 4096) return;
+      // Chunks only from own devices and from contacts we talk to: anyone else could fill memory, or this device's
+      // share of the server's file queue (queued copies are acknowledged so the server drops them).
+      if (!this.mayRelay(f)) {
+        if (f.id) this.ws.relayAck([f.id]);
+        return;
+      }
       let t = this.files.get(r.f);
       if (!t && (await this.store.hasFile(r.f))) {
         if (f.id) this.ws.relayAck([f.id]); // a queued copy of a file we already have
         return;
+      }
+      // With the file key known, a chunk that does not decrypt is dropped at once, so it cannot spoil the file.
+      if (t?.meta && !t.chunks[r.i]) {
+        try {
+          await p.decryptChunk(p.unb64(t.meta.key), r);
+        } catch {
+          if (f.id) this.ws.relayAck([f.id]);
+          return;
+        }
       }
       t = this.files.get(r.f) ?? t ?? { chunks: [], got: 0 };
       if (f.id) (t.ids ??= []).push(f.id); // from the server's queue: acknowledged when the file is complete
@@ -829,6 +894,12 @@ export class Messenger extends EventTarget {
       const bytes = await this.store.file(r.f);
       if (m && bytes) await this.streamFile(m.file, bytes, [f.from]);
     }
+  }
+
+  /** Whether a relay frame comes from an own device or from a contact this account talks to. */
+  mayRelay(f) {
+    if (f.account === this.me.account) return true;
+    return ["accepted", "outgoing"].includes(this.contacts.get(f.account)?.state);
   }
 
   sweepFiles() {

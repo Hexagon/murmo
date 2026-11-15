@@ -190,12 +190,32 @@ export class Store {
     tx.objectStore("messages").put({ k, c, v });
     await done(tx);
   }
+  /** Delete a whole conversation, with the files of its messages. */
   async deleteConversation(conv) {
+    await this.pruneConversation(conv, Infinity);
+  }
+  /**
+   * Delete the messages of a conversation sent before `before` (seconds since the epoch), with their files.
+   * Returns the number of messages deleted.
+   */
+  async pruneConversation(conv, before) {
     const c = await this.tag("conv", conv);
-    const tx = this.db.transaction("messages", "readwrite");
-    const keys = await req(tx.objectStore("messages").index("c").getAllKeys(c));
+    const rows = await req(this.db.transaction("messages").objectStore("messages").index("c").getAll(c));
+    const keys = [];
+    const files = [];
+    for (const r of rows) {
+      const m = decode(await p.decryptLocal(this.key, r.v, `message:${r.k}`));
+      if (!(m.time < before)) continue;
+      keys.push(r.k);
+      if (typeof m.file?.f === "string") files.push(await this.tag("file", m.file.f));
+    }
+    if (!keys.length) return 0;
+    // Tags are computed first: a transaction ends at the first await on anything but itself.
+    const tx = this.db.transaction(["messages", "files"], "readwrite");
     for (const k of keys) tx.objectStore("messages").delete(k);
+    for (const k of files) tx.objectStore("files").delete(k);
     await done(tx);
+    return keys.length;
   }
 
   // files
