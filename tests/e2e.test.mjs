@@ -872,6 +872,71 @@ test("a disappearing message can be taken back from everyone like a text", async
   assert.ok((await bob.messages(peer)).some((m) => m.id === id && m.kind === "retracted"));
 });
 
+test("a disappearing picture counts down like a text and is gone with its file on every device", async () => {
+  const conv = bob.me.account;
+  const peer = alice.me.account;
+  const data = noise(40_000);
+  const bobGot = waitFor(bob, "file");
+  const alice2Got = waitFor(alice2, "file");
+  await alice.sendFile(conv, new File([data], "snap.png", { type: "image/png" }), null, 15);
+  const { f } = await bobGot;
+  await alice2Got;
+  // Bob keeps it as a disappearing message with the picture; no countdown until it has been on his screen.
+  const id = await until(async () => (await bob.messages(peer)).find((m) => m.file?.f === f && m.file.have)?.id);
+  const b = await bob.store.message(id);
+  assert.equal(b.kind, "ephemeral");
+  assert.equal(b.ttl, 15);
+  assert.equal(b.file.name, "snap.png");
+  assert.equal(b.expires, undefined);
+  assert.deepEqual(await bob.store.file(f), data);
+  // The receipt (sent once the picture is here) starts the countdown on the sender's devices.
+  await until(async () => (await alice.store.message(id))?.expires);
+  await until(async () => (await alice2.store.message(id))?.expires);
+  assert.equal((await alice2.store.message(id)).kind, "ephemeral");
+  await bob.markSeen(peer, [id]);
+  assert.ok(Math.abs((await bob.store.message(id)).expires - (Date.now() + 15000)) < 5000);
+  // Time is up everywhere: the message is gone, and so is the picture.
+  for (const [who, conv2] of [[bob, peer], [alice, conv], [alice2, conv]]) {
+    const due = { ...(await who.store.message(id)), expires: Date.now() - 1000 };
+    await who.store.putMessage(due);
+    await who.track(due);
+    await who.sweepTimed();
+    assert.equal((await who.store.message(id)).kind, "gone");
+    assert.ok(!(await who.messages(conv2)).some((m) => m.id === id));
+    assert.equal(await who.store.hasFile(f), false);
+  }
+  // The same envelope again does not bring the message back, nor start taking in the picture again.
+  const wire = {
+    id, kind: "ephemeral", time: b.time, conv: peer, heads: {},
+    from: { account: alice.me.account, device: alice.me.device },
+    to: { account: bob.me.account, device: bob.me.device },
+    body: { file: { ...b.file, have: undefined }, ttl: b.ttl, wait: b.wait },
+  };
+  await bob.handleMessage(wire);
+  assert.equal((await bob.store.message(id)).kind, "gone");
+  assert.ok(!bob.files.has(f));
+});
+
+test("only pictures can be sent disappearing", async () => {
+  const conv = bob.me.account;
+  const peer = alice.me.account;
+  await assert.rejects(
+    alice.sendFile(conv, new File([noise(1000)], "avtal.pdf", { type: "application/pdf" }), null, 15),
+    (e) => e.message === "ephemeral_files",
+  );
+  await assert.rejects(alice.sendFile(conv, new File([noise(1000)], "x.png", { type: "image/png" }), null, 7), (e) => e.message === "bad_ttl");
+  // A disappearing message that carries another kind of file is dropped by the recipient.
+  const id = "pdf-ephemeral-test";
+  await bob.handleMessage({
+    id, kind: "ephemeral", time: Math.floor(Date.now() / 1000), conv: peer, heads: {},
+    from: { account: alice.me.account, device: alice.me.device },
+    to: { account: bob.me.account, device: bob.me.device },
+    body: { file: { f: "pdf-file-test", name: "avtal.pdf", mime: "application/pdf", size: 1000, sha256: "x", key: "x", n: 1 }, ttl: 15, wait: 3600 },
+  });
+  assert.equal(await bob.store.message(id), undefined);
+  assert.ok(!bob.files.has("pdf-file-test"));
+});
+
 test("the server keeps an ephemeral envelope for the shorter wait", async () => {
   const conv = bob.me.account;
   bob.ws.close(); // Bob's first device is away: the envelope waits in the mailbox

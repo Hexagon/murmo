@@ -40,7 +40,8 @@ export default {
   "err.no_message": "Meddelandet finns inte längre.",
   "err.too_late": "Meddelandet kan inte längre ändras eller tas bort för alla (det går i 24 timmar). Du kan ta bort det för dig.",
   "err.unknown": "Något gick fel ({code}).",
-  "err.ephemeral_files": "Filer och GIF:ar kan inte skickas som försvinnande meddelanden än. Stäng av timern först.",
+  "err.ephemeral_files": "Med timer på kan bara bilder skickas (PNG, JPEG, GIF, WebP). Stäng av timern för att skicka andra filer.",
+  "err.ephemeral_gifs": "GIF:ar från din samling kan inte skickas med timer på. Stäng av timern först.",
   "err.bad_ttl": "Ogiltig tid för ett försvinnande meddelande.",
   "err.empty_text": "Meddelandet kan inte vara tomt. Ta bort det i stället.",
 
@@ -300,6 +301,7 @@ export default {
   "compose.yourGifs": "Dina GIF:ar",
   "compose.attach": "Bifoga fil",
   "compose.sendFile": "Skicka fil",
+  "compose.sendPicture": "Skicka försvinnande bild",
   "compose.foot": "Krypterat från enhet till enhet. Servern sparar inget efter leverans.",
 
   // ── emoji ──

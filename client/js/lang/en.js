@@ -40,7 +40,8 @@ export default {
   "err.no_message": "The message no longer exists.",
   "err.too_late": "The message can no longer be edited or deleted for everyone (that is possible for 24 hours). You can delete it for yourself.",
   "err.unknown": "Something went wrong ({code}).",
-  "err.ephemeral_files": "Files and GIFs cannot be sent as disappearing messages yet. Turn the timer off first.",
+  "err.ephemeral_files": "With the timer on, only pictures can be sent (PNG, JPEG, GIF, WebP). Turn the timer off to send other files.",
+  "err.ephemeral_gifs": "GIFs from your collection cannot be sent with the timer on. Turn the timer off first.",
   "err.bad_ttl": "Invalid time for a disappearing message.",
   "err.empty_text": "The message cannot be empty. Delete it instead.",
 
@@ -300,6 +301,7 @@ export default {
   "compose.yourGifs": "Your GIFs",
   "compose.attach": "Attach file",
   "compose.sendFile": "Send file",
+  "compose.sendPicture": "Send disappearing picture",
   "compose.foot": "Encrypted from device to device. The server keeps nothing after delivery.",
 
   // ── emoji ──

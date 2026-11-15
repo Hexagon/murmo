@@ -1596,12 +1596,15 @@ function composer(c) {
     }
   };
   const sendFiles = async (files) => {
-    if (ttl) return toast(tr("err.ephemeral_files"));
+    // With the timer on, only pictures (shown in the thread) can go, as disappearing pictures.
+    const t = ttl;
+    const ok = t ? files.filter((f) => p.inlineImage(f.type, f.size)) : files;
+    if (ok.length < files.length) toast(tr("err.ephemeral_files"));
     // Whether the server could keep a file for devices that are away is known before it is sent: said in its row.
     const max = settings().fileQueue ? queueMaxFile() : null;
-    for (const f of files) {
+    for (const f of ok) {
       const note = max !== null && f.size > max && f.size <= p.MAX_FILE ? tr("compose.tooBigToQueue", { size: bytes(Math.max(0, max)) }) : null;
-      await upload(f.name, (progress) => messenger.sendFile(c.account, f, progress), note);
+      await upload(f.name, (progress) => messenger.sendFile(c.account, f, progress, t), note);
     }
   };
   /** Put text where the cursor is (or over the selection), and keep the cursor after it. */
@@ -1659,10 +1662,12 @@ function composer(c) {
     timerBtn.title = what;
     ta.placeholder = ttl ? tr("compose.placeholderEphemeral", { name, time: ttlLabel(ttl) }) : tr("compose.placeholder", { name });
     box?.classList.toggle("ephemeral", !!ttl);
-    for (const b of [clipBtn, gifBtn]) {
-      b.disabled = !!ttl;
-      b.title = ttl ? tr("err.ephemeral_files") : tr(b === clipBtn ? "compose.sendFile" : "compose.yourGifs");
-    }
+    // With the timer on: pictures only, and no GIFs from the collection.
+    gifBtn.disabled = !!ttl;
+    gifBtn.title = ttl ? tr("err.ephemeral_gifs") : tr("compose.yourGifs");
+    clipBtn.title = ttl ? tr("compose.sendPicture") : tr("compose.sendFile");
+    if (ttl) file.accept = p.IMAGE_TYPES.join(",");
+    else file.removeAttribute("accept");
     if (ttl && open === "gif") closePanel();
   };
   const setTtl = (t) => {
@@ -2014,6 +2019,16 @@ async function renderThread() {
     out.push(entry.node);
   }
   for (const id of msgNodes.keys()) if (!seen.has(id)) msgNodes.delete(id);
+  // Pictures whose message is gone (a disappearing picture, a deletion): let go of them, and close a viewer on one.
+  const files = new Set(msgs.map((m) => m.file?.f).filter(Boolean));
+  for (const f of [...imgNodes.keys()]) {
+    if (files.has(f)) continue;
+    imgNodes.delete(f);
+    const u = objectUrls.get(f);
+    if (u) URL.revokeObjectURL(u);
+    objectUrls.delete(f);
+  }
+  for (const d of document.querySelectorAll("dialog.viewer[data-f]")) if (!files.has(d.dataset.f)) d.close();
   if (!msgs.length) out.push(h("div", { class: "day", text: tr("conv.empty") }));
   reconcile(ui.thread, out);
   if (nearBottom || seq === 1) ui.scroll.scrollTop = ui.scroll.scrollHeight;
@@ -2196,8 +2211,8 @@ function retractedView(m) {
 
 function message(m) {
   if (m.kind === "retracted") return retractedView(m);
-  const body = m.kind === "file" ? fileView(m) : h("div", { class: emoji.emojiOnly(m.text) ? "body jumbo" : "body", dir: "auto", text: m.text ?? "" });
-  const media = m.kind === "file" ? " media" : "";
+  const body = m.file ? fileView(m) : h("div", { class: emoji.emojiOnly(m.text) ? "body jumbo" : "body", dir: "auto", text: m.text ?? "" });
+  const media = m.file ? " media" : "";
   const meta = h("div", { class: "meta" }, timeView(m.time));
   if (m.kind === "ephemeral") meta.append(fuseView(m));
   if (m.edited) meta.append(h("span", { class: "edited", text: tr("msg.edited"), title: tr("msg.editedAt", { when: i18n.dateTime(m.edited) }) }));
@@ -2231,7 +2246,8 @@ function message(m) {
   // A picture carries its time on itself; text ends with it on the last line, as long as it fits there.
   const shown = media ? h("div", { class: "frame" }, body, meta) : [body, meta];
   const node = h("div", { class: `msg ${m.dir}${media}${m.kind === "ephemeral" ? " ephemeral" : ""}` }, shown, reactionsView(m, canReact));
-  if (m.kind === "ephemeral" && m.dir === "in" && !m.expires) node.dataset.unseen = m.id;
+  // A received disappearing message counts down once it has been on the screen (a picture: once it is here).
+  if (m.kind === "ephemeral" && m.dir === "in" && !m.expires && (!m.file || m.file.have)) node.dataset.unseen = m.id;
   return node;
 }
 
@@ -2373,7 +2389,7 @@ function deliveryMark(m) {
 }
 
 /** A picture full size: closed by the cross, a tap anywhere, Escape or the back button. */
-function showImage(url, name, gif = null) {
+function showImage(url, name, gif = null, f = null, locked = false) {
   const save = gif
     ? h("button", {
         class: "btn small save-gif",
@@ -2389,12 +2405,18 @@ function showImage(url, name, gif = null) {
         },
       })
     : null;
+  const img = h("img", { src: url, alt: name });
+  if (locked) {
+    img.draggable = false;
+    img.addEventListener("contextmenu", (e) => e.preventDefault());
+  }
   const d = dialog(
     h("button", { class: "close", "aria-label": tr("common.close"), title: tr("common.close"), onclick: () => d.close() }, icon("close")),
-    h("img", { src: url, alt: name }),
+    img,
     save,
   );
   d.classList.add("viewer");
+  if (f) d.dataset.f = f; // closed when the picture's message is gone (a disappearing picture, deleted)
   d.addEventListener("click", () => d.close());
 }
 
@@ -2414,6 +2436,11 @@ function fileView(m) {
     if (made) return made;
     // The dimensions are read from the header first: a small file can decode to gigabytes and freeze the tab.
     const img = h("img", { class: "inline", alt: f.name });
+    if (m.kind === "ephemeral") {
+      // Not offered for saving: no "Spara", no dragging out, no "Save image as". (A screenshot cannot be stopped.)
+      img.draggable = false;
+      img.addEventListener("contextmenu", (e) => e.preventDefault());
+    }
     imgNodes.set(f.f, img);
     const known = imgSizes.get(f.f);
     if (known) placeImage(img, known);
@@ -2435,8 +2462,8 @@ function fileView(m) {
         if (ui.scroll && ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < img.height + 160) ui.scroll.scrollTop = ui.scroll.scrollHeight;
       });
       img.src = url;
-      const gif = f.mime === "image/gif" ? () => messenger.fileBlob(f.f, "image/gif") : null;
-      img.addEventListener("click", () => showImage(url, f.name, gif));
+      const gif = f.mime === "image/gif" && m.kind === "file" ? () => messenger.fileBlob(f.f, "image/gif") : null;
+      img.addEventListener("click", () => showImage(url, f.name, gif, f.f, m.kind === "ephemeral"));
     }).catch(() => {
       const card = fileCard(m);
       imgNodes.set(f.f, card);
@@ -2478,7 +2505,7 @@ async function playVideo(m, card) {
  */
 function fileCard(m, note, play = false) {
   const f = m.file;
-  const action = f.have
+  const action = m.kind === "ephemeral" ? null : f.have
     ? h("button", { class: "btn small", text: tr("common.save"), onclick: async () => download(f.name, await messenger.fileBlob(f.f, "application/octet-stream")) })
     : h("button", {
         class: "btn small",

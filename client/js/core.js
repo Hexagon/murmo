@@ -581,11 +581,17 @@ export class Messenger extends EventTarget {
   // is up the message is replaced by a record without content (GONE), which is deleted once a late copy could no
   // longer come. Deadlines are kept in `timed` (an encrypted secret), so they survive a reload.
 
-  /** The body of an "ephemeral" message, checked: `{ text, ttl, wait }`, or null. */
+  /**
+   * The body of an "ephemeral" message, checked: `{ text, ttl, wait }` or, for a picture, `{ file, ttl, wait }` with
+   * the file's metadata as in a `file` message (only pictures that are shown in the thread). Otherwise null.
+   */
   ephemeralBody(m) {
     const b = m.body ?? {};
-    if (typeof b.text !== "string" || !validTtl(b.ttl) || !validTtl(b.wait)) return null;
-    return { text: b.text.slice(0, TEXT_MAX), ttl: b.ttl, wait: b.wait };
+    if (!validTtl(b.ttl) || !validTtl(b.wait)) return null;
+    if (typeof b.text === "string") return { text: b.text.slice(0, TEXT_MAX), ttl: b.ttl, wait: b.wait };
+    const file = Messenger.fileMeta(b.file);
+    if (!file || !p.inlineImage(file.mime, file.size)) return null;
+    return { file, ttl: b.ttl, wait: b.wait };
   }
 
   /** How long a disappearing message to `conv` may wait unread: EPHEMERAL_WAIT, or less when messages are kept less. */
@@ -674,7 +680,14 @@ export class Messenger extends EventTarget {
         // A copy that comes again (a resend, a mailbox read twice) must not bring it back: keep its id until no
         // copy can be in a mailbox any longer.
         const gone = { id, conv: m.conv, dir: m.dir, time: m.time, at: m.at, kind: GONE, until: (m.time + EPHEMERAL_WAIT) * 1000 + 3600_000 };
-        await this.store.putMessage(gone);
+        // A picture goes with it: its parts, and anything of it still on its way.
+        const f = m.file?.f;
+        if (f) {
+          const t = this.files.get(f);
+          if (t) await this.dropTransfer(f, t);
+          await this.forgetPendingFile(id);
+        }
+        await this.store.replaceMessage(gone, f);
         if (gone.until > now) this.timed.set(id, { conv: m.conv, at: gone.until });
         else await this.store.deleteMessage(id);
         convs.add(m.conv);
@@ -824,6 +837,11 @@ export class Messenger extends EventTarget {
         if (c?.state !== "accepted") return;
         const e = this.ephemeralBody(m);
         if (!e) return;
+        if (e.file) {
+          // A picture counts as arrived when its content is here (as a file).
+          if (await this.onFileMeta(m, peer, "in", e)) this.emit("incoming", { conv: peer, kind: "ephemeral" });
+          return;
+        }
         this.queueReceipt(peer, m.id);
         // Taken back, deleted or already gone: not again.
         if (!(await this.isNew({ id: m.id, conv: peer, dir: "in", time: m.time, device: m.from.device }))) return;
@@ -884,6 +902,7 @@ export class Messenger extends EventTarget {
       case "ephemeral": {
         const e = this.ephemeralBody(m);
         if (!e || conv === this.me.account) return;
+        if (e.file) return void (await this.onFileMeta(m, conv, "out", e));
         if (!(await this.isNew({ id: m.id, conv, dir: "out", time: m.time, device: m.from.device }))) return;
         await this.record({ id: m.id, conv, dir: "out", time: m.time, kind: "ephemeral", text: e.text, ttl: e.ttl, wait: e.wait, device: m.from.device, delivered: 0 });
         return;
@@ -1062,9 +1081,15 @@ export class Messenger extends EventTarget {
    * is told how far it has come: "read" while it is read and stored, "send" while it is sent (`id` is the message's
    * from then on).
    */
-  async sendFile(conv, file, progress = null) {
+  /**
+   * Send a file; with `ttl` (one of EPHEMERAL_TTLS) as a disappearing picture (DESIGN.md §6.8): an "ephemeral"
+   * message carrying the file's metadata, only for pictures shown in the thread.
+   */
+  async sendFile(conv, file, progress = null, ttl = 0) {
     this.requireAccepted(conv);
     if (file.size > p.MAX_FILE) throw new ApiError(413, "too_large");
+    if (ttl && !EPHEMERAL_TTLS.includes(ttl)) throw new ApiError(400, "bad_ttl");
+    if (ttl && !p.inlineImage(p.safeMime(file.type), file.size)) throw new ApiError(400, "ephemeral_files");
     const f = p.b64(p.random(16));
     const key = await p.newFileKey();
     const size = file.size;
@@ -1102,15 +1127,20 @@ export class Messenger extends EventTarget {
     const tooBig = this.fileQueue() && p.queuedBytes(size) > this.queueLimit();
     const queued = this.fileQueue() && !tooBig ? await this.ws.relaySpace(away, p.queuedBytes(size)) : [];
     await this.store.finishFile(f, n, size, meta.sha256);
-    const { id, time } = await this.deliver([...peers, ...owns], "file", conv, meta);
-    const m = { id, conv, dir: "out", time, kind: "file", file: { ...meta, have: true }, device: this.me.device, delivered: 0 };
+    // A disappearing picture waits on the server (message and chunks) no longer than it may wait unread.
+    const wait = ttl ? this.ephemeralWait(conv) : 0;
+    const { id, time } = ttl
+      ? await this.deliver([...peers, ...owns], "ephemeral", conv, { file: meta, ttl, wait }, undefined, { ttl: wait })
+      : await this.deliver([...peers, ...owns], "file", conv, meta);
+    const m = { id, conv, dir: "out", time, kind: ttl ? "ephemeral" : "file", file: { ...meta, have: true }, device: this.me.device, delivered: 0 };
+    if (ttl) Object.assign(m, { ttl, wait });
     m.file.missed = away.filter((d) => !queued.includes(d));
     m.file.peers = peers.map((t) => t.device);
     progress?.({ phase: "send", done: 0, total: n, id });
     await this.record(m);
     const to = [...online, ...queued];
     const sending = (done) => progress?.({ phase: "send", done, total: n, id });
-    if (to.length) m.file.missed.push(...(await this.streamFile(meta, await this.store.fileReader(f), to, queued.length > 0, sending)));
+    if (to.length) m.file.missed.push(...(await this.streamFile(meta, await this.store.fileReader(f), to, queued.length > 0, sending, wait)));
     await this.settleFile(m);
     const isPeer = (d) => m.file.peers.includes(d);
     const r = {
@@ -1124,9 +1154,9 @@ export class Messenger extends EventTarget {
 
   /**
    * Stream the chunks of a file to devices; `read(i)` gives part `i` (Store.fileReader). Returns the devices the server
-   * could not give them to.
+   * could not give them to. `ttl`: how long the server may keep queued chunks (seconds; 0: its own limit).
    */
-  async streamFile(meta, read, devices, store = false, progress = null) {
+  async streamFile(meta, read, devices, store = false, progress = null, ttl = 0) {
     const key = p.unb64(meta.key);
     const ref = `${meta.f}.${p.b64(p.random(6))}`;
     const missed = new Set();
@@ -1139,7 +1169,7 @@ export class Messenger extends EventTarget {
         await this.ws.pace(devices, data.length);
         await this.ws.drain();
         if (this.refused.has(ref)) return devices;
-        this.ws.relay(devices, data, { store, ref });
+        this.ws.relay(devices, data, { store, ref, ttl });
         progress?.(i + 1);
       }
       await this.ws.presence([this.me.device]); // answered after every chunk before it was handled
@@ -1160,6 +1190,9 @@ export class Messenger extends EventTarget {
     const cur = await this.store.message(m.id);
     if (cur && TOMBSTONES.includes(cur.kind)) return; // taken back or deleted while it was on its way
     if (cur?.reactions) m.reactions = cur.reactions;
+    // So may a receipt (and with it a disappearing picture's countdown).
+    if (cur?.delivered) m.delivered = cur.delivered;
+    if (cur?.expires) m.expires = cur.expires;
     await this.store.putMessage(m);
     const rest = this.pendingFiles.filter((x) => x.id !== m.id);
     if (m.file.missed.length) rest.push({ conv: m.conv, id: m.id, time: m.time });
@@ -1209,23 +1242,42 @@ export class Messenger extends EventTarget {
     return sent;
   }
 
-  async onFileMeta(m, conv, dir) {
-    const b = m.body ?? {};
-    if (typeof b.f !== "string" || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.n) || b.size < 0 || b.size > p.MAX_FILE) return;
-    if (typeof b.sha256 !== "string" || typeof b.key !== "string") return;
-    if (b.n !== p.chunkCount(b.size)) return;
+  /** The metadata of a file in a message, checked and made safe, or null. */
+  static fileMeta(x) {
+    if (!x || typeof x !== "object") return null;
+    const b = { ...x };
+    if (typeof b.f !== "string" || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.n) || b.size < 0 || b.size > p.MAX_FILE) return null;
+    if (typeof b.sha256 !== "string" || typeof b.key !== "string") return null;
+    if (b.n !== p.chunkCount(b.size)) return null;
+    b.name = p.safeFileName(b.name);
+    b.mime = p.safeMime(b.mime);
+    return b;
+  }
+
+  /**
+   * A `file` message, or with `e` (its checked ephemeralBody) a disappearing picture: store the message and wait for
+   * the file's chunks. Returns whether the message is new here.
+   */
+  async onFileMeta(m, conv, dir, e = null) {
+    const b = e ? e.file : Messenger.fileMeta(m.body);
+    if (!b) return false;
     // A file id this device already has may only be named for the same content: otherwise a contact who learned the
     // id (the server sees it in relayed chunks) could make another conversation's file, or a saved GIF, appear as
     // theirs, under a name and type of their choosing.
     const stored = await this.store.fileDigest(b.f);
-    if (stored && (stored.sha256 !== b.sha256 || stored.size !== b.size)) return;
-    b.name = p.safeFileName(b.name);
-    b.mime = p.safeMime(b.mime);
+    if (stored && (stored.sha256 !== b.sha256 || stored.size !== b.size)) return false;
     if (await this.superseded({ id: m.id, conv, dir, time: m.time, device: m.from.device })) return false;
     const fresh = !(await this.store.hasMessage(m.id));
+    if (!fresh && !(await this.store.message(m.id))?.file) return false; // gone: its file is not wanted again
     if (fresh) {
       const have = await this.store.hasFile(b.f);
-      const rec = { id: m.id, conv, dir, time: m.time, kind: "file", file: { ...b, have }, device: m.from.device };
+      const rec = { id: m.id, conv, dir, time: m.time, kind: e ? "ephemeral" : "file", file: { ...b, have }, device: m.from.device };
+      if (e) {
+        // How long it may wait unread: what the sender asked for, and never longer than kept here.
+        rec.ttl = e.ttl;
+        rec.wait = dir === "in" ? Math.min(e.wait, this.ephemeralWait(conv)) : e.wait;
+        if ((m.time + rec.wait) * 1000 <= Date.now()) return false;
+      }
       if (dir === "out") rec.delivered = 0;
       await this.record(rec);
       // A file counts as arrived when its content is here (otherwise tryAssemble says so later).

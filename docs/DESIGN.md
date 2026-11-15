@@ -349,7 +349,16 @@ hand-over). A device with an older client keeps showing the first text (§12), w
 
 A disappearing message is an `ephemeral` message `{ text, ttl, wait }` to the other party and the own other devices:
 `ttl` is its timer (15 s, 1 min, 5 min or 1 h in the interface), `wait` how long it may wait unread (7 days, or the
-conversation's retention when that is shorter, §8.1). Both are inside the encryption. Only text in this version.
+conversation's retention when that is shorter, §8.1). Both are inside the encryption.
+
+A **disappearing picture** is an `ephemeral` message `{ file, ttl, wait }` whose `file` is the metadata of a `file`
+message (§9: id, name, type, size, hash, chunk count, file key); its chunks travel like any file's. Only pictures that
+are shown in the thread (PNG, JPEG, GIF, WebP within §9's limits) can be sent this way; a recipient drops one that
+carries any other type. It is shown like a picture, without "Spara" in the thread or the viewer (and without dragging
+out or "Save image as"); its countdown on the recipient's device starts once the picture is here and on the screen,
+and its receipt (and so the sender's countdown) is sent once the picture is here, as for files. When the time is up
+the picture's parts go with the message, as does anything of it still on its way, and a viewer showing it closes.
+A screenshot cannot be stopped.
 
 - **Countdown.** On the recipient's devices it starts when the message is on the screen of a visible page (each device
   for itself); on the sender's devices when a `receipt` says it arrived (§6.4: there are no read receipts). A message
@@ -363,16 +372,19 @@ conversation's retention when that is shorter, §8.1). Both are inside the encry
 - **Not copied.** Disappearing messages are left out of the history handed to a newly linked device (§7), and are not
   taken from one.
 - **Server.** Its envelopes carry `to[].ttl = wait` (§10), so the server drops them unread after that, not after 14
-  days. The server thereby learns that an envelope is short-lived, never what it says.
+  days; so do a disappearing picture's queued chunks (`relay` with `ttl`). The server thereby learns that an envelope is short-lived, never what it says.
 - **Notifications** say "Försvinnande meddelande från …"; the push itself is empty as always (§10.1). The list of
   conversations never shows message text.
 - **Taking back and editing.** "Ångra" holds a disappearing message like a text (§6.6), and "Ta bort för alla" and
   "Ta bort för mig" work on it like on a text (a taken-back one leaves the usual placeholder, which does not
   disappear). It cannot be edited (§6.7).
 - **Composer.** The timer is chosen with a button by the composer and stays on for that conversation until it is
-  turned off (kept in the contact record on that device, not synced). While it is on, files and GIFs cannot be sent.
+  turned off (kept in the contact record on that device, not synced). While it is on, pictures are sent as
+  disappearing pictures; other files and GIFs from the collection cannot be sent.
 - **Mixed versions.** A device that does not know `ephemeral` drops it (§12): the message is lost there rather than
-  kept for good. No receipt comes from such a device, so the sender's copy is gone after `wait`.
+  kept for good. No receipt comes from such a device, so the sender's copy is gone after `wait`. A device that knows
+  disappearing texts but not pictures drops a picture the same way (its body has no `text`); the chunks it gets are
+  forgotten as chunks without a `file` message (§8.1).
 
 ### 6.9 Search
 
@@ -617,7 +629,7 @@ WebSocket frames (JSON):
 | client → server | `{ t: "presence", devices, ref }` → `{ t: "presence", online, ref }` |
 | client → server | `{ t: "relay", to, data, ref }` → forwarded as `{ t: "relay", from, account, data }` to connected devices only; `{ t: "relay-missed", devices, ref }` for the rest |
 | server → client | queued file chunks `{ t: "relay", id, from, account, data }`, a few at a time after the envelopes |
-| client → server | `{ t: "relay", to, data, ref, store: true }`: as above, and chunks for devices that are not connected are queued |
+| client → server | `{ t: "relay", to, data, ref, store: true, ttl? }`: as above, and chunks for devices that are not connected are queued (for `ttl` seconds when given, at most 14 days) |
 | client → server | `{ t: "relay-space", devices, bytes, ref }` → `{ t: "relay-space", ok, ref }` (room in the file queue) |
 | client → server | `{ t: "relay-ack", ids }` (deletes queued chunks) |
 | client → server | `{ t: "seen", ref }` → `{ t: "seen", devices: { device: seconds }, ref }`: when the account's own devices were last connected (`0`: now), for cleaning up the device list; never for other accounts |
@@ -676,7 +688,7 @@ never leaves the device.
 | envelopes | delivery | until acknowledged, at most 14 days |
 | link requests | linking | memory only, 10 minutes |
 | relay frames (file chunks) | live transfer | not stored when the recipient device is connected |
-| queued file chunks (ciphertext) | files for devices that are away (sender's choice) | until acknowledged, at most 14 days |
+| queued file chunks (ciphertext) | files for devices that are away (sender's choice) | until acknowledged, at most 14 days (a disappearing picture's: its unread limit) |
 | push endpoint per device | notifications (the user's choice) | until turned off, logged out, or reported gone |
 | VAPID key | signing push requests | while the server exists |
 | network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
