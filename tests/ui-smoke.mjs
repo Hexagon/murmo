@@ -132,7 +132,7 @@ try {
   fs.writeFileSync(`${shots}/tiny.gif`, Buffer.from("R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==", "base64"));
   await a.click(".composer .gif-btn");
   await a.waitForSelector(".picker .gif-grid", { visible: true, timeout: 5000 });
-  const [ch4] = await Promise.all([a.waitForFileChooser(), clickText(a, "Välj GIF-fil…")]);
+  const [ch4] = await Promise.all([a.waitForFileChooser(), clickText(a, "Från fil…")]);
   await ch4.accept([`${shots}/tiny.gif`]);
   await a.waitForSelector(".picker .gif-grid .gif img", { timeout: 10000 });
   await a.screenshot({ path: `${shots}/a-6d-gifs.png` });
@@ -177,6 +177,13 @@ try {
   await a.type(".gif-body input", "katt");
   await a.waitForFunction(() => document.querySelectorAll(".gif-body .gif-grid img[src^='blob:']").length === 3, { timeout: 10000 });
   await a.screenshot({ path: `${shots}/a-6g-giphy.png` });
+  // The results have room, and the tiles do not overlap (rows once collapsed when the panel was short).
+  const layout = await a.evaluate(() => {
+    const boxes = [...document.querySelectorAll(".gif-body .gif-grid .gif-send")].map((e) => e.getBoundingClientRect());
+    const overlap = boxes.some((p, i) => boxes.some((q, j) => i < j && p.left < q.right - 1 && q.left < p.right - 1 && p.top < q.bottom - 1 && q.top < p.bottom - 1));
+    return { grid: document.querySelector(".gif-body .gif-grid").getBoundingClientRect().height, tile: boxes[0]?.height ?? 0, overlap };
+  });
+  if (layout.overlap || layout.grid < layout.tile || layout.tile < 40) throw new Error(`GIF results laid out badly: ${JSON.stringify(layout)}`);
   const before = await a.evaluate(() => document.querySelectorAll(".msg").length);
   await a.click(".gif-body .gif-grid .gif-send");
   await a.waitForSelector(".gif-body .gif-send.saved", { timeout: 10000 });
