@@ -1192,7 +1192,6 @@ function renderWelcome() {
         }
       },
     },
-    h("h1", { text: tr("side.newConversation") }),
     h("p", { class: "hint", text: tr("new.hint") }),
     h("div", { class: "field" }, h("label", { for: "new-handle", text: tr("common.handle") }), input),
     h("div", { class: "field" }, h("label", { for: "new-note", text: tr("new.note") }), note),
@@ -1211,7 +1210,7 @@ function renderWelcome() {
         h("button", { class: "btn small primary", text: tr("new.notifyOn"), onclick: async () => { offer.remove(); toast(await setNotifications(true)); } }),
       );
   put(ui.main,
-    topbar(h("div", { class: "title", text: tr("side.newConversation") })),
+    topbar(h("h1", { class: "title", text: tr("side.newConversation") })),
     h(
       "div",
       { class: "welcome" },
