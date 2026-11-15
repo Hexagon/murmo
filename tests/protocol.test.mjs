@@ -84,3 +84,19 @@ test("fixture for the Rust verifier", { skip: !process.env.MESG_WRITE_FIXTURE },
   const { writeFileSync } = await import("node:fs");
   writeFileSync(new URL("../server/tests/fixtures/js-device-list.json", import.meta.url), rc.canonicalString(fixture) + "\n");
 });
+
+test("file names and types from other devices are made safe", () => {
+  assert.equal(p.safeFileName("photo\u202Egpj.exe"), "photogpj.exe");
+  assert.equal(p.safeFileName("a\u2067b\u200Fc\u0007.txt"), "abc.txt");
+  assert.equal(p.safeFileName("../../etc/passwd"), "_.._etc_passwd");
+  assert.equal(p.safeFileName("C:\\x\\y.doc"), "C:_x_y.doc");
+  assert.equal(p.safeFileName(".hidden"), "hidden");
+  assert.equal(p.safeFileName(""), "fil");
+  assert.equal(p.safeFileName(undefined), "fil");
+  assert.equal(p.safeFileName("x".repeat(500)).length, 200);
+  assert.equal(p.safeMime("IMAGE/PNG"), "image/png");
+  assert.equal(p.safeMime("text/html; charset=utf-8"), "application/octet-stream");
+  assert.equal(p.safeMime("image/svg+xml"), "image/svg+xml");
+  assert.ok(!p.inlineImage(p.safeMime("image/svg+xml"), 10));
+  assert.equal(p.safeMime(42), "application/octet-stream");
+});

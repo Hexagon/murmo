@@ -23,7 +23,7 @@ const MAX_APPEND: usize = 8;
 /// A remote identity's log is refreshed when older than this (seconds).
 const REMOTE_MAX_AGE: i64 = 300;
 
-fn body_object(body: &Bytes) -> Result<Map, ApiError> {
+pub(crate) fn body_object(body: &Bytes) -> Result<Map, ApiError> {
     if body.len() > MAX_BODY {
         return Err(ApiError::new(413, "too_large"));
     }
@@ -33,7 +33,7 @@ fn body_object(body: &Bytes) -> Result<Map, ApiError> {
     }
 }
 
-fn check_account(account: &str) -> Result<(), ApiError> {
+pub(crate) fn check_account(account: &str) -> Result<(), ApiError> {
     // 52 characters of strict Crockford base32 ([ID-3]).
     let crockford = |b: u8| {
         b.is_ascii_digit() || (b.is_ascii_uppercase() && !matches!(b, b'I' | b'L' | b'O' | b'U'))
@@ -50,7 +50,7 @@ fn respond(r: Result<Response, ApiError>) -> Response {
 }
 
 /// Percent-decode a query value.
-fn decode(s: &str) -> Option<String> {
+pub(crate) fn decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

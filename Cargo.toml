@@ -1,5 +1,6 @@
 [workspace]
 members = ["server"]
+exclude = ["fuzz"]
 resolver = "3"
 
 [workspace.package]
