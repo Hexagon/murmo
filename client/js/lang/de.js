@@ -374,6 +374,8 @@ export default {
   "msg.queued": "Auf dem Server eingereiht – noch nicht zugestellt",
   "msg.tooBig": "{w} × {h} Pixel, zu groß zum Anzeigen",
   "msg.cannotShow": "kann hier nicht angezeigt werden",
+  "msg.play": "Abspielen",
+  "msg.cannotPlay": "kann hier nicht abgespielt werden",
   "msg.fetchOwn": "Von meinen Geräten holen",
   "msg.fetchOwnTitle": "Die Datei ist nicht auf diesem Gerät angekommen. Damit werden deine anderen verbundenen Geräte gefragt.",
   "msg.asking": "Frage deine verbundenen Geräte…",

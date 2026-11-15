@@ -7,7 +7,7 @@
 
 import * as rc from "../vendor/rootcard/src/index.js";
 import * as p from "./protocol.js";
-import { Store } from "./store.js";
+import { PART_BATCH, Store } from "./store.js";
 import { Socket } from "./net.js";
 import { fetchState, lookup, proveToServer } from "./identity.js";
 import { ApiError } from "./api.js";
@@ -1069,13 +1069,24 @@ export class Messenger extends EventTarget {
     const key = await p.newFileKey();
     const size = file.size;
     const n = p.chunkCount(size);
-    // Read, hashed and stored part by part: the file is never in memory whole.
+    // Read, hashed and stored PART_BATCH parts at a time: the file is never in memory whole. The next block is read
+    // while one is stored.
     const hash = new p.Sha256();
-    for (let i = 0; i < n; i++) {
-      const part = new Uint8Array(await file.slice(i * p.CHUNK, (i + 1) * p.CHUNK).arrayBuffer());
-      hash.update(part);
-      await this.store.putPart(f, i, part);
-      progress?.({ phase: "read", done: i + 1, total: n });
+    const readBlock = (from) => {
+      if (from >= n) return null;
+      const r = file.slice(from * p.CHUNK, (from + PART_BATCH) * p.CHUNK).arrayBuffer();
+      r.catch(() => {}); // seen when awaited; not left unhandled if storing fails first
+      return r;
+    };
+    let next = readBlock(0);
+    for (let from = 0; from < n; from += PART_BATCH) {
+      const block = new Uint8Array(await next);
+      next = readBlock(from + PART_BATCH);
+      const parts = [];
+      for (let o = 0; o < block.length || (o === 0 && parts.length === 0); o += p.CHUNK) parts.push(block.subarray(o, o + p.CHUNK));
+      for (const part of parts) hash.update(part);
+      await this.store.putParts(f, from, parts);
+      progress?.({ phase: "read", done: Math.min(n, from + PART_BATCH), total: n });
     }
     if (hash.length !== size) throw new ApiError(409, "file_changed");
     const meta = {

@@ -27,7 +27,10 @@ const objectUrls = new Map();
  * on the next render, so pictures and GIFs are not loaded again (and do not blink) each time something changes.
  */
 const msgNodes = new Map();
-/** The open conversation's pictures, by file id: the <img> is moved into a rebuilt message rather than made again. */
+/**
+ * The open conversation's pictures and the videos being played, by file id: the node is moved into a rebuilt message
+ * rather than made again (so a video goes on playing when a reaction comes).
+ */
 const imgNodes = new Map();
 /** The size of pictures seen (file id → { width, height }), to give an <img> its place before it has loaded. */
 const imgSizes = new Map();
@@ -121,6 +124,7 @@ function h(tag, props = {}, ...children) {
 
 const ICONS = {
   send: "M4 12l16-8-6 16-2-7-8-1z",
+  play: "M8 5v14l11-7z",
   clip: "M16 7l-7.5 7.5a2.5 2.5 0 0 0 3.5 3.5L19.5 10.5a4.5 4.5 0 0 0-6.4-6.4L5.6 11.6a6.5 6.5 0 0 0 9.2 9.2L20 15.6",
   menu: "M4 6h16M4 12h16M4 18h16",
   shield: "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z",
@@ -2404,6 +2408,7 @@ function placeImage(img, { width, height }) {
 
 function fileView(m) {
   const f = m.file;
+  if (f.have && p.inlineVideo(f.mime)) return imgNodes.get(f.f) ?? fileCard(m, null, true);
   if (f.have && p.inlineImage(f.mime, f.size)) {
     const made = imgNodes.get(f.f);
     if (made) return made;
@@ -2442,8 +2447,36 @@ function fileView(m) {
   return fileCard(m);
 }
 
-/** A file as a card with its name, size and "Spara" (or a way to fetch it); `note` is said after the size. */
-function fileCard(m, note) {
+/**
+ * Play a video in the conversation in place of its card: the file is put together from its stored parts only now,
+ * when asked for. A video the browser cannot decode goes back to a card that says so.
+ */
+async function playVideo(m, card) {
+  const f = m.file;
+  const b = await messenger.fileBlob(f.f, f.mime);
+  if (!b || !card.isConnected) return;
+  const url = objectUrls.get(f.f) ?? URL.createObjectURL(b);
+  objectUrls.set(f.f, url);
+  const video = h("video", { class: "inline", controls: true, autoplay: true, playsinline: true, preload: "metadata" });
+  const box = h("div", { class: "videobox" }, video, fileCard(m));
+  video.addEventListener("error", () => {
+    const c = fileCard(m, tr("msg.cannotPlay"));
+    imgNodes.set(f.f, c);
+    box.replaceWith(c);
+  });
+  // Playing it from the bottom of the thread: the thread stays at the bottom as the video takes its height.
+  const atBottom = () => ui.scroll && ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < box.offsetHeight + 160;
+  video.addEventListener("loadedmetadata", () => { if (atBottom()) ui.scroll.scrollTop = ui.scroll.scrollHeight; });
+  video.src = url;
+  imgNodes.set(f.f, box);
+  card.replaceWith(box);
+}
+
+/**
+ * A file as a card with its name, size and "Spara" (or a way to fetch it); `note` is said after the size. `play`: a
+ * video, with a button that plays it here.
+ */
+function fileCard(m, note, play = false) {
   const f = m.file;
   const action = f.have
     ? h("button", { class: "btn small", text: tr("common.save"), onclick: async () => download(f.name, await messenger.fileBlob(f.f, "application/octet-stream")) })
@@ -2460,10 +2493,20 @@ function fileCard(m, note) {
           }
         },
       });
+  const onPlay = (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    playVideo(m, btn.closest(".filecard")).catch((x) => {
+      btn.disabled = false;
+      toast(say(x));
+    });
+  };
   return h(
     "div",
     { class: "filecard" },
-    h("div", { class: "ico", text: (f.name.split(".").pop() || tr("msg.file")).slice(0, 4).toUpperCase() }),
+    play
+      ? h("button", { type: "button", class: "ico play", "aria-label": tr("msg.play"), title: tr("msg.play"), onclick: onPlay }, icon("play", 20))
+      : h("div", { class: "ico", text: (f.name.split(".").pop() || tr("msg.file")).slice(0, 4).toUpperCase() }),
     h("div", { class: "fi" }, h("div", { class: "fn", dir: "auto", text: f.name }), h("div", { class: "fs", text: f.have ? (note ? `${bytes(f.size)} · ${note}` : bytes(f.size)) : `${bytes(f.size)} · ${tr(m.dir === "in" ? "msg.notReceived" : "msg.notHere")}` })),
     action,
   );

@@ -374,6 +374,8 @@ export default {
   "msg.queued": "En cola en el servidor: aún no entregado",
   "msg.tooBig": "{w} × {h} píxeles, demasiado grande para mostrarla",
   "msg.cannotShow": "no se puede mostrar aquí",
+  "msg.play": "Reproducir",
+  "msg.cannotPlay": "no se puede reproducir aquí",
   "msg.fetchOwn": "Obtener de mis dispositivos",
   "msg.fetchOwnTitle": "El archivo no ha llegado a este dispositivo. Esto pregunta a tus otros dispositivos conectados.",
   "msg.asking": "Preguntando a tus dispositivos conectados…",

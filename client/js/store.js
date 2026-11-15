@@ -29,6 +29,11 @@ function openDb(name, upgrade) {
 /** All keys of one file's parts: `<file tag>:<index>`. */
 const partsOf = (k) => IDBKeyRange.bound(`${k}:`, `${k}:\uffff`);
 const partKey = (k, i) => `${k}:${String(i).padStart(4, "0")}`;
+/**
+ * How many parts of a file are written or read in one transaction. One transaction per 48 KB part made a large file
+ * take long to store (and to read back) on browsers where each commit waits for the disk.
+ */
+export const PART_BATCH = 32;
 
 // JSON with Uint8Array support, for encrypted records.
 function encode(v) {
@@ -277,7 +282,19 @@ export class Store {
       const whole = await p.decryptLocal(this.key, r.v, `file:${r.k}`);
       return Object.assign((i) => whole.subarray(i * p.CHUNK, (i + 1) * p.CHUNK), { n: p.chunkCount(whole.length), size: whole.length });
     }
-    return Object.assign((i) => this.partByTag(r.k, i), { n: r.n, size: r.size });
+    // Parts are read PART_BATCH at a time: reading part i also reads the parts after it in the same block.
+    let block = null; // { from, parts: Promise<Array<Uint8Array|undefined>> }
+    const read = (i) => {
+      if (!Number.isSafeInteger(i) || i < 0 || i >= r.n) return Promise.resolve(undefined);
+      const from = i - (i % PART_BATCH);
+      if (block?.from !== from) {
+        const b = { from, parts: this.partsByTag(r.k, from, Math.min(PART_BATCH, r.n - from)) };
+        b.parts.catch(() => { if (block === b) block = null; });
+        block = b;
+      }
+      return block.parts.then((xs) => xs[i - from]);
+    };
+    return Object.assign(read, { n: r.n, size: r.size });
   }
   /** The whole file (tests, small files). */
   async file(f) {
@@ -330,15 +347,29 @@ export class Store {
   /** Store a whole file (in parts). */
   async putFile(f, bytes, sha256 = p.b64(new p.Sha256().update(bytes).digest())) {
     const n = p.chunkCount(bytes.length);
-    for (let i = 0; i < n; i++) await this.putPart(f, i, bytes.subarray(i * p.CHUNK, (i + 1) * p.CHUNK));
+    for (let from = 0; from < n; from += PART_BATCH) {
+      const parts = [];
+      for (let i = from; i < Math.min(n, from + PART_BATCH); i++) parts.push(bytes.subarray(i * p.CHUNK, (i + 1) * p.CHUNK));
+      await this.putParts(f, from, parts);
+    }
     await this.finishFile(f, n, bytes.length, sha256);
   }
   async putPart(f, i, bytes) {
+    await this.putParts(f, i, [bytes]);
+  }
+  /** Store parts `first`, `first + 1`, … of a file in one transaction. */
+  async putParts(f, first, parts) {
     const k = await this.tag("file", f);
-    const pk = partKey(k, i);
-    const v = await p.encryptLocal(this.key, bytes, `part:${pk}`);
+    const t = Date.now();
+    const rows = await Promise.all(
+      parts.map(async (bytes, j) => {
+        const pk = partKey(k, first + j);
+        return { k: pk, t, v: await p.encryptLocal(this.key, bytes, `part:${pk}`) };
+      }),
+    );
     const tx = this.db.transaction("parts", "readwrite");
-    tx.objectStore("parts").put({ k: pk, t: Date.now(), v });
+    const store = tx.objectStore("parts");
+    for (const row of rows) store.put(row);
     await done(tx);
   }
   async part(f, i) {
@@ -349,8 +380,15 @@ export class Store {
     const r = await req(this.db.transaction("parts").objectStore("parts").get(pk));
     return r ? p.decryptLocal(this.key, r.v, `part:${pk}`) : undefined;
   }
-  /** Mark a file complete once all its parts are stored. */
-  /** Mark a file complete; `sha256` (base64) is kept so that a later message naming the same id can be checked. */
+  /** Parts `from` … `from + count - 1` of a file (undefined for a missing one), read in one transaction. */
+  async partsByTag(k, from, count) {
+    const keys = Array.from({ length: count }, (_, j) => partKey(k, from + j));
+    const range = IDBKeyRange.bound(keys[0], keys[count - 1]);
+    const rows = await req(this.db.transaction("parts").objectStore("parts").getAll(range));
+    const byKey = new Map(rows.map((r) => [r.k, r.v]));
+    return Promise.all(keys.map((pk) => (byKey.has(pk) ? p.decryptLocal(this.key, byKey.get(pk), `part:${pk}`) : undefined)));
+  }
+  /** Mark a file complete once all its parts are stored; `sha256` (base64) is kept so that a later message naming the same id can be checked. */
   async finishFile(f, n, size, sha256) {
     const k = await this.tag("file", f);
     const tx = this.db.transaction("files", "readwrite");
