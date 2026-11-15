@@ -100,8 +100,14 @@ try {
   fs.writeFileSync(`${shots}/sample.png`, png);
   const [ch2] = await Promise.all([a.waitForFileChooser(), a.click(".composer .icon-btn")]);
   await ch2.accept([`${shots}/sample.png`]);
+  // The sender sees the file on its way above the composer, and how it went.
+  await a.waitForFunction(() => [...document.querySelectorAll(".uploads .upload")].some((e) => /sample\.png/.test(e.textContent)), { timeout: 20000 });
+  await a.waitForFunction(() => document.querySelector(".uploads .upload.ok, .uploads .upload.wait"), { timeout: 20000 });
+  await a.screenshot({ path: `${shots}/a-6a-upload.png` });
   await b.waitForSelector(".msg img.inline", { timeout: 20000 });
   await sleep(1000);
+  // A picture already shown is kept when the thread is drawn again (new messages): not loaded anew, no blinking.
+  await b.evaluate(() => { window.__shownImg = document.querySelector(".msg img.inline"); });
   // The picture opens full size and closes with the cross.
   await b.click(".msg img.inline");
   await b.waitForSelector("dialog.viewer .close", { visible: true, timeout: 5000 });
@@ -118,6 +124,7 @@ try {
   await ch3.accept([`${shots}/bomb.png`]);
   await b.waitForFunction(() => [...document.querySelectorAll(".msg .filecard .fs")].some((e) => /50000 × 50000/.test(e.textContent)), { timeout: 20000 });
   if ((await b.$$(".msg img.inline")).length !== 1) throw new Error("the oversized image was shown inline");
+  if (!(await b.evaluate(() => window.__shownImg?.isConnected && window.__shownImg === document.querySelector(".msg img.inline")))) throw new Error("the picture was made again when the thread was drawn");
   // Emoji: picked from the panel into the text, and a message of only emoji is shown larger.
   await a.click('.composer .icon-btn[aria-label="Emoji"]');
   await a.waitForSelector(".picker .emoji-grid .emoji", { visible: true, timeout: 5000 });

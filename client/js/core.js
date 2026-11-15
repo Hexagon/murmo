@@ -868,7 +868,11 @@ export class Messenger extends EventTarget {
    * server keeps for the devices that are away. Devices that got neither are tried again when they are connected.
    * Returns `{ live, queued, waiting }` (numbers of the recipient's devices).
    */
-  async sendFile(conv, file) {
+  /**
+   * Send a file. `progress({ phase, done, total, id })` is told how far it has come: "read" while it is read and
+   * stored, "send" while it is sent (`id` is the message's from then on).
+   */
+  async sendFile(conv, file, progress = null) {
     const c = this.contacts.get(conv);
     if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
     if (file.size > p.MAX_FILE) throw new ApiError(413, "too_large");
@@ -882,6 +886,7 @@ export class Messenger extends EventTarget {
       const part = new Uint8Array(await file.slice(i * p.CHUNK, (i + 1) * p.CHUNK).arrayBuffer());
       hash.update(part);
       await this.store.putPart(f, i, part);
+      progress?.({ phase: "read", done: i + 1, total: n });
     }
     if (hash.length !== size) throw new ApiError(409, "file_changed");
     const meta = {
@@ -900,9 +905,11 @@ export class Messenger extends EventTarget {
     const m = { id, conv, dir: "out", time, kind: "file", file: { ...meta, have: true }, device: this.me.device, delivered: 0 };
     m.file.missed = away.filter((d) => !queued.includes(d));
     m.file.peers = peers.map((t) => t.device);
+    progress?.({ phase: "send", done: 0, total: n, id });
     await this.record(m);
     const to = [...online, ...queued];
-    if (to.length) m.file.missed.push(...(await this.streamFile(meta, await this.store.fileReader(f), to, queued.length > 0)));
+    const sending = (done) => progress?.({ phase: "send", done, total: n, id });
+    if (to.length) m.file.missed.push(...(await this.streamFile(meta, await this.store.fileReader(f), to, queued.length > 0, sending)));
     await this.settleFile(m);
     const isPeer = (d) => m.file.peers.includes(d);
     return {
@@ -916,7 +923,7 @@ export class Messenger extends EventTarget {
    * Stream the chunks of a file to devices; `read(i)` gives part `i` (Store.fileReader). Returns the devices the server
    * could not give them to.
    */
-  async streamFile(meta, read, devices, store = false) {
+  async streamFile(meta, read, devices, store = false, progress = null) {
     const key = p.unb64(meta.key);
     const ref = `${meta.f}.${p.b64(p.random(6))}`;
     const missed = new Set();
@@ -930,6 +937,7 @@ export class Messenger extends EventTarget {
         await this.ws.drain();
         if (this.refused.has(ref)) return devices;
         this.ws.relay(devices, data, { store, ref });
+        progress?.(i + 1);
       }
       await this.ws.presence([this.me.device]); // answered after every chunk before it was handled
       if (this.refused.has(ref)) return devices; // a chunk was refused: nobody got all of it
@@ -1381,10 +1389,10 @@ export class Messenger extends EventTarget {
   }
 
   /** Send a saved GIF: an ordinary file message, under a neutral name. */
-  async sendGif(conv, id) {
+  async sendGif(conv, id, progress = null) {
     const blob = await this.gifBlob(id);
     if (!blob) throw new ApiError(404, "gif_missing");
-    return this.sendFile(conv, new File([blob], "animation.gif", { type: "image/gif" }));
+    return this.sendFile(conv, new File([blob], "animation.gif", { type: "image/gif" }), progress);
   }
 
   // ── recently used emoji, encrypted on this device ──────────────────────────────────────────────────────────────
