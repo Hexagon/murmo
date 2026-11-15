@@ -100,12 +100,14 @@ const ICONS = {
   timer: "M12 6a7.5 7.5 0 1 0 0 15a7.5 7.5 0 0 0 0-15zM12 9.5v4l2.5 1.5M10 2.5h4M18.5 6.5l1.5-1.5",
 };
 
-function icon(name) {
+/** An icon of ICONS; one given a `size` other than the default is decoration (aria-hidden). */
+function icon(name, size = 18) {
   const ns = "http://www.w3.org/2000/svg";
   const s = document.createElementNS(ns, "svg");
   s.setAttribute("viewBox", "0 0 24 24");
-  s.setAttribute("width", "18");
-  s.setAttribute("height", "18");
+  s.setAttribute("width", String(size));
+  s.setAttribute("height", String(size));
+  if (size !== 18) s.setAttribute("aria-hidden", "true");
   s.setAttribute("fill", "none");
   s.setAttribute("stroke", "currentColor");
   s.setAttribute("stroke-width", "1.8");
@@ -115,6 +117,26 @@ function icon(name) {
   path.setAttribute("d", ICONS[name]);
   s.append(path);
   return s;
+}
+
+/** Whether the device has a pointer that hovers: focusing a field there does not open an on-screen keyboard. */
+function canHover() {
+  return matchMedia("(hover: hover)").matches;
+}
+
+/** Disable `btn` and show a spinner with `text` in it; returns a function that puts the button back. */
+function busy(btn, text) {
+  const label = [...btn.childNodes];
+  btn.disabled = true;
+  btn.replaceChildren(h("span", { class: "spinner" }), text);
+  return () => {
+    btn.disabled = false;
+    btn.replaceChildren(...label);
+  };
+}
+
+function copyHandle() {
+  return navigator.clipboard?.writeText(messenger.handle).then(() => toast(tr("common.handleCopied")));
 }
 
 function say(err) {
@@ -261,13 +283,7 @@ function percent(share) {
 
 /** The language of the interface ("Auto": the browser's); `redraw` shows the current screen again in the new one. */
 function languagePicker(redraw) {
-  const chosen = (() => {
-    try {
-      return localStorage.getItem("murmo-lang") ?? "";
-    } catch {
-      return "";
-    }
-  })();
+  const chosen = i18n.chosenLanguage() ?? "";
   const select = h(
     "select",
     {
@@ -285,13 +301,9 @@ function languagePicker(redraw) {
   return select;
 }
 
+/** The host of a rootcard home, for showing; "" for this server's own home. */
 function homeLabel(home) {
-  if (!home || home === api.base) return "";
-  try {
-    return new URL(home).host;
-  } catch {
-    return home;
-  }
+  return !home || home === api.base ? "" : hostOf(home);
 }
 
 // ── how it works ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -482,14 +494,12 @@ async function loginForm(body, err, prefill) {
       onsubmit: async (e) => {
         e.preventDefault();
         err.textContent = "";
-        btn.disabled = true;
-        btn.replaceChildren(h("span", { class: "spinner" }), tr("common.unlocking"));
+        const restore = busy(btn, tr("common.unlocking"));
         try {
           await loginAndEnter(where === "remote" ? remote.value : "", handle.value.trim(), pw.value, remember.checked);
         } catch (x) {
           err.textContent = say(x);
-          btn.disabled = false;
-          btn.replaceChildren(tr("auth.login"));
+          restore();
         }
       },
     },
@@ -513,7 +523,7 @@ async function loginForm(body, err, prefill) {
   );
   body.replaceChildren(form);
   // Not on touch (it would open the keyboard), and without scrolling the start page down to the form.
-  if (matchMedia("(hover: hover)").matches) (prefill ? pw : handle).focus({ preventScroll: true });
+  if (canHover()) (prefill ? pw : handle).focus({ preventScroll: true });
 }
 
 function registerForm(body, err) {
@@ -529,15 +539,13 @@ function registerForm(body, err) {
           e.preventDefault();
           err.textContent = "";
           if (pw.value !== pw2.value) return (err.textContent = tr("auth.mismatch"));
-          btn.disabled = true;
-          btn.replaceChildren(h("span", { class: "spinner" }), tr("auth.makingKeys"));
+          const restore = busy(btn, tr("auth.makingKeys"));
           try {
             const reg = await id.prepareRegistration(api, user.value.trim(), pw.value);
             showCard(reg, pw.value);
           } catch (x) {
             err.textContent = say(x);
-            btn.disabled = false;
-            btn.replaceChildren(tr("common.continue"));
+            restore();
           }
         },
       },
@@ -549,7 +557,7 @@ function registerForm(body, err) {
       btn,
     ),
   );
-  if (matchMedia("(hover: hover)").matches) user.focus({ preventScroll: true });
+  if (canHover()) user.focus({ preventScroll: true });
 }
 
 function download(name, blob) {
@@ -568,15 +576,13 @@ function showCard(reg, password) {
   saved.addEventListener("change", () => (go.disabled = !saved.checked));
   const base = `${reg.card.username}-${reg.account.slice(0, 4)}`;
   go.addEventListener("click", async () => {
-    go.disabled = true;
-    go.replaceChildren(h("span", { class: "spinner" }), tr("card.creating"));
+    const restore = busy(go, tr("card.creating"));
     try {
       const done = await reg.finish();
       await loginAndEnter("", done.handle, password, false);
     } catch (x) {
       err.textContent = say(x);
-      go.disabled = false;
-      go.replaceChildren(tr("auth.register"));
+      restore();
     }
   });
   inApp(true);
@@ -729,16 +735,14 @@ function paperKeyForm(setup, done) {
       onsubmit: async (e) => {
         e.preventDefault();
         err.textContent = "";
-        go.disabled = true;
-        go.replaceChildren(h("span", { class: "spinner" }), tr("paper.checking"));
+        const restore = busy(go, tr("paper.checking"));
         try {
           await setup.approveWithPaperKey(input.value);
           input.value = "";
           done("paper");
         } catch (x) {
           err.textContent = say(x);
-          go.disabled = false;
-          go.replaceChildren(tr("paper.use"));
+          restore();
         }
       },
     },
@@ -786,6 +790,7 @@ function hostOf(home) {
  */
 function recoveryHelp(home, handle) {
   const host = hostOf(home);
+  const [user] = splitHandle(handle);
   const intro = [
     h("p", { text: tr("recover.intro") }),
     h("p", { class: "hint", text: tr("recover.hint") }),
@@ -802,7 +807,7 @@ function recoveryHelp(home, handle) {
       "ol",
       {},
       h("li", {}, tr("recover.step1"), h("a", { href: "vendor/rootcard/keytool.html", download: "rootcard-keytool.html", text: tr("recover.step1Link") })),
-      h("li", { text: tr("recover.step2", { user: handle.split("#")[0], host }) }),
+      h("li", { text: tr("recover.step2", { user, host }) }),
       h("li", { text: tr("recover.step3") }),
       h("li", { text: tr("recover.step4") }),
     ),
@@ -1006,7 +1011,7 @@ function renderSidebar() {
     h(
       "div",
       { class: "me" },
-      h("div", { class: "h", text: messenger.handle, title: tr("side.copyHint"), onclick: () => navigator.clipboard?.writeText(messenger.handle).then(() => toast(tr("common.handleCopied"))) }),
+      h("div", { class: "h", text: messenger.handle, title: tr("side.copyHint"), onclick: copyHandle }),
       h("div", { class: "s" }, h("span", { class: `dot${messenger.status === "online" ? " on" : ""}` }), tr(messenger.status === "online" ? "side.online" : "side.connecting"), homeLabel(messenger.home) ? ` · ${homeLabel(messenger.home)}` : ""),
     ),
     h("button", { class: "icon-btn", "aria-label": tr("side.account"), title: tr("side.account"), onclick: showAccountMenu }, icon("more")),
@@ -1125,7 +1130,6 @@ function renderWelcome() {
   const note = h("input", { class: "input", id: "new-note", placeholder: tr("new.notePlaceholder"), maxlength: 500, enterkeyhint: "send" });
   const err = h("div", { class: "error" });
   const send = h("button", { class: "btn primary", type: "submit", text: tr("new.send") });
-  const copy = () => navigator.clipboard?.writeText(messenger.handle).then(() => toast(tr("common.handleCopied")));
   const form = h(
     "form",
     {
@@ -1170,7 +1174,7 @@ function renderWelcome() {
         "div",
         { class: "welcome-inner" },
         form,
-        h("div", { class: "card mine" }, h("div", {}, h("div", { class: "hint", text: tr("new.mine") }), h("strong", { text: messenger.handle })), h("button", { class: "btn small", text: tr("common.copy"), onclick: copy })),
+        h("div", { class: "card mine" }, h("div", {}, h("div", { class: "hint", text: tr("new.mine") }), h("strong", { text: messenger.handle })), h("button", { class: "btn small", text: tr("common.copy"), onclick: copyHandle })),
         offer,
         singleDeviceReminder(),
         about(),
@@ -1349,7 +1353,7 @@ function composer(c) {
     const end = ta.selectionEnd ?? start;
     ta.setRangeText(text, start, end, "end");
     grow();
-    if (matchMedia("(hover: hover)").matches) ta.focus();
+    if (canHover()) ta.focus();
   };
   ta.addEventListener("input", grow);
   ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } });
@@ -1411,7 +1415,7 @@ function composer(c) {
   };
   timerBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    timerMenu(timerBtn, ttl, (t) => { setTtl(t); if (matchMedia("(hover: hover)").matches) ta.focus(); });
+    timerMenu(timerBtn, ttl, (t) => { setTtl(t); if (canHover()) ta.focus(); });
   });
   emojiBtn.addEventListener("click", () => toggle("emoji"));
   gifBtn.addEventListener("click", () => toggle("gif"));
@@ -1446,7 +1450,7 @@ function composer(c) {
   wrap.addEventListener("dragover", (e) => { e.preventDefault(); box.classList.add("drop"); });
   wrap.addEventListener("dragleave", () => box.classList.remove("drop"));
   wrap.addEventListener("drop", (e) => { e.preventDefault(); box.classList.remove("drop"); sendFiles([...e.dataTransfer.files]); });
-  if (matchMedia("(hover: hover)").matches) setTimeout(() => ta.focus()); // not on touch: it would open the keyboard
+  if (canHover()) setTimeout(() => ta.focus()); // not on touch: it would open the keyboard
   return wrap;
 }
 
@@ -1666,9 +1670,8 @@ async function gifSearch(box, config, { alive, track }) {
           if (tile.classList.contains("busy") || tile.classList.contains("saved")) return;
           tile.classList.add("busy");
           try {
-            const res = await messenger.saveGif(await giphy.fetchGif(r.full, GIF_MAX_BYTES));
+            await saveToCollection(await giphy.fetchGif(r.full, GIF_MAX_BYTES));
             tile.classList.add("saved");
-            toast(tr(res === "exists" ? "gif.exists" : "gif.savedToast"));
           } catch (x) {
             toast(say(x));
           } finally {
@@ -1704,7 +1707,7 @@ async function gifSearch(box, config, { alive, track }) {
     clearTimeout(timer);
     const q = input.value.trim();
     if (q.length >= 2) run(q);
-    if (!matchMedia("(hover: hover)").matches) input.blur(); // on a phone: the keyboard goes, the results get the room
+    if (!canHover()) input.blur(); // on a phone: the keyboard goes, the results get the room
   });
   put(
     box,
@@ -1719,7 +1722,7 @@ async function gifSearch(box, config, { alive, track }) {
     h("div", { class: "gif-status" }, status, h("span", { class: "giphy-mark", text: "Powered by GIPHY" })),
     grid,
   );
-  if (matchMedia("(hover: hover)").matches) input.focus();
+  if (canHover()) input.focus();
 }
 
 let renderSeq = 0;
@@ -1814,10 +1817,7 @@ setInterval(tickFuses, 250);
 
 /** The timer under a disappearing message: the countdown once it runs, before that what it will be. */
 function fuseView(m) {
-  const s = icon("timer");
-  s.setAttribute("width", "12");
-  s.setAttribute("height", "12");
-  s.setAttribute("aria-hidden", "true");
+  const s = icon("timer", 12);
   if (m.expires) {
     const end = messenger.deadline(m);
     return h("span", { class: "fuse-wrap", title: tr("timer.running") }, s, h("span", { class: "fuse", "data-end": String(end), text: remainingLabel(end - Date.now()) }));
@@ -1958,7 +1958,7 @@ function message(m) {
   }
   else if (m.dir === "out" && m.delivered !== undefined) meta.append(deliveryMark(m));
   if (m.kind === "file" && m.file?.have && m.file.mime === "image/gif") meta.append(saveGifButton(m));
-  const canReact = ["text", "file", "ephemeral"].includes(m.kind) && messenger.contacts.get(m.conv)?.state === "accepted";
+  const canReact = messenger.canReact(m);
   if (canReact) meta.append(reactButton(m));
   meta.append(moreButton(m));
   // A picture carries its time on itself; text ends with it on the last line, as long as it fits there.
@@ -1976,6 +1976,12 @@ async function refreshGifHashes() {
   gifHashes = new Set((await messenger.gifs()).map((g) => g.sha256));
 }
 
+/** Save a GIF (a Blob) in the collection and say how it went; throws what Messenger.saveGif throws. */
+async function saveToCollection(blob) {
+  const r = await messenger.saveGif(blob);
+  toast(tr(r === "exists" ? "gif.exists" : "gif.savedToast"));
+}
+
 /** "Spara GIF" under a GIF in the thread (also in the viewer): into the collection, on all own devices. */
 function saveGifButton(m) {
   const saved = gifHashes.has(m.file.sha256);
@@ -1989,8 +1995,7 @@ function saveGifButton(m) {
       const btn = e.currentTarget;
       btn.disabled = true;
       try {
-        const r = await messenger.saveGif(await messenger.fileBlob(m.file.f, "image/gif"));
-        toast(tr(r === "exists" ? "gif.exists" : "gif.savedToast"));
+        await saveToCollection(await messenger.fileBlob(m.file.f, "image/gif"));
       } catch (x) {
         btn.disabled = false;
         toast(say(x));
@@ -2096,10 +2101,7 @@ function reactDialog(m) {
 function deliveryMark(m) {
   const done = !!m.delivered;
   const label = tr(done ? "msg.delivered" : "msg.queued");
-  const s = icon(done ? "ringCheck" : "ring");
-  s.setAttribute("width", "14");
-  s.setAttribute("height", "14");
-  s.setAttribute("aria-hidden", "true");
+  const s = icon(done ? "ringCheck" : "ring", 14);
   return h("span", { class: `delivery${done ? " ok" : ""}`, role: "img", "aria-label": label, title: label }, s);
 }
 
@@ -2112,8 +2114,7 @@ function showImage(url, name, gif = null) {
         onclick: async (e) => {
           e.stopPropagation(); // a click anywhere else closes the viewer
           try {
-            const r = await messenger.saveGif(await gif());
-            toast(tr(r === "exists" ? "gif.exists" : "gif.savedToast"));
+            await saveToCollection(await gif());
             d.close();
           } catch (x) {
             toast(say(x));
@@ -2316,7 +2317,7 @@ function showAccountMenu() {
     h(
       "div",
       { style: "display:flex;flex-direction:column;gap:8px" },
-      h("button", { class: "btn", text: tr("acct.copy"), onclick: () => navigator.clipboard?.writeText(messenger.handle).then(() => { toast(tr("common.handleCopied")); d.close(); }) }),
+      h("button", { class: "btn", text: tr("acct.copy"), onclick: () => copyHandle()?.then(() => d.close()) }),
       h("button", { class: "btn", text: tr("acct.devices"), onclick: () => { d.close(); showDevices(); } }),
       h("button", { class: "btn", text: tr("help.title"), onclick: () => { d.close(); showHelp(); } }),
       h("label", { class: "check" }, notice, h("span", {}, tr("acct.notify"), noticeHint)),
@@ -2421,8 +2422,7 @@ function showPaperKey(onDone = () => {}) {
       onsubmit: async (e) => {
         e.preventDefault();
         err.textContent = "";
-        go.disabled = true;
-        go.replaceChildren(h("span", { class: "spinner" }), tr("common.unlocking"));
+        const restore = busy(go, tr("common.unlocking"));
         let secret;
         try {
           secret = await id.unlockLocalSecret(api, messenger.home, messenger.me.account, pw.value);
@@ -2430,8 +2430,7 @@ function showPaperKey(onDone = () => {}) {
           showPaperKeyText(d, await messenger.preparePaperKey(secret), onDone);
         } catch (x) {
           err.textContent = say(x);
-          go.disabled = false;
-          go.replaceChildren(tr("common.continue"));
+          restore();
         } finally {
           secret?.fill(0);
         }
@@ -2454,8 +2453,7 @@ function showPaperKeyText(d, prepared, onDone) {
   const name = tr("pk.fileName", { name: splitHandle(messenger.handle)[0] });
   const text = tr("pk.fileText", { handle: messenger.handle, key: prepared.text, noOther: tr("link.noOther") });
   go.addEventListener("click", async () => {
-    go.disabled = true;
-    go.replaceChildren(h("span", { class: "spinner" }), tr("pk.activating"));
+    const restore = busy(go, tr("pk.activating"));
     try {
       await prepared.commit();
       toast(tr("pk.activated"));
@@ -2464,8 +2462,7 @@ function showPaperKeyText(d, prepared, onDone) {
       onDone();
     } catch (x) {
       err.textContent = say(x);
-      go.disabled = false;
-      go.replaceChildren(tr("pk.activate"));
+      restore();
     }
   });
   d.classList.add("printable");
@@ -2502,9 +2499,14 @@ async function logout(forget) {
     const store = await Store.open(account);
     await store.remember(false);
     store.close();
-    const rec = (await accounts.all()).find((a) => a.account === account);
-    if (rec) await accounts.put({ ...rec, remembered: false });
-    if (forget) await Store.destroy(account);
+    if (forget) {
+      // This device was removed: its data is gone, so the login screen does not offer the account any more.
+      await Store.destroy(account);
+      await accounts.remove(account);
+    } else {
+      const rec = (await accounts.all()).find((a) => a.account === account);
+      if (rec) await accounts.put({ ...rec, remembered: false });
+    }
   }
   showAuth("login");
 }

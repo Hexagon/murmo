@@ -151,7 +151,6 @@ button { cursor: pointer; }
 .auth { width: min(420px, 100%); }
 .brand { font-family: var(--serif); font-weight: 400; line-height: 1.15; font-size: 40px; letter-spacing: -.5px; margin: 0 0 4px; display: flex; align-items: center; gap: 12px; }
 .brand img { width: 36px; height: 36px; }
-.tagline { color: var(--muted); margin: 0 0 28px; }
 .accounts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
 pre.cardtext {
   font: 13px/1.5 var(--mono); background: var(--bg); border: 1px dashed var(--line); border-radius: 10px;

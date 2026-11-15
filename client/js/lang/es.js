@@ -446,7 +446,6 @@ export default {
   "page.check2": "Identidad con rootcard, la contraseña nunca sale del navegador",
   "page.check3": "Sin búsqueda, sin listas de contactos en el servidor",
   "page.check4": "Código abierto: revisa el código o ejecuta tu propio servidor",
-  "page.noscript": "Murmo funciona en el navegador y necesita JavaScript.",
   "page.step1Title": "Crea una identidad",
   "page.step1": "Elige un nombre y una contraseña. Recibes una tarjeta de recuperación para guardar sin conexión: es la llave de tu identidad y lo único que puede restaurarla.",
   "page.step2Title": "Comparte tu identificador",

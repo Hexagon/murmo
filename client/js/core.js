@@ -1,9 +1,9 @@
 // The messenger engine: devices, contacts and requests, messages, multi-device sync, history hand-over and live
 // file transfer (docs/DESIGN.md). No DOM: the UI listens to events.
 //
-// Events: "status" (online/offline), "contacts", "messages" ({ conv }), "link" ({ request, code }), "file" ({ f }),
-// "incoming" ({ conv, kind }: something from a contact the user should hear about), "removed" (this device was
-// removed), "error" ({ message }).
+// Events: "status" (online/offline), "contacts", "messages" ({ conv }), "gifs" (the collection changed), "link"
+// ({ request, code }), "file" ({ f }), "incoming" ({ conv, kind }: something from a contact the user should hear
+// about), "removed" (this device was removed), "error" ({ message }).
 
 import * as rc from "../vendor/rootcard/src/index.js";
 import * as p from "./protocol.js";
@@ -47,6 +47,8 @@ export const GIF_MAX_BYTES = 8 * 1024 * 1024;
 export const GIF_MAX_COUNT = 60;
 /** The file id a saved GIF is stored and streamed under (apart from the files of messages). */
 const gifFile = (id) => `gif:${id}`;
+/** A saved GIF as the file it is streamed as (Messenger.streamFile, expectFile). */
+const gifStream = (g) => ({ f: gifFile(g.id), key: g.key, n: g.n, size: g.size, sha256: g.sha256 });
 /** Message kinds a reaction can be given to. */
 const REACTABLE = ["text", "file", "ephemeral"];
 /** What a disappearing message leaves behind once gone: no content, only its id, so a copy that comes again is ignored. */
@@ -75,7 +77,7 @@ function gifEntry(g) {
   if (!g || typeof g !== "object") return null;
   const { id, size, n, sha256, key, width, height } = g;
   if (typeof id !== "string" || !/^[A-Za-z0-9_-]{22}$/.test(id)) return null;
-  if (!Number.isSafeInteger(size) || size < 1 || size > GIF_MAX_BYTES || n !== Math.max(1, Math.ceil(size / p.CHUNK))) return null;
+  if (!Number.isSafeInteger(size) || size < 1 || size > GIF_MAX_BYTES || n !== p.chunkCount(size)) return null;
   if (typeof sha256 !== "string" || sha256.length > 64 || typeof key !== "string" || key.length > 64) return null;
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || !p.imageFits({ width, height })) return null;
   return { id, size, n, sha256, key, width, height };
@@ -256,10 +258,7 @@ export class Messenger extends EventTarget {
     this.pruneTimer = setInterval(() => this.prune().catch(() => {}), PRUNE_EVERY);
     this.prune().catch(() => {});
     this.ws.addEventListener("link", (e) => this.onLink(e.detail.request).catch(() => {}));
-    this.ws.addEventListener("devices", (e) => {
-      this.lists.delete(e.detail.account);
-      this.emit("devices", e.detail);
-    });
+    this.ws.addEventListener("devices", (e) => this.lists.delete(e.detail.account));
     // A relay frame of a transfer was refused (a rate limit): the transfer stops and is offered again later.
     this.ws.addEventListener("frame-error", (e) => {
       if (this.missed.has(e.detail.id)) this.refused.add(e.detail.id);
@@ -389,6 +388,18 @@ export class Messenger extends EventTarget {
     this.emit("contacts");
   }
 
+  /** Throw `not_accepted` unless the conversation with `account` has been accepted. */
+  requireAccepted(account) {
+    if (this.contacts.get(account)?.state !== "accepted") throw new ApiError(409, "not_accepted");
+  }
+
+  /** Bring a contact's handle and home up to date from its verified rootcard state. */
+  static fromState(c, state) {
+    c.handle = state.handle;
+    c.home = state.instance.home.url;
+    c.updated = p.now();
+  }
+
   contactList() {
     return [...this.contacts.values()].filter((c) => c.state !== "declined");
   }
@@ -402,11 +413,9 @@ export class Messenger extends EventTarget {
     const l = await this.list(state.account, true);
     if (l.list.present.length === 0) throw new ApiError(409, "no_devices");
     const c = existing ?? { account: state.account, handle: state.handle, created: p.now() };
-    c.handle = state.handle;
-    c.home = state.instance.home.url;
+    Messenger.fromState(c, state);
     c.state = existing?.state === "incoming" ? "accepted" : "outgoing";
     c.pinned = { head: l.list.head, length: l.list.entries.length };
-    c.updated = p.now();
     await this.saveContact(c);
     const body = { note: String(note).slice(0, NOTE_MAX) };
     const kind = c.state === "accepted" ? "accept" : "request";
@@ -525,10 +534,10 @@ export class Messenger extends EventTarget {
     return l.list.present.filter((d) => l.prekeys.has(d.id)).map((d) => ({ account, device: d.id, prekey: l.prekeys.get(d.id) }));
   }
 
-  /** A message to the other party and to our own other devices. */
-  async send(conv, kind, body, opts) {
+  /** A message to the other party and to our own other devices; `id` may be chosen beforehand. */
+  async send(conv, kind, body, { id, ttl } = {}) {
     const targets = [...(await this.peerTargets(conv)), ...(await this.ownTargets())];
-    return this.deliver(targets, kind, conv, body, undefined, opts);
+    return this.deliver(targets, kind, conv, body, id, { ttl });
   }
 
   /** A message only to our own other devices. */
@@ -538,11 +547,9 @@ export class Messenger extends EventTarget {
 
   /** Send a text. `id` may be chosen beforehand (the interface shows it under that id while it waits for "Ångra"). */
   async sendText(conv, text, id = p.b64(p.random(16))) {
-    const c = this.contacts.get(conv);
-    if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
+    this.requireAccepted(conv);
     const t = String(text).slice(0, TEXT_MAX);
-    const targets = [...(await this.peerTargets(conv)), ...(await this.ownTargets())];
-    const { time } = await this.deliver(targets, "text", conv, { text: t }, id);
+    const { time } = await this.send(conv, "text", { text: t }, { id });
     await this.record({ id, conv, dir: "out", time, kind: "text", text: t, device: this.me.device, delivered: 0 });
     return { id, time };
   }
@@ -604,13 +611,11 @@ export class Messenger extends EventTarget {
 
   /** Send a disappearing message; `id` as for sendText ("Ångra"). */
   async sendEphemeral(conv, text, ttl, id = p.b64(p.random(16))) {
-    const c = this.contacts.get(conv);
-    if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
+    this.requireAccepted(conv);
     if (!EPHEMERAL_TTLS.includes(ttl)) throw new ApiError(400, "bad_ttl");
     const t = String(text).slice(0, TEXT_MAX);
     const wait = this.ephemeralWait(conv);
-    const targets = [...(await this.peerTargets(conv)), ...(await this.ownTargets())];
-    const { time } = await this.deliver(targets, "ephemeral", conv, { text: t, ttl, wait }, id, { ttl: wait });
+    const { time } = await this.send(conv, "ephemeral", { text: t, ttl, wait }, { id, ttl: wait });
     await this.record({ id, conv, dir: "out", time, kind: "ephemeral", text: t, ttl, wait, device: this.me.device, delivered: 0 });
     return { id, time };
   }
@@ -682,9 +687,7 @@ export class Messenger extends EventTarget {
 
   /** Tell `account` soon that message `id` arrived on this device. Only for accepted contacts. */
   queueReceipt(account, id) {
-    let set = this.receipts.get(account);
-    if (!set) this.receipts.set(account, (set = new Set()));
-    set.add(id);
+    this.queueReceiptLater(account, id);
     clearTimeout(this.receiptTimer);
     this.receiptTimer = setTimeout(() => this.flushReceipts().catch(() => {}), RECEIPT_WAIT);
   }
@@ -708,6 +711,7 @@ export class Messenger extends EventTarget {
     }
   }
 
+  /** Add to the receipts for `account` without sending them soon (they go with the next flush). */
   queueReceiptLater(account, id) {
     let set = this.receipts.get(account);
     if (!set) this.receipts.set(account, (set = new Set()));
@@ -789,9 +793,7 @@ export class Messenger extends EventTarget {
         } else {
           c = { account: peer, handle: state.handle, created: p.now(), state: "incoming", note };
         }
-        c.handle = state.handle;
-        c.home = state.instance.home.url;
-        c.updated = p.now();
+        Messenger.fromState(c, state);
         await this.saveContact(c);
         if (note) await this.record({ id: m.id, conv: peer, dir: "in", time: m.time, kind: "text", text: note });
         if (c.state === "accepted") await this.send(peer, "accept", {});
@@ -810,8 +812,7 @@ export class Messenger extends EventTarget {
       case "text":
         if (c?.state !== "accepted") return;
         this.queueReceipt(peer, m.id); // also for a copy we already have: the first receipt may have been lost
-        if (await this.superseded({ id: m.id, conv: peer, dir: "in", time: m.time, device: m.from.device })) return;
-        if (await this.store.hasMessage(m.id)) return;
+        if (!(await this.isNew({ id: m.id, conv: peer, dir: "in", time: m.time, device: m.from.device }))) return;
         await this.record({ id: m.id, conv: peer, dir: "in", time: m.time, kind: "text", text: String(m.body?.text ?? "").slice(0, TEXT_MAX), device: m.from.device });
         this.emit("incoming", { conv: peer, kind: "text" });
         return;
@@ -821,8 +822,7 @@ export class Messenger extends EventTarget {
         if (!e) return;
         this.queueReceipt(peer, m.id);
         // Taken back, deleted or already gone: not again.
-        if (await this.superseded({ id: m.id, conv: peer, dir: "in", time: m.time, device: m.from.device })) return;
-        if (await this.store.hasMessage(m.id)) return;
+        if (!(await this.isNew({ id: m.id, conv: peer, dir: "in", time: m.time, device: m.from.device }))) return;
         // How long it may wait unread: what the sender asked for, and never longer than kept here.
         const wait = Math.min(e.wait, this.ephemeralWait(peer));
         if ((m.time + wait) * 1000 <= Date.now()) return;
@@ -859,9 +859,7 @@ export class Messenger extends EventTarget {
         const state = (await this.list(conv, true)).state;
         const c = this.contacts.get(conv) ?? { account: conv, handle: state.handle, created: p.now() };
         if (c.state !== "accepted") c.state = c.state === "incoming" ? "accepted" : "outgoing";
-        c.handle = state.handle;
-        c.home = state.instance.home.url;
-        c.updated = p.now();
+        Messenger.fromState(c, state);
         await this.saveContact(c);
         const note = String(m.body?.note ?? "");
         if (note) await this.record({ id: m.id, conv, dir: "out", time: m.time, kind: "text", text: note, delivered: 0 });
@@ -876,15 +874,13 @@ export class Messenger extends EventTarget {
         return;
       }
       case "text":
-        if (await this.superseded({ id: m.id, conv, dir: "out", time: m.time, device: m.from.device })) return;
-        if (await this.store.hasMessage(m.id)) return;
+        if (!(await this.isNew({ id: m.id, conv, dir: "out", time: m.time, device: m.from.device }))) return;
         await this.record({ id: m.id, conv, dir: "out", time: m.time, kind: "text", text: String(m.body?.text ?? ""), device: m.from.device, delivered: 0 });
         return;
       case "ephemeral": {
         const e = this.ephemeralBody(m);
         if (!e || conv === this.me.account) return;
-        if (await this.superseded({ id: m.id, conv, dir: "out", time: m.time, device: m.from.device })) return;
-        if (await this.store.hasMessage(m.id)) return;
+        if (!(await this.isNew({ id: m.id, conv, dir: "out", time: m.time, device: m.from.device }))) return;
         await this.record({ id: m.id, conv, dir: "out", time: m.time, kind: "ephemeral", text: e.text, ttl: e.ttl, wait: e.wait, device: m.from.device, delivered: 0 });
         return;
       }
@@ -942,13 +938,15 @@ export class Messenger extends EventTarget {
     this.ws.send({ t: "link-decline", id: request.id });
   }
 
+  /** A new entry of the account's device list after `entries`, signed by this device. */
+  async ownEntry(entries, op, device) {
+    const accountKey = (await this.list(this.me.account)).state.instance.account_key;
+    return p.newEntry({ account: this.me.account, accountKey, entries, op, device, signer: { id: this.me.device, key: this.device.privateKey } });
+  }
+
   async approveLink(request) {
     const own = await this.ownList(true);
-    const accountKey = (await this.list(this.me.account)).state.instance.account_key;
-    const e = await p.newEntry({
-      account: this.me.account, accountKey, entries: own.entries, op: "add", device: request.device,
-      signer: { id: this.me.device, key: this.device.privateKey },
-    });
+    const e = await this.ownEntry(own.entries, "add", request.device);
     await this.api.appendDevices(this.me.account, [e], [request.prekey]);
     await this.ownList(true);
     await this.sendHistory(request.device.id);
@@ -963,12 +961,7 @@ export class Messenger extends EventTarget {
     const own = await this.ownList(true);
     const d = own.present.find((x) => x.id === id);
     if (!d) return;
-    const accountKey = (await this.list(this.me.account)).state.instance.account_key;
-    const e = await p.newEntry({
-      account: this.me.account, accountKey, entries: own.entries, op: "remove",
-      device: { id: d.id, key: d.key, label: d.label },
-      signer: { id: this.me.device, key: this.device.privateKey },
-    });
+    const e = await this.ownEntry(own.entries, "remove", { id: d.id, key: d.key, label: d.label });
     await this.api.appendDevices(this.me.account, [e]);
     await this.ownList(true);
   }
@@ -993,23 +986,15 @@ export class Messenger extends EventTarget {
       text,
       commit: async () => {
         const own = await this.ownList(true);
-        const accountKey = (await this.list(this.me.account)).state.instance.account_key;
         const entries = [...own.entries];
         const added = [];
         // Old keys go first, so that a list with the most devices still has room for the new one.
         for (const d of own.present.filter(p.isPaper)) {
-          const e = await p.newEntry({
-            account: this.me.account, accountKey, entries, op: "remove", device: { id: d.id, key: d.key, label: d.label },
-            signer: { id: this.me.device, key: this.device.privateKey },
-          });
+          const e = await this.ownEntry(entries, "remove", { id: d.id, key: d.key, label: d.label });
           entries.push(e);
           added.push(e);
         }
-        const e = await p.newEntry({
-          account: this.me.account, accountKey, entries, op: "add", device: dev,
-          signer: { id: this.me.device, key: this.device.privateKey },
-        });
-        added.push(e);
+        added.push(await this.ownEntry(entries, "add", dev));
         await this.api.appendDevices(this.me.account, added);
         await this.ownList(true);
       },
@@ -1055,8 +1040,7 @@ export class Messenger extends EventTarget {
         await this.mergeTombstone(m);
         continue;
       }
-      if (await this.superseded(m)) continue;
-      if (await this.store.hasMessage(m.id)) continue;
+      if (!(await this.isNew(m))) continue;
       if (typeof m.time !== "number" || m.time < this.cutoff(m.conv)) continue;
       if (m.file) m.file.have = false;
       await this.store.putMessage(m);
@@ -1069,20 +1053,17 @@ export class Messenger extends EventTarget {
   /**
    * Send a file: live to the devices connected now and, unless the user turned that off, as encrypted chunks the
    * server keeps for the devices that are away. Devices that got neither are tried again when they are connected.
-   * Returns `{ live, queued, waiting }` (numbers of the recipient's devices).
-   */
-  /**
-   * Send a file. `progress({ phase, done, total, id })` is told how far it has come: "read" while it is read and
-   * stored, "send" while it is sent (`id` is the message's from then on).
+   * Returns `{ live, queued, waiting }` (numbers of the recipient's devices). `progress({ phase, done, total, id })`
+   * is told how far it has come: "read" while it is read and stored, "send" while it is sent (`id` is the message's
+   * from then on).
    */
   async sendFile(conv, file, progress = null) {
-    const c = this.contacts.get(conv);
-    if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
+    this.requireAccepted(conv);
     if (file.size > p.MAX_FILE) throw new ApiError(413, "too_large");
     const f = p.b64(p.random(16));
     const key = await p.newFileKey();
     const size = file.size;
-    const n = Math.max(1, Math.ceil(size / p.CHUNK));
+    const n = p.chunkCount(size);
     // Read, hashed and stored part by part: the file is never in memory whole.
     const hash = new p.Sha256();
     for (let i = 0; i < n; i++) {
@@ -1170,6 +1151,13 @@ export class Messenger extends EventTarget {
     this.emit("messages", { conv: m.conv });
   }
 
+  /** Stop offering the file of message `id` again. */
+  async forgetPendingFile(id) {
+    if (!this.pendingFiles.some((x) => x.id === id)) return;
+    this.pendingFiles = this.pendingFiles.filter((x) => x.id !== id);
+    await this.store.setSecret("pendingFiles", this.pendingFiles);
+  }
+
   /** Whether none of the recipient's devices has been given this (outgoing) file yet. */
   static undelivered(m) {
     const f = m?.file;
@@ -1183,11 +1171,10 @@ export class Messenger extends EventTarget {
     let sent = 0;
     try {
       for (const entry of [...this.pendingFiles]) {
-        const m = (await this.store.messages(entry.conv)).find((x) => x.id === entry.id);
+        const m = await this.store.message(entry.id);
         const read = m?.file && (await this.store.fileReader(m.file.f));
         if (!m || !read || p.now() - entry.time > FILE_RETRY || !m.file.missed?.length) {
-          this.pendingFiles = this.pendingFiles.filter((x) => x.id !== entry.id);
-          await this.store.setSecret("pendingFiles", this.pendingFiles);
+          await this.forgetPendingFile(entry.id);
           continue;
         }
         const online = await this.ws.presence(m.file.missed);
@@ -1206,7 +1193,7 @@ export class Messenger extends EventTarget {
   async onFileMeta(m, conv, dir) {
     const b = m.body ?? {};
     if (typeof b.f !== "string" || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.n) || b.size < 0 || b.size > p.MAX_FILE) return;
-    if (b.n !== Math.max(1, Math.ceil(b.size / p.CHUNK))) return;
+    if (b.n !== p.chunkCount(b.size)) return;
     b.name = p.safeFileName(b.name);
     b.mime = p.safeMime(b.mime);
     if (await this.superseded({ id: m.id, conv, dir, time: m.time, device: m.from.device })) return false;
@@ -1454,6 +1441,11 @@ export class Messenger extends EventTarget {
     return m.dir === "out" ? this.me.account : m.conv;
   }
 
+  /** Whether the user can react to message `m` (a text, file or disappearing message of an accepted contact). */
+  canReact(m) {
+    return REACTABLE.includes(m?.kind) && this.contacts.get(m.conv)?.state === "accepted";
+  }
+
   /** Whether our message `m` can still be taken back from everyone. */
   canRetract(m) {
     return m?.dir === "out" && REACTABLE.includes(m.kind) && p.now() - m.time <= RETRACT_WINDOW
@@ -1465,8 +1457,7 @@ export class Messenger extends EventTarget {
    * and our own replace it with a placeholder; devices that do not know `retract` (or a modified client) keep it.
    */
   async retract(conv, id) {
-    const c = this.contacts.get(conv);
-    if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
+    this.requireAccepted(conv);
     const m = await this.store.message(id);
     if (!m || m.conv !== conv || m.dir !== "out" || !REACTABLE.includes(m.kind)) throw new ApiError(404, "no_message");
     if (!this.canRetract(m)) throw new ApiError(409, "too_late");
@@ -1502,14 +1493,16 @@ export class Messenger extends EventTarget {
     if (f) {
       const t = this.files.get(f);
       if (t) await this.dropTransfer(f, t);
-      if (this.pendingFiles.some((x) => x.id === m.id)) {
-        this.pendingFiles = this.pendingFiles.filter((x) => x.id !== m.id);
-        await this.store.setSecret("pendingFiles", this.pendingFiles);
-      }
+      await this.forgetPendingFile(m.id);
     }
     const t = { id: m.id, conv: m.conv, dir: m.dir, time: m.time, at: m.at, device: m.device, ...extra };
     await this.store.replaceMessage(t, f);
     this.emit("messages", { conv: m.conv });
+  }
+
+  /** Whether a message arriving now (`rec`, as for superseded) is neither taken back, deleted nor already here. */
+  async isNew(rec) {
+    return !(await this.superseded(rec)) && !(await this.store.hasMessage(rec.id));
   }
 
   /**
@@ -1554,8 +1547,7 @@ export class Messenger extends EventTarget {
 
   /** Replace the text of our own message `id` for everyone. */
   async edit(conv, id, text) {
-    const c = this.contacts.get(conv);
-    if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
+    this.requireAccepted(conv);
     const t = String(text ?? "").trim().slice(0, TEXT_MAX);
     if (!t) throw new ApiError(400, "empty_text");
     const m = await this.store.message(id);
@@ -1609,8 +1601,7 @@ export class Messenger extends EventTarget {
 
   /** React to a message of a conversation with one emoji, or take the reaction back with `""`. */
   async react(conv, id, e) {
-    const c = this.contacts.get(conv);
-    if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
+    this.requireAccepted(conv);
     if (!validReaction(e)) throw new ApiError(400, "bad_reaction");
     const m = await this.store.message(id);
     if (!m || m.conv !== conv || !REACTABLE.includes(m.kind)) throw new ApiError(404, "no_message");
@@ -1649,7 +1640,7 @@ export class Messenger extends EventTarget {
     if (list.some((g) => !g.key)) {
       for (const g of list) {
         g.key ??= p.b64(await p.newFileKey());
-        g.n ??= Math.max(1, Math.ceil(g.size / p.CHUNK));
+        g.n ??= p.chunkCount(g.size);
       }
       await this.store.setSecret("gifs", list);
     }
@@ -1659,7 +1650,7 @@ export class Messenger extends EventTarget {
   /** What a GIF is streamed as (Messenger.streamFile, expectFile), or null when it is not in the collection. */
   async gifMeta(id) {
     const g = (await this.gifs()).find((x) => x.id === id);
-    return g ? { f: gifFile(g.id), key: g.key, n: g.n, size: g.size, sha256: g.sha256 } : null;
+    return g ? gifStream(g) : null;
   }
 
   /**
@@ -1680,7 +1671,7 @@ export class Messenger extends EventTarget {
     if (list.some((g) => g.sha256 === sha256)) return "exists";
     if (list.length >= GIF_MAX_COUNT) throw new ApiError(409, "gifs_full");
     const g = {
-      id: p.b64(p.random(16)), size: bytes.length, n: Math.max(1, Math.ceil(bytes.length / p.CHUNK)),
+      id: p.b64(p.random(16)), size: bytes.length, n: p.chunkCount(bytes.length),
       width: size.width, height: size.height, sha256, key: p.b64(await p.newFileKey()),
     };
     await this.store.putFile(gifFile(g.id), bytes);
@@ -1727,9 +1718,9 @@ export class Messenger extends EventTarget {
   async fetchMissingGifs() {
     const missing = [];
     for (const g of await this.gifs()) {
-      const f = gifFile(g.id);
+      const meta = gifStream(g);
+      const f = meta.f;
       if (await this.store.hasFile(f)) continue;
-      const meta = { f, key: g.key, n: g.n, size: g.size, sha256: g.sha256 };
       await this.serial(() => this.expectFile(meta, { id: f, conv: this.me.account }));
       if (!(await this.store.hasFile(f))) missing.push(f);
     }

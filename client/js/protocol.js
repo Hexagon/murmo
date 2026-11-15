@@ -28,6 +28,8 @@ export const PREKEY_ROTATE = 7 * 24 * 3600;
 export const PREKEY_KEEP = 21 * 24 * 3600;
 export const CHUNK = 48 * 1024;
 export const MAX_FILE = 100 * 1024 * 1024;
+/** How many CHUNK-sized parts a file of `size` bytes has (an empty file still has one). */
+export const chunkCount = (size) => Math.max(1, Math.ceil(size / CHUNK));
 export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 export const b64 = rc.base64urlEncode;
