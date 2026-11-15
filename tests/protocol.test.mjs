@@ -150,6 +150,38 @@ test("image dimensions come from the header, without decoding", () => {
   assert.ok(!p.imageFits(null));
 });
 
+test("paper key: written form, typing errors, and both the paper and the local secret are needed", async () => {
+  const account = "C".repeat(52);
+  const secret = rc.systemRandom(32);
+  const { paper, seed } = await p.newPaperKey(secret, account);
+  const text = await p.formatPaperKey(paper);
+  assert.match(text, /^MPK(-[0-9A-HJKMNP-TV-Z]{4}){9}$/);
+  // Lower case, spaces instead of dashes, and O/I/L for 0/1 are forgiven.
+  const typed = text.toLowerCase().replace(/-/g, " ").replace(/0/g, "o").replace(/1/g, "l");
+  assert.deepEqual(await p.parsePaperKey(typed), paper);
+  assert.deepEqual(await p.parsePaperKey(text.slice(4)), paper);
+  // A wrong character is caught by the checksum.
+  const i = 6;
+  const wrong = text.slice(0, i) + (text[i] === "2" ? "3" : "2") + text.slice(i + 1);
+  await assert.rejects(p.parsePaperKey(wrong), /bad_paper_key/);
+  await assert.rejects(p.parsePaperKey("MPK-1234"), /bad_paper_key/);
+  // The device key depends on the paper, the vault's local secret and the account.
+  const dev = await p.paperDevice(seed);
+  assert.equal(dev.label, p.PAPER_LABEL);
+  assert.ok(p.isPaper(dev));
+  assert.deepEqual(await p.paperDevice(await p.paperSeed(paper, secret, account)), dev);
+  assert.notDeepEqual(await p.paperDevice(await p.paperSeed(paper, rc.systemRandom(32), account)), dev);
+  assert.notDeepEqual(await p.paperDevice(await p.paperSeed(paper, secret, "D".repeat(52))), dev);
+  // It signs device-list entries like any device.
+  const ak = await accountKey();
+  const d1 = await device("one");
+  const d2 = await device("two");
+  const e0 = await p.newEntry({ account, accountKey: ak.key, entries: [], op: "add", device: d1.value, signer: { id: "account", key: ak.seed } });
+  const e1 = await p.newEntry({ account, accountKey: ak.key, entries: [e0], op: "add", device: dev, signer: { id: d1.id, key: d1.privateKey } });
+  const e2 = await p.newEntry({ account, accountKey: ak.key, entries: [e0, e1], op: "add", device: d2.value, signer: { id: dev.id, key: seed } });
+  assert.equal((await p.verifyDevices(account, ak.key, [e0, e1, e2])).present.length, 3);
+});
+
 test("GIF signature", () => {
   assert.ok(p.isGif(p.utf8("GIF89a....")));
   assert.ok(p.isGif(p.utf8("GIF87a")));

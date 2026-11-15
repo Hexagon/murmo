@@ -135,6 +135,29 @@ export async function localSecret(api, login) {
   return secret;
 }
 
+/**
+ * The account's local secret, unlocked again with the password but without a new login (making a paper key, §4.5).
+ * Throws `bad_signature` for a wrong password and `no_local_secret` when the vault has none yet.
+ */
+export async function unlockLocalSecret(api, home, account, password) {
+  const { realm } = await hostInfo(api, home);
+  const state = await fetchState(api, home, [realm], account);
+  const { locks } = await api.rcAt(home, "GET", `/id/${account}/locks`);
+  const lock = locks[0];
+  if (!lock) throw new ApiError(409, "no_password");
+  const { authSeed } = await deriveLockSecrets(account, lock.id, password, lock.kdf, rc.base64urlDecode(lock.kdf.salt));
+  const fch = rc.parseChallenge(await api.rcAt(home, "POST", `/id/${account}/challenge`, { purpose: "fetch" }));
+  const fsig = await rc.ed25519Sign(authSeed, rc.fetchMessage(account, fch.host, lock.id, fch.nonce, home));
+  authSeed.fill(0);
+  const { vault } = await api.rcAt(home, "POST", `/id/${account}/fetch`, { lock: lock.id, nonce: fch.nonce, url: home, sig: rc.base64urlEncode(fsig) });
+  const unlocked = await unlockVault(vault, state, { lock: lock.id, password });
+  unlocked.contents.accountSeed?.fill(0);
+  unlocked.vaultKey?.fill?.(0);
+  const v = unlocked.contents.data?.[LOCAL_KEY];
+  if (typeof v !== "string") throw new ApiError(409, "no_local_secret");
+  return rc.base64urlDecode(v);
+}
+
 /** A rootcard proof by the account key for a challenge from this murmo server (used to request linking). */
 export async function proveToServer(api, state, accountSeed) {
   const { nonce } = await api.challenge();

@@ -205,6 +205,17 @@ pre.cardtext {
 .recover ol { padding-left: 20px; margin: 8px 0 14px; }
 .recover li { margin: 6px 0; }
 .recover li a { display: inline-block; margin-top: 4px; color: var(--accent); }
+.card.offer > div.btns { flex: 0 0 auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+form.paper { margin: 0 0 14px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+form.paper input { font-family: var(--mono); text-transform: uppercase; }
+pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-break: normal; }
+.paperbox { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.paperbox h3 { font-size: 15px; margin: 0 0 6px; }
+@media print {
+  body:has(dialog.printable[open]) > :not(dialog.printable) { display: none; }
+  dialog.printable { position: static; border: 0; box-shadow: none; width: auto; }
+  dialog.printable button, dialog.printable label, dialog.printable .actions { display: none; }
+}
 .lone { font-size: 13px; padding: 10px 12px; border-radius: 10px; background: var(--bubble); }
 .link { border: 0; background: none; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
 
@@ -243,7 +254,8 @@ pre.cardtext {
 .emoji-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); overflow-y: auto; min-height: 0; }
 .emoji-grid .emoji { border: 0; background: transparent; border-radius: 8px; height: 38px; font-size: 24px; line-height: 1; padding: 0; }
 .emoji-grid .emoji:hover, .emoji-grid .emoji:focus-visible { background: var(--bubble); }
-.gif-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; overflow-y: auto; min-height: 0; }
+/* rows sized by their tiles: a tile with overflow hidden may otherwise shrink to nothing and overlap the next */
+.gif-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); grid-auto-rows: max-content; align-content: start; gap: 6px; overflow-y: auto; min-height: 0; flex: 1; }
 .gif-grid .hint { grid-column: 1 / -1; }
 .gif { position: relative; }
 .gif-send { display: block; width: 100%; aspect-ratio: 1; padding: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--bubble); }
@@ -283,14 +295,26 @@ pre.cardtext {
 .gif-tabs { flex: none; }
 .gif-body { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
 .gif-body .input { flex: none; }
-.warn-note { font-size: 12px; line-height: 1.45; padding: 8px 10px; border-radius: 10px; background: color-mix(in srgb, #c98a00 14%, var(--panel)); border: 1px solid color-mix(in srgb, #c98a00 35%, var(--line)); color: var(--text); }
+.warn-note { flex: none; font-size: 12px; line-height: 1.45; padding: 6px 10px; border-radius: 10px; background: color-mix(in srgb, #c98a00 14%, var(--panel)); border: 1px solid color-mix(in srgb, #c98a00 35%, var(--line)); color: var(--text); }
 .gif-send.wait { display: grid; place-items: center; font-size: 12px; color: var(--muted); }
 .gif-send { position: relative; }
 .gif-send.busy { opacity: .5; cursor: progress; }
 .gif-ok { display: none; position: absolute; right: 6px; bottom: 6px; width: 22px; height: 22px; border-radius: 50%; background: var(--ok); color: #fff; font-size: 13px; line-height: 22px; text-align: center; }
 .gif-send.saved .gif-ok { display: block; }
-.gif-foot { display: flex; justify-content: space-between; align-items: center; flex: none; }
-.picker { max-height: min(420px, 55dvh); }
+.warn-note summary { cursor: pointer; }
+.warn-note p { margin: 6px 0 2px; }
+.gif-status { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex: none; font-size: 12px; }
+.gif-status .hint { margin: 0; font-size: 12px; }
+.giphy-mark { color: var(--faint); font-size: 11px; white-space: nowrap; }
+.picker-head .hint { font-size: 12px; }
+/* as tall as the window allows next to the bar and the composer, also with the phone's keyboard up */
+.picker { max-height: min(460px, calc(100dvh - 210px)); min-height: min(240px, calc(100dvh - 210px)); }
+@media (max-width: 640px) {
+  .composer-wrap:has(.picker:not(.hidden)) .foot-note { display: none; }
+  .composer-wrap:has(.picker:not(.hidden)) { padding-bottom: 8px; }
+  .picker { padding: 8px; gap: 6px; max-height: min(60dvh + 60px, calc(100dvh - 180px)); min-height: min(220px, calc(100dvh - 180px)); }
+  .gif-tabs button { padding: 5px 8px; font-size: 13px; }
+}
 
 .msg.out:has(.body.jumbo) { background: transparent; padding: 0; }
 

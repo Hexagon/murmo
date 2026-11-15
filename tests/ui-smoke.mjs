@@ -132,7 +132,7 @@ try {
   fs.writeFileSync(`${shots}/tiny.gif`, Buffer.from("R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==", "base64"));
   await a.click(".composer .gif-btn");
   await a.waitForSelector(".picker .gif-grid", { visible: true, timeout: 5000 });
-  const [ch4] = await Promise.all([a.waitForFileChooser(), clickText(a, "Välj GIF-fil…")]);
+  const [ch4] = await Promise.all([a.waitForFileChooser(), clickText(a, "Från fil…")]);
   await ch4.accept([`${shots}/tiny.gif`]);
   await a.waitForSelector(".picker .gif-grid .gif img", { timeout: 10000 });
   await a.screenshot({ path: `${shots}/a-6d-gifs.png` });
@@ -177,6 +177,13 @@ try {
   await a.type(".gif-body input", "katt");
   await a.waitForFunction(() => document.querySelectorAll(".gif-body .gif-grid img[src^='blob:']").length === 3, { timeout: 10000 });
   await a.screenshot({ path: `${shots}/a-6g-giphy.png` });
+  // The results have room, and the tiles do not overlap (rows once collapsed when the panel was short).
+  const layout = await a.evaluate(() => {
+    const boxes = [...document.querySelectorAll(".gif-body .gif-grid .gif-send")].map((e) => e.getBoundingClientRect());
+    const overlap = boxes.some((p, i) => boxes.some((q, j) => i < j && p.left < q.right - 1 && q.left < p.right - 1 && p.top < q.bottom - 1 && q.top < p.bottom - 1));
+    return { grid: document.querySelector(".gif-body .gif-grid").getBoundingClientRect().height, tile: boxes[0]?.height ?? 0, overlap };
+  });
+  if (layout.overlap || layout.grid < layout.tile || layout.tile < 40) throw new Error(`GIF results laid out badly: ${JSON.stringify(layout)}`);
   const before = await a.evaluate(() => document.querySelectorAll(".msg").length);
   await a.click(".gif-body .gif-grid .gif-send");
   await a.waitForSelector(".gif-body .gif-send.saved", { timeout: 10000 });
@@ -237,6 +244,32 @@ try {
   await a.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await sleep(500);
   await a.waitForFunction(() => document.querySelector(".me .s")?.textContent.includes("Ansluten"), { timeout: 10000 });
+  // Alice makes a paper key, loses her only browser, and comes back with it on a new one.
+  await a.click('[aria-label="Konto och inställningar"]');
+  await clickText(a, "Enheter");
+  await a.waitForFunction(() => [...document.querySelectorAll("dialog button")].some((x) => x.textContent === "Skapa pappersnyckel"), { timeout: 10000 });
+  await a.screenshot({ path: `${shots}/a-8-devices.png` });
+  await clickText(a, "Skapa pappersnyckel");
+  await a.waitForSelector("dialog input[type=password]", { timeout: 5000 });
+  await a.type("dialog input[type=password]", "correct horse battery staple");
+  await clickText(a, "Fortsätt");
+  await a.waitForSelector("dialog pre.paperkey", { timeout: 60000 });
+  await a.screenshot({ path: `${shots}/a-9-paperkey.png` });
+  const paperKey = await a.$eval("dialog pre.paperkey", (e) => e.textContent);
+  await a.click("dialog .check input");
+  await clickText(a, "Aktivera pappersnyckeln");
+  await a.waitForFunction(() => !document.querySelector("dialog"), { timeout: 10000 });
+  const a2 = await page("alice2");
+  await a2.type("form input[autocomplete=username]", aliceHandle);
+  await a2.type("form input[type=password]", "correct horse battery staple");
+  await a2.click("form button[type=submit]");
+  await a2.waitForSelector(".code", { timeout: 60000 });
+  await clickText(a2, "Jag har ingen annan enhet kvar");
+  await a2.type("form.paper input", paperKey.toLowerCase());
+  await a2.screenshot({ path: `${shots}/a2-1-link-paper.png`, fullPage: true });
+  await clickText(a2, "Använd pappersnyckeln");
+  await a2.waitForFunction(() => document.querySelector("dialog h2")?.textContent === "Välkommen tillbaka", { timeout: 30000 });
+  await a2.screenshot({ path: `${shots}/a2-2-welcome-back.png` });
   if (codeA !== codeB) throw new Error("safety codes differ");
 } catch (e) {
   console.log("FAILED", e.message);

@@ -97,6 +97,9 @@ const MESSAGES = {
   bad_home: "Ange ett domännamn, till exempel rootcard.org.",
   bad_proof: "Identiteten kunde inte bevisas för servern.",
   wrong_host: "Domänen pekar på en annan server.",
+  bad_paper_key: "Det där är ingen giltig pappersnyckel. Kontrollera att alla tecken är rätt.",
+  wrong_paper_key: "Pappersnyckeln hör inte till det här kontot, eller så har den ersatts av en nyare.",
+  no_local_secret: "Kontot saknar lokal nyckel i valvet. Logga ut och in igen och försök sedan på nytt.",
   not_gif: "Det är inte en GIF-fil.",
   gif_too_large: "GIF:en är för stor för samlingen (högst 8 MB).",
   too_big_image: "Bilden har för många bildpunkter.",
@@ -283,6 +286,7 @@ const HELP = [
     "Du identifieras med en rootcard-identitet, till exempel Namn#TAGG. Lösenordet används bara i webbläsaren för att låsa upp dina nycklar; det skickas aldrig till servern.",
     "Återställningskortet styr identiteten. Den som har det kan ta över den, så förvara det offline.",
     "En ny enhet läggs bara till när en av dina befintliga enheter godkänner den, efter att ni jämfört en kod. Ett stulet lösenord räcker alltså inte för att läsa dina meddelanden.",
+    "En pappersnyckel kan godkänna en ny enhet när ingen annan finns kvar, men bara tillsammans med ditt lösenord: papperet ensamt ger ingen åtkomst. Den kan inte läsa några meddelanden, och historiken följer inte med.",
     "Säkerhetskoden i en konversation beräknas från båda parters enhetslistor. Är den likadan hos er båda sitter ingen – inte heller servern – mellan er. Koden ändras när någon lägger till eller tar bort en enhet, och du ser då en varning.",
   ]],
   ["Vad servern ser och sparar", [
@@ -305,7 +309,7 @@ const HELP = [
   ["På din enhet", [
     "Historik, kontakter och nycklar sparas krypterat i webbläsaren och låses upp med ditt lösenord.",
     "Med ”Kom ihåg den här enheten” sparar webbläsaren en upplåsningsnyckel, så att Murmo öppnas utan lösenord. Den som kommer åt webbläsaren kan då läsa dina meddelanden. Använd det inte på delade datorer.",
-    "Utan någon kvarvarande enhet är historiken borta. Det finns ingen säkerhetskopia på servern.",
+    "Utan någon kvarvarande enhet är historiken borta, även med en pappersnyckel. Det finns ingen säkerhetskopia på servern; dina kontakter har kvar sina egna kopior av era konversationer.",
   ]],
   ["Begränsningar", [
     "Sidan hämtas från servern. Den som kontrollerar servern kan i princip leverera ändrad kod, och det gäller alla webbappar.",
@@ -613,24 +617,26 @@ async function loginAndEnter(homeInput, handle, password, remember) {
     login = await loginAtOldHome(old, handle, password, x);
     home = login.home;
   }
+  let secret;
   try {
     const account = login.state.account;
     if (home !== api.base) await api.connect(account, home); // the server fetches and verifies the log at that home
-    const secret = await id.localSecret(api, login);
+    secret = await id.localSecret(api, login);
     const store = await Store.open(account);
     await store.unlock(secret);
-    secret.fill(0);
     let setup;
     try {
-      setup = await setupDevice({ api, store, state: login.state, login, label: deviceLabel() });
+      // The secret stays until the device is set up: a paper key needs it (docs/DESIGN.md §4.5).
+      setup = await setupDevice({ api, store, state: login.state, login, label: deviceLabel(), secret });
     } catch (x) {
       store.close();
       throw x;
     }
     session = { token: login.token, home };
+    let how = "linked";
     if (!setup.ready) {
-      const ok = await showLinkWait(setup, login.state.handle, home);
-      if (!ok) {
+      how = await showLinkWait(setup, login.state.handle, home);
+      if (!how) {
         store.close();
         showAuth("login", login.state.handle);
         return;
@@ -641,7 +647,9 @@ async function loginAndEnter(homeInput, handle, password, remember) {
     await store.remember(remember);
     await accounts.put({ account, handle: login.state.handle, home, remembered: remember });
     await enter({ store, account, handle: login.state.handle, home });
+    if (how === "paper") showAfterPaperKey();
   } finally {
+    secret?.fill(0);
     login.unlocked.contents.accountSeed.fill(0);
     login.unlocked.vaultKey?.fill?.(0);
   }
@@ -658,10 +666,18 @@ async function loginAtOldHome(homes, handle, password, first) {
   throw first;
 }
 
+/**
+ * The link screen. Resolves to "linked" once another device approved, "paper" when the user's paper key added the
+ * device, or false when cancelled.
+ */
 function showLinkWait(setup, handle, home) {
   return new Promise((resolve) => {
     const ctl = new AbortController();
-    const help = h("div", { class: "recover", hidden: true }, ...recoveryHelp(home, handle));
+    const done = (how) => {
+      ctl.abort();
+      resolve(how);
+    };
+    const help = h("div", { class: "recover", hidden: true }, paperKeyForm(setup, done), ...recoveryHelp(home, handle));
     const toggle = h("button", {
       class: "link",
       type: "button",
@@ -674,7 +690,7 @@ function showLinkWait(setup, handle, home) {
       h("p", { text: `${handle} används redan på en annan enhet. Öppna Murmo där och godkänn den här enheten. Kontrollera att koden är densamma på båda skärmarna.` }),
       h("div", { class: "code", text: setup.code }),
       h("p", { class: "hint" }, h("span", { class: "spinner" }), " Väntar på godkännande… (giltigt i 10 minuter)"),
-      h("button", { class: "btn ghost", text: "Avbryt", onclick: () => { ctl.abort(); resolve(false); } }),
+      h("button", { class: "btn ghost", text: "Avbryt", onclick: () => done(false) }),
       toggle,
       help,
     );
@@ -682,18 +698,69 @@ function showLinkWait(setup, handle, home) {
     root.replaceChildren(h("div", { class: "center" }, h("div", { class: "auth" }, h("h1", { class: "brand", text: "Länka den här enheten" }), card)));
     setup.waitForApproval(ctl.signal).then(
       (ok) => {
-        if (ok || ctl.signal.aborted) return resolve(ok);
+        if (ctl.signal.aborted) return;
+        if (ok) return resolve("linked");
         // Nobody approved in time: most likely no other device is left. Say what can be done instead.
         card.replaceChildren(
           h("p", { text: "Ingen enhet godkände den här i tid, och begäran har gått ut." }),
           h("p", { class: "hint", text: "Har du en annan enhet där du är inloggad? Öppna Murmo på den och logga in här igen, så får du en ny kod." }),
-          h("div", { class: "recover" }, ...recoveryHelp(home, handle)),
-          h("button", { class: "btn primary", text: "Tillbaka till inloggningen", onclick: () => resolve(false) }),
+          h("div", { class: "recover" }, paperKeyForm(setup, done), ...recoveryHelp(home, handle)),
+          h("button", { class: "btn primary", text: "Tillbaka till inloggningen", onclick: () => done(false) }),
         );
       },
       () => resolve(false),
     );
   });
+}
+
+/** A field for the account's paper key on the link screen: it adds this device instead of another device (§4.5). */
+function paperKeyForm(setup, done) {
+  const input = h("input", { type: "text", autocomplete: "off", autocapitalize: "characters", spellcheck: false, placeholder: "MPK-XXXX-XXXX-…" });
+  const err = h("div", { class: "error" });
+  const go = h("button", { class: "btn primary", type: "submit", text: "Använd pappersnyckeln" });
+  const form = h(
+    "form",
+    {
+      class: "paper",
+      onsubmit: async (e) => {
+        e.preventDefault();
+        err.textContent = "";
+        go.disabled = true;
+        go.replaceChildren(h("span", { class: "spinner" }), "Kontrollerar…");
+        try {
+          await setup.approveWithPaperKey(input.value);
+          input.value = "";
+          done("paper");
+        } catch (x) {
+          err.textContent = say(x);
+          go.disabled = false;
+          go.replaceChildren("Använd pappersnyckeln");
+        }
+      },
+    },
+    h("p", {}, h("strong", { text: "Har du en pappersnyckel?" }), " Då kan den godkänna den här enheten i stället för en annan enhet. Kontot, dina kontakters förtroende och identifieraren är kvar som förut."),
+    h("div", { class: "field" }, h("label", { text: "Pappersnyckel" }), input),
+    go,
+    err,
+    h("p", { class: "hint", text: "Ingen pappersnyckel? Då återstår återställningskortet:" }),
+  );
+  return form;
+}
+
+/** After a paper key brought the account back: what is (and is not) on this device now. */
+function showAfterPaperKey() {
+  const d = dialog(
+    h("h2", { text: "Välkommen tillbaka" }),
+    h("p", { text: "Pappersnyckeln har lagt till den här enheten. Kontot och identifieraren är desamma, och dina kontakter ser bara att du har fått en ny enhet." }),
+    h("p", { class: "hint", text: "Kontakter och meddelanden fanns bara på den enhet du förlorade och finns inte här. Skriv till dina kontakter igen med deras identifierare: de som redan har godkänt dig kopplas direkt, och deras egna kopior av era konversationer finns kvar hos dem." }),
+    h("p", { class: "hint", text: "Ta bort den förlorade enheten under Enheter, så att ingen kan använda den. Pappersnyckeln gäller fortfarande; skapa gärna en ny där om den gamla har legat framme." }),
+    h(
+      "div",
+      { class: "actions" },
+      h("button", { class: "btn", text: "Stäng", onclick: () => d.close() }),
+      h("button", { class: "btn primary", text: "Öppna Enheter", onclick: () => { d.close(); showDevices(); } }),
+    ),
+  );
 }
 
 /** Whether an identity's home is this server, also under a domain the server had before a move. */
@@ -1116,6 +1183,7 @@ function singleDeviceReminder() {
   if (settings().singleDeviceSeen) return slot;
   messenger.ownList().then(
     (own) => {
+      // A paper key can approve a new device, so the account is not lost with this one (§4.5).
       if (own.present.length !== 1) return;
       slot.hidden = false;
       slot.replaceChildren(
@@ -1126,9 +1194,14 @@ function singleDeviceReminder() {
             "div",
             {},
             h("strong", { text: "Du har bara den här enheten" }),
-            h("div", { class: "hint", text: "Om webbläsarens data rensas kan ingen enhet godkänna en ny. Då behövs återställningskortet, och historiken går förlorad. Länka gärna en enhet till: logga in på den och godkänn den här." }),
+            h("div", { class: "hint", text: "Om webbläsarens data rensas kan ingen enhet godkänna en ny. Då behövs återställningskortet, och kontot börjar om. Länka en enhet till, eller skapa en pappersnyckel som kan godkänna en ny enhet." }),
           ),
-          h("button", { class: "btn small", text: "Inte nu", onclick: () => { setSetting("singleDeviceSeen", true); slot.remove(); } }),
+          h(
+            "div",
+            { class: "btns" },
+            h("button", { class: "btn small primary", text: "Skapa pappersnyckel", onclick: () => showPaperKey(() => slot.remove()) }),
+            h("button", { class: "btn small", text: "Inte nu", onclick: () => { setSetting("singleDeviceSeen", true); slot.remove(); } }),
+          ),
         ),
       );
     },
@@ -1303,7 +1376,7 @@ async function gifPanel(panel, c, { sent, close, alive, track }) {
     );
     const still = () => alive() && tabs.dataset.on === which;
     tabs.dataset.on = which;
-    (which === "mine" ? gifMine(body, c, { sent, close, alive: still, track }) : gifSearch(body, search, { alive: still, track, mine: () => show("mine") }))
+    (which === "mine" ? gifMine(body, c, { sent, close, alive: still, track }) : gifSearch(body, search, { alive: still, track }))
       .catch((x) => { if (still()) put(body, h("p", { class: "hint", text: say(x) })); });
   };
   put(panel, tabs, body);
@@ -1320,8 +1393,8 @@ async function gifMine(box, c, { sent, close, alive, track }) {
     if (!alive()) return;
     if (!list.length) {
       put(grid, h("p", { class: "hint", text: info?.giphy?.key
-        ? "Inga sparade GIF:ar än. Sök på GIPHY, välj en GIF-fil, eller öppna en GIF någon skickat och välj ”Spara i mina GIF:ar”."
-        : "Inga sparade GIF:ar än. Välj en GIF-fil, eller öppna en GIF någon skickat och välj ”Spara i mina GIF:ar”." }));
+        ? "Inga sparade GIF:ar än. Sök på GIPHY, välj en fil, eller tryck ”Spara GIF” under en GIF i en konversation."
+        : "Inga sparade GIF:ar än. Välj en fil, eller tryck ”Spara GIF” under en GIF i en konversation." }));
       return;
     }
     const items = [];
@@ -1395,8 +1468,8 @@ async function gifMine(box, c, { sent, close, alive, track }) {
     h(
       "div",
       { class: "picker-head" },
-      h("p", { class: "hint", text: "Tryck på en GIF för att skicka den. Samlingen är krypterad och finns på alla dina enheter." }),
-      h("button", { type: "button", class: "btn small", text: "Välj GIF-fil…", onclick: () => pickFile.click() }),
+      h("span", { class: "hint", text: "Tryck för att skicka. Krypterad, på alla dina enheter." }),
+      h("button", { type: "button", class: "btn small", text: "Från fil…", title: "Välj GIF-fil", onclick: () => pickFile.click() }),
     ),
     grid,
     pickFile,
@@ -1408,10 +1481,10 @@ async function gifMine(box, c, { sent, close, alive, track }) {
  * Search at GIPHY, straight from the browser. Nothing is asked before the user types; a tap saves a result in the
  * collection. The warning says what GIPHY gets to see.
  */
-async function gifSearch(box, config, { alive, track, mine }) {
-  const input = h("input", { class: "input", type: "search", placeholder: "Sök GIF:ar…", spellcheck: "false", autocomplete: "off", "aria-label": "Sök GIF:ar på GIPHY" });
+async function gifSearch(box, config, { alive, track }) {
+  const input = h("input", { class: "input", type: "search", placeholder: "Sök GIF:ar, tryck för att spara", enterkeyhint: "search", spellcheck: "false", autocomplete: "off", "aria-label": "Sök GIF:ar på GIPHY" });
   const grid = h("div", { class: "gif-grid" });
-  const status = h("p", { class: "hint", text: "Skriv minst två tecken." });
+  const status = h("span", { class: "hint", text: "Skriv minst två tecken." });
   let ctl = null;
   let timer = 0;
   let shown = [];
@@ -1429,7 +1502,7 @@ async function gifSearch(box, config, { alive, track, mine }) {
       return;
     }
     if (!alive() || signal.aborted) return;
-    status.textContent = results.length ? "Tryck på en GIF för att spara den bland dina GIF:ar." : "Inga träffar.";
+    status.textContent = results.length ? "Tryck för att spara i Mina GIF:ar." : "Inga träffar.";
     for (const u of shown) URL.revokeObjectURL(u);
     shown = [];
     put(grid, results.map((r) => {
@@ -1474,21 +1547,26 @@ async function gifSearch(box, config, { alive, track, mine }) {
     }
     timer = setTimeout(() => run(q), 450); // not a request per keystroke
   });
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (q.length >= 2) run(q);
+    if (!matchMedia("(hover: hover)").matches) input.blur(); // on a phone: the keyboard goes, the results get the room
+  });
   put(
     box,
+    // Always there, but one short line: the details open on a tap (a phone has little room with the keyboard up).
     h(
-      "div",
+      "details",
       { class: "warn-note", role: "note" },
-      h("strong", { text: "Hämtas direkt från GIPHY. " }),
-      "Sökningen och GIF:arna hämtas av din webbläsare från GIPHY, som ser din IP-adress och vad du söker. Den trafiken skyddas bara av HTTPS, inte av Murmos end-to-end-kryptering. Det du sedan skickar är krypterat som vanligt.",
+      h("summary", {}, h("strong", { text: "Direkt från GIPHY: " }), "de ser din IP-adress och sökning. Bara HTTPS, inte E2E."),
+      h("p", { text: "Sökningen och GIF:arna hämtas av din webbläsare direkt från GIPHY, som ser din IP-adress och vad du söker. Den trafiken skyddas bara av HTTPS, inte av Murmos end-to-end-kryptering. Inget hämtas innan du skriver, och det du sedan skickar är krypterat som vanligt." }),
     ),
     input,
-    status,
+    h("div", { class: "gif-status" }, status, h("span", { class: "giphy-mark", text: "Powered by GIPHY" })),
     grid,
-    h("div", { class: "gif-foot" },
-      h("button", { type: "button", class: "link", text: "Visa mina GIF:ar", onclick: mine }),
-      h("span", { class: "hint", text: "Powered by GIPHY" })),
   );
   if (matchMedia("(hover: hover)").matches) input.focus();
 }
@@ -1892,18 +1970,22 @@ function showAccountMenu() {
 
 async function showDevices() {
   const list = h("div", {}, h("span", { class: "spinner" }));
+  const paper = h("div", { class: "paperbox" });
   const d = dialog(
     h("h2", { text: "Dina enheter" }),
     h("p", { class: "hint", text: "Nya enheter läggs till genom att logga in på dem och godkänna här. Ett lösenord räcker inte för att lägga till en enhet." }),
     list,
+    paper,
     h("div", { class: "actions" }, h("button", { class: "btn", text: "Stäng", onclick: () => d.close() })),
   );
   const render = async () => {
     const [own, seen] = await Promise.all([messenger.ownList(true), messenger.ownSeen()]);
+    const keys = own.present.filter(p.isPaper);
+    const browsers = own.present.filter((x) => !p.isPaper(x));
     put(
       list,
-      own.present.length === 1
-        ? h("p", { class: "lone", text: "Det här är din enda enhet. Om webbläsarens data rensas kan ingen godkänna en ny enhet: då behövs återställningskortet, och historiken går förlorad. Länka gärna en enhet till." })
+      browsers.length === 1 && !keys.length
+        ? h("p", { class: "lone", text: "Det här är din enda enhet. Om webbläsarens data rensas kan ingen godkänna en ny enhet: då behövs återställningskortet, kontot börjar om och historiken går förlorad. Länka en enhet till, eller skapa en pappersnyckel." })
         : null,
       ...own.present.map((dev) =>
         h(
@@ -1912,9 +1994,13 @@ async function showDevices() {
           h(
             "div",
             { class: "l" },
-            h("div", { text: dev.label + (dev.id === messenger.me.device ? " (den här)" : "") }),
-            h("div", { class: "seen", text: lastSeen(dev.id === messenger.me.device ? 0 : seen[dev.id]) }),
-            h("div", { class: "id", text: dev.id }),
+            h("div", { text: p.isPaper(dev) ? "Pappersnyckel" : dev.label + (dev.id === messenger.me.device ? " (den här)" : "") }),
+            p.isPaper(dev)
+              ? h("div", { class: "hint", text: "Kan godkänna en ny enhet tillsammans med ditt lösenord. Tar du bort den slutar den gamla nyckeln att fungera." })
+              : [
+                  h("div", { class: "seen", text: lastSeen(dev.id === messenger.me.device ? 0 : seen[dev.id]) }),
+                  h("div", { class: "id", text: dev.id }),
+                ],
           ),
           dev.id === messenger.me.device
             ? null
@@ -1923,6 +2009,7 @@ async function showDevices() {
                 text: "Ta bort",
                 onclick: async () => {
                   try {
+                    if (p.isPaper(dev) && !confirm("Ta bort pappersnyckeln? Den kan då inte längre godkänna en ny enhet.")) return;
                     await messenger.removeDevice(dev.id);
                     await render();
                   } catch (x) {
@@ -1933,8 +2020,94 @@ async function showDevices() {
         ),
       ),
     );
+    put(
+      paper,
+      h("h3", { text: "Pappersnyckel" }),
+      h("p", { class: "hint", text: keys.length
+        ? "Du har en pappersnyckel. En ny ersätter den gamla, som då slutar fungera."
+        : "En pappersnyckel kan godkänna en ny enhet om du inte har någon enhet kvar. Den fungerar bara tillsammans med ditt lösenord, så papperet ensamt ger ingen åtkomst. Historiken följer inte med: den finns bara på dina enheter." }),
+      h("button", { class: "btn", text: keys.length ? "Skapa ny pappersnyckel" : "Skapa pappersnyckel", onclick: () => { d.close(); showPaperKey(); } }),
+    );
   };
   render().catch((x) => list.replaceChildren(h("div", { class: "error", text: say(x) })));
+}
+
+/**
+ * Make a paper key (docs/DESIGN.md §4.5): the password unlocks the vault's local secret again, the key is shown and
+ * must be saved, and only then is it added to the device list (replacing an earlier one).
+ */
+function showPaperKey(onDone = () => {}) {
+  const err = h("div", { class: "error" });
+  const pw = h("input", { type: "password", autocomplete: "current-password" });
+  const go = h("button", { class: "btn primary", type: "submit", text: "Fortsätt" });
+  const body = h(
+    "form",
+    {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        err.textContent = "";
+        go.disabled = true;
+        go.replaceChildren(h("span", { class: "spinner" }), "Låser upp…");
+        let secret;
+        try {
+          secret = await id.unlockLocalSecret(api, messenger.home, messenger.me.account, pw.value);
+          pw.value = "";
+          showPaperKeyText(d, await messenger.preparePaperKey(secret), onDone);
+        } catch (x) {
+          err.textContent = say(x);
+          go.disabled = false;
+          go.replaceChildren("Fortsätt");
+        } finally {
+          secret?.fill(0);
+        }
+      },
+    },
+    h("p", { text: "En pappersnyckel kan godkänna en ny enhet när du inte har någon annan enhet kvar – tillsammans med ditt lösenord. Kontot och dina kontakters förtroende är då kvar; bara historiken på den förlorade enheten går inte att få tillbaka." }),
+    h("div", { class: "field" }, h("label", { text: "Ditt lösenord" }), pw),
+    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", text: "Avbryt", onclick: () => d.close() }), go),
+    err,
+  );
+  const d = dialog(h("h2", { text: "Skapa pappersnyckel" }), body);
+  pw.focus();
+}
+
+function showPaperKeyText(d, prepared, onDone) {
+  const err = h("div", { class: "error" });
+  const saved = h("input", { type: "checkbox" });
+  const go = h("button", { class: "btn primary", text: "Aktivera pappersnyckeln", disabled: true });
+  saved.addEventListener("change", () => (go.disabled = !saved.checked));
+  const name = `murmo-pappersnyckel-${splitHandle(messenger.handle)[0]}.txt`;
+  const text = `Murmo – pappersnyckel för ${messenger.handle}\n\n${prepared.text}\n\nGodkänner en ny enhet tillsammans med lösenordet när ingen annan enhet finns kvar.\nLogga in, välj "Jag har ingen annan enhet kvar" och ange nyckeln.\n`;
+  go.addEventListener("click", async () => {
+    go.disabled = true;
+    go.replaceChildren(h("span", { class: "spinner" }), "Aktiverar…");
+    try {
+      await prepared.commit();
+      toast("Pappersnyckeln är aktiverad.");
+      setSetting("singleDeviceSeen", true);
+      d.close();
+      onDone();
+    } catch (x) {
+      err.textContent = say(x);
+      go.disabled = false;
+      go.replaceChildren("Aktivera pappersnyckeln");
+    }
+  });
+  d.classList.add("printable");
+  d.replaceChildren(
+    h("h2", { text: "Din pappersnyckel" }),
+    h("p", { text: "Skriv ner nyckeln eller skriv ut den, och förvara den på ett annat ställe än dina enheter. Den visas bara nu." }),
+    h("pre", { class: "cardtext paperkey", text: prepared.text }),
+    h(
+      "div",
+      { style: "display:flex;gap:8px;flex-wrap:wrap" },
+      h("button", { class: "btn", text: "Ladda ner som text", onclick: () => download(name, new Blob([text], { type: "text/plain" })) }),
+      h("button", { class: "btn ghost", text: "Skriv ut", onclick: () => print() }),
+    ),
+    h("label", { class: "check" }, saved, h("span", { text: "Jag har sparat pappersnyckeln på ett säkert ställe." })),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: "Avbryt", onclick: () => d.close() }), go),
+    err,
+  );
 }
 
 async function logout(forget) {
