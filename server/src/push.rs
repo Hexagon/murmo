@@ -167,7 +167,7 @@ fn post(endpoint: &str, authorization: &str) -> Outcome {
         .header("Authorization", authorization)
         .header("TTL", "86400")
         .header("Urgency", "high")
-        .header("Topic", "mesg")
+        .header("Topic", "murmo")
         .send_empty();
     match res.map(|r| r.status().as_u16()) {
         Ok(200..=299) => Outcome::Sent,
@@ -244,7 +244,7 @@ mod tests {
         Pusher::open(
             &db,
             hosts.iter().map(|s| s.to_string()).collect(),
-            "https://mesg.example".into(),
+            "https://murmo.example".into(),
         )
         .expect("pusher")
     }

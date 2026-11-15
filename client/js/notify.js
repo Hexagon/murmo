@@ -3,7 +3,7 @@
 
 import * as p from "./protocol.js";
 
-const TAG = "mesg";
+const TAG = "murmo";
 
 /** "ok", or why notifications cannot work here: "insecure", "ios-install" (add to the home screen first), "unsupported". */
 export function support() {
@@ -67,7 +67,7 @@ export async function unsubscribe() {
 export async function show(body) {
   if (support() !== "ok" || permission() !== "granted") return;
   const reg = await activeRegistration();
-  await reg.showNotification("mesg", { body, tag: TAG, renotify: true, icon: "icon-512.png" });
+  await reg.showNotification("Murmo", { body, tag: TAG, renotify: true, icon: "icon-512.png" });
 }
 
 /** Remove our notifications (the user is looking at the page). */

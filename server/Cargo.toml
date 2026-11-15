@@ -1,6 +1,6 @@
 [package]
-name = "mesg-server"
-description = "mesg server: a rootcard home and a blind mailbox for end-to-end encrypted messages"
+name = "murmo-server"
+description = "Murmo server: a rootcard home and a blind mailbox for end-to-end encrypted messages"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

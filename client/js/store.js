@@ -34,10 +34,13 @@ function decode(bytes) {
   return JSON.parse(new TextDecoder().decode(bytes), (_, x) => (x && typeof x === "object" && typeof x.$b === "string" ? p.unb64(x.$b) : x));
 }
 
+/** IndexedDB names keep the project's old name ("mesg") so that data in browsers that used it stays readable. */
+const STORAGE_NAME = "mesg";
+
 /** The list of accounts used in this browser (plain: only ids and handles, so the login screen can offer them). */
 export const accounts = {
   async db() {
-    return openDb("mesg", (db) => db.createObjectStore("accounts", { keyPath: "account" }));
+    return openDb(STORAGE_NAME, (db) => db.createObjectStore("accounts", { keyPath: "account" }));
   },
   async all() {
     const db = await this.db();
@@ -71,7 +74,7 @@ export const accounts = {
 
 export class Store {
   /** `prefix` separates several devices in one browser profile (tests only). */
-  static async open(account, prefix = "mesg") {
+  static async open(account, prefix = STORAGE_NAME) {
     const db = await openDb(`${prefix}-${account}`, (d) => {
       d.createObjectStore("meta");
       d.createObjectStore("contacts", { keyPath: "k" });
@@ -81,7 +84,7 @@ export class Store {
     return new Store(db, account);
   }
 
-  static async destroy(account, prefix = "mesg") {
+  static async destroy(account, prefix = STORAGE_NAME) {
     await req(indexedDB.deleteDatabase(`${prefix}-${account}`));
   }
 
