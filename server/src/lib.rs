@@ -6,6 +6,7 @@
 //! | Variable | Default | Meaning |
 //! |---|---|---|
 //! | `MURMO_ORIGIN` | `http://127.0.0.1:8080` | public origin (https in production) |
+//! | `MURMO_OLD_ORIGINS` | empty | earlier public origins that still reach this server after a move of domain (comma-separated) |
 //! | `MURMO_BIND` | `127.0.0.1:8080` | address to listen on |
 //! | `MURMO_DB` | `murmo.sqlite` | SQLite database |
 //! | `MURMO_HOST_KEY_FILE` | `murmo-host.key` | rootcard host key seed (created on first start, mode 0600) |
@@ -131,6 +132,10 @@ fn config() -> Result<Config, String> {
         origin: env("MURMO_ORIGIN", "http://127.0.0.1:8080")
             .trim_end_matches('/')
             .to_string(),
+        old_origins: list(&env("MURMO_OLD_ORIGINS", ""))
+            .into_iter()
+            .map(|o| o.trim_end_matches('/').to_ascii_lowercase())
+            .collect(),
         bind: env("MURMO_BIND", "127.0.0.1:8080"),
         db: file_env("MURMO_DB", "murmo.sqlite", "mesg.sqlite"),
         key_file: file_env("MURMO_HOST_KEY_FILE", "murmo-host.key", "mesg-host.key"),
@@ -195,12 +200,23 @@ async fn security_headers(State(app): State<Arc<App>>, req: Request, next: Next)
     let api = req.uri().path().starts_with("/api/") || req.uri().path().starts_with(rc::PREFIX);
     let mut res = next.run(req).await;
     let h = res.headers_mut();
-    let ws_origin = app.cfg.origin.replacen("http", "ws", 1);
+    let ws_origin = app
+        .origins()
+        .map(|o| o.replacen("http", "ws", 1))
+        .collect::<Vec<_>>()
+        .join(" ");
     // The page may talk to this server and to the rootcard homes whose identities it accepts (login happens there).
+    // The old origins too: an identity made before a move of domain has its home there.
     let homes = if app.cfg.any_home {
         "https:".to_string()
     } else {
-        app.cfg.remote_homes.join(" ")
+        app.cfg
+            .remote_homes
+            .iter()
+            .chain(&app.cfg.old_origins)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
     };
     let csp = format!(
         "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; \
@@ -283,7 +299,10 @@ pub fn build(
     let host_config = HostConfig {
         key_seed: Zeroizing::new(seed),
         retired_keys: Vec::new(),
-        urls: vec![format!("{}{}", cfg.origin, rc::PREFIX)],
+        urls: std::iter::once(&cfg.origin)
+            .chain(&cfg.old_origins)
+            .map(|o| format!("{o}{}", rc::PREFIX))
+            .collect(),
         realms: vec![RealmConfig {
             realm: cfg.realm.clone(),
             policy: UsernamePolicy::DEFAULT,
@@ -322,6 +341,12 @@ pub fn build(
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = config()?;
     rootcard::check_base_url(&cfg.origin).map_err(|e| format!("MURMO_ORIGIN: {e}"))?;
+    for o in &cfg.old_origins {
+        rootcard::check_base_url(o).map_err(|e| format!("MURMO_OLD_ORIGINS: {o}: {e}"))?;
+        if o == &cfg.origin {
+            return Err("MURMO_OLD_ORIGINS must not contain MURMO_ORIGIN".into());
+        }
+    }
     let seed = host_key(&cfg.key_file)?;
     let app = build(&cfg, db::Db::open(&cfg.db)?, seed)?;
     let sweeper = app.clone();
@@ -342,6 +367,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     eprintln!("murmo-server for {} on {}", cfg.origin, cfg.bind);
+    if !cfg.old_origins.is_empty() {
+        eprintln!("  also answering for {}", cfg.old_origins.join(", "));
+    }
     let last = app.clone();
     axum::serve(
         listener,

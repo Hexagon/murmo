@@ -97,6 +97,10 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
     let mut m = Map::new()
         .with("v", 1i64)
         .with("origin", app.cfg.origin.as_str())
+        .with(
+            "origins",
+            Value::Array(app.origins().map(Value::from).collect()),
+        )
         .with("home", app.local_home())
         .with("realm", app.cfg.realm.as_str())
         .with("realms", Value::Array(realms))
@@ -207,7 +211,12 @@ pub async fn lookup(
                 && s.vault.is_some()
                 && h.matches(&s.state.username, &s.state.account)
             {
-                found.push((a, app.local_home(), s.state.username));
+                let home = s
+                    .state
+                    .instance
+                    .as_ref()
+                    .map_or_else(|| app.local_home(), |i| i.home.url.clone());
+                found.push((a, home, s.state.username));
             }
         }
         for (a, home, username) in app
@@ -456,11 +465,19 @@ pub async fn post_link(
         let mut realms = app.cfg.realms.clone();
         realms.push(app.cfg.realm.clone());
         let options = VerifyOptions::new(realms).at(now());
+        // The proof is for the origin the page was opened on: any of this server's origins.
+        let recipient = proof
+            .as_object()
+            .and_then(|p| p.get("recipient"))
+            .and_then(Value::as_str)
+            .filter(|r| app.is_origin(r))
+            .ok_or(ApiError::new(401, "bad_proof"))?
+            .to_string();
         let state = verify_proof(
             proof,
             &app.events(&account)?,
             &challenge,
-            &app.cfg.origin,
+            &recipient,
             &options,
         )
         .map_err(|_| ApiError::new(401, "bad_proof"))?;
