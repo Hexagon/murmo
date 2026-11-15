@@ -190,7 +190,10 @@ pre.cardtext {
 .msg .frame:has(> img.inline) > .meta {
   position: absolute; right: 6px; bottom: 6px; padding: 1px 6px; border-radius: 999px;
   background: #000000a0; color: #fff; white-space: nowrap;
+  /* centred as a row: the icons' baseline offsets would otherwise leave the text sitting high in the pill */
+  display: flex; align-items: center;
 }
+.msg .frame:has(> img.inline) > .meta svg { display: block; }
 .msg .frame:has(> img.inline) > .meta :is(.delivery, .delivery.ok, .react-btn, .undo-btn, .save-gif-inline, .save-gif-inline.saved, .edited) { color: #fff; }
 .msg .frame:not(:has(> img.inline)) > .meta { margin-top: 3px; text-align: right; }
 .msg.in .frame:not(:has(> img.inline)) > .meta { text-align: left; }
