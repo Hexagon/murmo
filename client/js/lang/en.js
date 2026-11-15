@@ -446,7 +446,6 @@ export default {
   "page.check2": "Identity with rootcard, the password never leaves the browser",
   "page.check3": "No search, no contact lists on the server",
   "page.check4": "Open source – review the code or run your own server",
-  "page.noscript": "Murmo runs in the browser and needs JavaScript.",
   "page.step1Title": "Create an identity",
   "page.step1": "Choose a name and a password. You get a recovery card to keep offline – it is the key to your identity, and the only thing that can restore it.",
   "page.step2Title": "Share your identifier",
