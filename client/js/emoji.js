@@ -3,19 +3,19 @@
 // Emoji are plain Unicode text in the message and drawn by the system's own emoji font: no images, no fonts or
 // sprite sheets from elsewhere, nothing parsed into markup. A message stays text whatever it contains.
 
-/** [label, icon, emoji] per category; the emoji of one category are one string split into graphemes. */
+/** [id, icon, emoji] per category (the name is the text `emoji.<id>`, i18n.js); the emoji are one string split into graphemes. */
 const SETS = [
-  ["Ansikten", "😀", "😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😗 😚 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐 🤨 😐 😑 😶 😏 😒 🙄 😬 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🥵 🥶 🥴 😵 🤯 🤠 🥳 😎 🤓 🧐 😕 😟 🙁 😮 😯 😲 😳 🥺 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 💩 🤡 👻 👽 🤖"],
-  ["Gester", "👍", "👋 🤚 ✋ 🖖 👌 🤌 🤏 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🤝 🙏 ✍️ 💪 🫶 👀 🧠 🫡 🤷 🤦 🙋 🙇 💃 🕺 🏃 🚶"],
-  ["Hjärtan", "❤️", "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💋 💯 💢 💥 💫 💦 💨 💬 💭 💤 ✨ ⭐ 🌟 🔥 🎉 🎊 🎈 🎁 🏆 🥇 🎯"],
-  ["Natur", "🌿", "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🐔 🐧 🐦 🦆 🦉 🐴 🦄 🐝 🦋 🐌 🐞 🐢 🐍 🐙 🐟 🐬 🐳 🦭 🌸 🌹 🌻 🌷 🌱 🌲 🌳 🍀 🍁 🍂 🍄 🌍 🌙 ☀️ ⛅ 🌧️ ⛈️ ❄️ ☃️ 🌈 🌊"],
-  ["Mat", "🍕", "🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🫐 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🥑 🥦 🥕 🌽 🌶️ 🥔 🥐 🍞 🥨 🧀 🥚 🥞 🧇 🥓 🍔 🍟 🍕 🌭 🥪 🌮 🌯 🍝 🍜 🍣 🍱 🍦 🍰 🎂 🧁 🍪 🍫 🍬 🍿 ☕ 🍵 🧃 🥤 🍺 🍻 🥂 🍷 🍸"],
-  ["Aktiviteter", "⚽", "⚽ 🏀 🏈 ⚾ 🎾 🏐 🏓 🏸 🏒 ⛳ 🎣 🎿 ⛸️ 🛹 🚴 🏊 🧗 🧘 🎮 🎲 ♟️ 🧩 🎨 🎬 🎤 🎧 🎸 🎹 🥁 🎻 📚 ✏️ 💻 📱 📷 🎥 💡 🔑 🔒 🔓 🛡️ 📎 📌 📅 ⏰ ⌛ 💰 🛒"],
-  ["Resor", "✈️", "🚗 🚕 🚌 🚎 🏎️ 🚓 🚑 🚒 🚲 🛴 🛵 🏍️ 🚂 🚆 🚇 🚢 ⛵ 🚤 ✈️ 🚀 🛸 🚁 ⛺ 🏠 🏡 🏢 🏰 🗼 🗽 ⛪ 🏖️ 🏝️ 🏔️ 🌋 🗺️ 🧭 🎢 🎡"],
-  ["Symboler", "✅", "✅ ☑️ ✔️ ❌ ❎ ➕ ➖ ❓ ❗ ‼️ ⁉️ ⚠️ 🚫 ⛔ ♻️ 🔁 ▶️ ⏸️ ⏹️ 🔴 🟠 🟡 🟢 🔵 🟣 ⚫ ⚪ 🆗 🆕 🆒 🆘 ℹ️ 🔔 🔕 🎵 💲 ©️ ®️ ™️ 🇸🇪 🇳🇴 🇩🇰 🇫🇮 🇮🇸 🇪🇺 🏳️‍🌈"],
+  ["faces", "😀", "😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😗 😚 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐 🤨 😐 😑 😶 😏 😒 🙄 😬 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🥵 🥶 🥴 😵 🤯 🤠 🥳 😎 🤓 🧐 😕 😟 🙁 😮 😯 😲 😳 🥺 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 💩 🤡 👻 👽 🤖"],
+  ["gestures", "👍", "👋 🤚 ✋ 🖖 👌 🤌 🤏 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🤝 🙏 ✍️ 💪 🫶 👀 🧠 🫡 🤷 🤦 🙋 🙇 💃 🕺 🏃 🚶"],
+  ["hearts", "❤️", "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💋 💯 💢 💥 💫 💦 💨 💬 💭 💤 ✨ ⭐ 🌟 🔥 🎉 🎊 🎈 🎁 🏆 🥇 🎯"],
+  ["nature", "🌿", "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🐔 🐧 🐦 🦆 🦉 🐴 🦄 🐝 🦋 🐌 🐞 🐢 🐍 🐙 🐟 🐬 🐳 🦭 🌸 🌹 🌻 🌷 🌱 🌲 🌳 🍀 🍁 🍂 🍄 🌍 🌙 ☀️ ⛅ 🌧️ ⛈️ ❄️ ☃️ 🌈 🌊"],
+  ["food", "🍕", "🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🫐 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🥑 🥦 🥕 🌽 🌶️ 🥔 🥐 🍞 🥨 🧀 🥚 🥞 🧇 🥓 🍔 🍟 🍕 🌭 🥪 🌮 🌯 🍝 🍜 🍣 🍱 🍦 🍰 🎂 🧁 🍪 🍫 🍬 🍿 ☕ 🍵 🧃 🥤 🍺 🍻 🥂 🍷 🍸"],
+  ["activities", "⚽", "⚽ 🏀 🏈 ⚾ 🎾 🏐 🏓 🏸 🏒 ⛳ 🎣 🎿 ⛸️ 🛹 🚴 🏊 🧗 🧘 🎮 🎲 ♟️ 🧩 🎨 🎬 🎤 🎧 🎸 🎹 🥁 🎻 📚 ✏️ 💻 📱 📷 🎥 💡 🔑 🔒 🔓 🛡️ 📎 📌 📅 ⏰ ⌛ 💰 🛒"],
+  ["travel", "✈️", "🚗 🚕 🚌 🚎 🏎️ 🚓 🚑 🚒 🚲 🛴 🛵 🏍️ 🚂 🚆 🚇 🚢 ⛵ 🚤 ✈️ 🚀 🛸 🚁 ⛺ 🏠 🏡 🏢 🏰 🗼 🗽 ⛪ 🏖️ 🏝️ 🏔️ 🌋 🗺️ 🧭 🎢 🎡"],
+  ["symbols", "✅", "✅ ☑️ ✔️ ❌ ❎ ➕ ➖ ❓ ❗ ‼️ ⁉️ ⚠️ 🚫 ⛔ ♻️ 🔁 ▶️ ⏸️ ⏹️ 🔴 🟠 🟡 🟢 🔵 🟣 ⚫ ⚪ 🆗 🆕 🆒 🆘 ℹ️ 🔔 🔕 🎵 💲 ©️ ®️ ™️ 🇸🇪 🇳🇴 🇩🇰 🇫🇮 🇮🇸 🇪🇺 🏳️‍🌈"],
 ];
 
-export const CATEGORIES = SETS.map(([label, icon, list]) => ({ label, icon, emoji: list.split(" ") }));
+export const CATEGORIES = SETS.map(([id, icon, list]) => ({ id, icon, emoji: list.split(" ") }));
 
 /** How many recently used emoji are kept (in the device's encrypted store). */
 export const RECENT_MAX = 24;

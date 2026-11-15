@@ -26,9 +26,12 @@ function giphy(req) {
   }
   return req.respond({ status: 200, headers: cors, contentType: "image/gif", body: GIF_2X2 });
 }
-async function page(name) {
+async function page(name, languages = null) {
   const ctx = await browser.createBrowserContext();
   const pg = await ctx.newPage();
+  // The flow below looks for the Swedish texts; `languages` instead lets the browser's own list choose.
+  if (languages) await pg.evaluateOnNewDocument((l) => Object.defineProperty(navigator, "languages", { get: () => l }), languages);
+  else await pg.evaluateOnNewDocument(() => localStorage.setItem("murmo-lang", "sv"));
   await pg.setViewport({ width: 1280, height: 800 });
   await pg.setRequestInterception(true);
   pg.on("request", (req) => (/\.giphy\.com$/.test(new URL(req.url()).hostname) ? giphy(req) : req.continue()));
@@ -62,6 +65,19 @@ async function register(pg, user, tag) {
   return pg.$eval(".me .h", (e) => e.textContent);
 }
 try {
+  // The language follows the browser (German here, English for one we do not have), the start page included.
+  for (const [langs, login, h1] of [[["de-AT", "en"], "Anmelden", "Verschlüsselte Nachrichten ohne Telefonnummer"], [["fr-FR"], "Log in", "Encrypted messages without a phone number"]]) {
+    const pg = await page(`lang-${langs[0]}`, langs);
+    await pg.waitForSelector(".auth .tabs button", { timeout: 10000 });
+    const got = await pg.evaluate(() => [document.querySelector(".auth .tabs button").textContent, document.querySelector(".hero h1").textContent, document.documentElement.lang]);
+    if (got[0] !== login || got[1] !== h1) throw new Error(`language ${langs}: ${got}`);
+    await pg.screenshot({ path: `${shots}/lang-${langs[0]}.png` });
+    // Chosen in the picker: the page and the form change at once, and the choice is kept.
+    await pg.select(".auth-foot select.lang", "es");
+    const es = await pg.evaluate(() => [document.querySelector(".auth .tabs button").textContent, document.documentElement.lang]);
+    if (es[0] !== "Iniciar sesión" || es[1] !== "es") throw new Error(`picked Spanish: ${es}`);
+    await pg.browserContext().close();
+  }
   const a = await page("alice");
   const aliceHandle = await register(a, "Alice", "a");
   const b = await page("bob");
@@ -122,7 +138,7 @@ try {
   fs.writeFileSync(`${shots}/bomb.png`, bomb);
   const [ch3] = await Promise.all([a.waitForFileChooser(), a.click(".composer .icon-btn")]);
   await ch3.accept([`${shots}/bomb.png`]);
-  await b.waitForFunction(() => [...document.querySelectorAll(".msg .filecard .fs")].some((e) => /50000 × 50000/.test(e.textContent)), { timeout: 20000 });
+  await b.waitForFunction(() => [...document.querySelectorAll(".msg .filecard .fs")].some((e) => /50\s?000 × 50\s?000/.test(e.textContent)), { timeout: 20000 }); // the numbers are written the local way
   if ((await b.$$(".msg img.inline")).length !== 1) throw new Error("the oversized image was shown inline");
   if (!(await b.evaluate(() => window.__shownImg?.isConnected && window.__shownImg === document.querySelector(".msg img.inline")))) throw new Error("the picture was made again when the thread was drawn");
   // Emoji: picked from the panel into the text, and a message of only emoji is shown larger.

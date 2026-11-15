@@ -52,12 +52,12 @@ function fail(code) {
   return Object.assign(new Error(code), { code });
 }
 
-/** Search GIPHY: `config` is `info.giphy` (`{ key, rating }`). Throws `giphy_limit`, `giphy_key` or `giphy_failed`. */
-export async function search(config, query, { maxBytes, limit = 24, signal } = {}) {
+/** Search GIPHY in language `lang`: `config` is `info.giphy` (`{ key, rating }`). Throws `giphy_limit`, `giphy_key` or `giphy_failed`. */
+export async function search(config, query, { maxBytes, limit = 24, signal, lang = "en" } = {}) {
   const q = String(query).trim().slice(0, 50);
   if (!q) return [];
   const url = new URL(API);
-  url.search = new URLSearchParams({ api_key: config.key, q, limit: String(limit), rating: config.rating ?? "pg-13", lang: "sv" }).toString();
+  url.search = new URLSearchParams({ api_key: config.key, q, limit: String(limit), rating: config.rating ?? "pg-13", lang }).toString();
   let r;
   try {
     r = await fetch(url, { ...FETCH, signal });
