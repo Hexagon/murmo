@@ -1294,7 +1294,7 @@ async function gifPanel(panel, c, { sent, close, alive, track }) {
     );
     const still = () => alive() && tabs.dataset.on === which;
     tabs.dataset.on = which;
-    (which === "mine" ? gifMine(body, c, { sent, close, alive: still, track }) : gifSearch(body, search, { alive: still, track, mine: () => show("mine") }))
+    (which === "mine" ? gifMine(body, c, { sent, close, alive: still, track }) : gifSearch(body, search, { alive: still, track }))
       .catch((x) => { if (still()) put(body, h("p", { class: "hint", text: say(x) })); });
   };
   put(panel, tabs, body);
@@ -1311,8 +1311,8 @@ async function gifMine(box, c, { sent, close, alive, track }) {
     if (!alive()) return;
     if (!list.length) {
       put(grid, h("p", { class: "hint", text: info?.giphy?.key
-        ? "Inga sparade GIF:ar än. Sök på GIPHY, välj en GIF-fil, eller öppna en GIF någon skickat och välj ”Spara i mina GIF:ar”."
-        : "Inga sparade GIF:ar än. Välj en GIF-fil, eller öppna en GIF någon skickat och välj ”Spara i mina GIF:ar”." }));
+        ? "Inga sparade GIF:ar än. Sök på GIPHY, välj en fil, eller tryck ”Spara GIF” under en GIF i en konversation."
+        : "Inga sparade GIF:ar än. Välj en fil, eller tryck ”Spara GIF” under en GIF i en konversation." }));
       return;
     }
     const items = [];
@@ -1386,8 +1386,8 @@ async function gifMine(box, c, { sent, close, alive, track }) {
     h(
       "div",
       { class: "picker-head" },
-      h("p", { class: "hint", text: "Tryck på en GIF för att skicka den. Samlingen är krypterad och finns på alla dina enheter." }),
-      h("button", { type: "button", class: "btn small", text: "Välj GIF-fil…", onclick: () => pickFile.click() }),
+      h("span", { class: "hint", text: "Tryck för att skicka. Krypterad, på alla dina enheter." }),
+      h("button", { type: "button", class: "btn small", text: "Från fil…", title: "Välj GIF-fil", onclick: () => pickFile.click() }),
     ),
     grid,
     pickFile,
@@ -1399,10 +1399,10 @@ async function gifMine(box, c, { sent, close, alive, track }) {
  * Search at GIPHY, straight from the browser. Nothing is asked before the user types; a tap saves a result in the
  * collection. The warning says what GIPHY gets to see.
  */
-async function gifSearch(box, config, { alive, track, mine }) {
-  const input = h("input", { class: "input", type: "search", placeholder: "Sök GIF:ar…", spellcheck: "false", autocomplete: "off", "aria-label": "Sök GIF:ar på GIPHY" });
+async function gifSearch(box, config, { alive, track }) {
+  const input = h("input", { class: "input", type: "search", placeholder: "Sök GIF:ar, tryck för att spara", enterkeyhint: "search", spellcheck: "false", autocomplete: "off", "aria-label": "Sök GIF:ar på GIPHY" });
   const grid = h("div", { class: "gif-grid" });
-  const status = h("p", { class: "hint", text: "Skriv minst två tecken." });
+  const status = h("span", { class: "hint", text: "Skriv minst två tecken." });
   let ctl = null;
   let timer = 0;
   let shown = [];
@@ -1420,7 +1420,7 @@ async function gifSearch(box, config, { alive, track, mine }) {
       return;
     }
     if (!alive() || signal.aborted) return;
-    status.textContent = results.length ? "Tryck på en GIF för att spara den bland dina GIF:ar." : "Inga träffar.";
+    status.textContent = results.length ? "Tryck för att spara i Mina GIF:ar." : "Inga träffar.";
     for (const u of shown) URL.revokeObjectURL(u);
     shown = [];
     put(grid, results.map((r) => {
@@ -1465,21 +1465,26 @@ async function gifSearch(box, config, { alive, track, mine }) {
     }
     timer = setTimeout(() => run(q), 450); // not a request per keystroke
   });
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (q.length >= 2) run(q);
+    if (!matchMedia("(hover: hover)").matches) input.blur(); // on a phone: the keyboard goes, the results get the room
+  });
   put(
     box,
+    // Always there, but one short line: the details open on a tap (a phone has little room with the keyboard up).
     h(
-      "div",
+      "details",
       { class: "warn-note", role: "note" },
-      h("strong", { text: "Hämtas direkt från GIPHY. " }),
-      "Sökningen och GIF:arna hämtas av din webbläsare från GIPHY, som ser din IP-adress och vad du söker. Den trafiken skyddas bara av HTTPS, inte av Murmos end-to-end-kryptering. Det du sedan skickar är krypterat som vanligt.",
+      h("summary", {}, h("strong", { text: "Direkt från GIPHY: " }), "de ser din IP-adress och sökning. Bara HTTPS, inte E2E."),
+      h("p", { text: "Sökningen och GIF:arna hämtas av din webbläsare direkt från GIPHY, som ser din IP-adress och vad du söker. Den trafiken skyddas bara av HTTPS, inte av Murmos end-to-end-kryptering. Inget hämtas innan du skriver, och det du sedan skickar är krypterat som vanligt." }),
     ),
     input,
-    status,
+    h("div", { class: "gif-status" }, status, h("span", { class: "giphy-mark", text: "Powered by GIPHY" })),
     grid,
-    h("div", { class: "gif-foot" },
-      h("button", { type: "button", class: "link", text: "Visa mina GIF:ar", onclick: mine }),
-      h("span", { class: "hint", text: "Powered by GIPHY" })),
   );
   if (matchMedia("(hover: hover)").matches) input.focus();
 }
