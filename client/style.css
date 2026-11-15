@@ -175,7 +175,7 @@ pre.cardtext {
 .thread { width: min(768px, calc(100% - 32px)); margin: 0 auto; padding: 12px 0 24px; display: flex; flex-direction: column; gap: 6px; }
 .msg { max-width: 85%; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.in { align-self: flex-start; }
-.msg.in + .msg.out, .msg.out + .msg.in { margin-top: 8px; } /* extra breathing room when the sender changes */
+.msg.in + .msg.out, .msg.out + .msg.in { margin-top: 4px; } /* extra breathing room when the sender changes */
 .msg .body, .msg .fn { unicode-bidi: isolate; } /* text from others cannot reorder what is around it */
 .msg.out { align-self: flex-end; background: var(--bubble); padding: 6px 10px 7px; border-radius: 14px 14px 4px 14px; }
 .msg.out.media { background: transparent; padding: 0; }
