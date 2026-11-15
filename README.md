@@ -59,6 +59,7 @@ Configuration (environment):
 | Variable | Default | Meaning |
 |---|---|---|
 | `MURMO_ORIGIN` | `http://127.0.0.1:8080` | public origin; must be `https://` except on loopback |
+| `MURMO_OLD_ORIGINS` | empty | earlier public origins that still reach this server after a move of domain (comma-separated), see below |
 | `MURMO_BIND` | `127.0.0.1:8080` | listen address (put a TLS reverse proxy in front) |
 | `MURMO_DB` | `murmo.sqlite` | SQLite database |
 | `MURMO_HOST_KEY_FILE` | `murmo-host.key` | rootcard host key, created on first start (back it up, keep it secret) |
@@ -82,6 +83,21 @@ The version shown in the app ("Säkerhet och integritet") is the commit the serv
 
 The `MURMO_ORIGIN` goes into users' signed rootcard logs as their home address: choose it once.
 
+### Moving to a new domain
+
+The page's origin must be one the server knows: proofs and the WebSocket are signed for it, and the browser keeps
+each origin's data (devices, conversations) apart. To move, keep the old domain pointing at the same server and set:
+
+```sh
+MURMO_ORIGIN=https://new.example          # new identities get their home here
+MURMO_OLD_ORIGINS=https://old.example     # still answered: old devices keep working, old identities keep their home
+```
+
+Identities registered under the old domain keep `https://old.example/id` as their home for good (it is in their
+signed log), so the old domain must keep reaching the server, at least `/id` and `/.well-known/rootcard`. Each user
+moves their conversations by logging in on the new domain and approving that device on a device on the old domain:
+the history is handed over as for any new device. Identities from other homes (rootcard.org) are not affected.
+
 ## Layout
 
 ```
@@ -93,7 +109,7 @@ client/        the web client: plain ES modules, no build step, no dependencies 
   js/app.js        the interface
   vendor/rootcard  rootcard 0.3.4 from npm, unmodified (npm tarball SHA-256 433607bb…b1c92b)
 docs/          DESIGN.md (protocol), THREAT_MODEL.md, PLAN.md
-tests/         protocol tests, end-to-end test (two servers, real client engine), browser smoke test
+tests/         protocol tests, end-to-end tests (two servers, a move of domain, real client engine), browser smoke test
 ```
 
 ## Tests

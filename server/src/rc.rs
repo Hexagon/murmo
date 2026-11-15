@@ -118,6 +118,9 @@ fn random_vec(n: usize) -> Vec<u8> {
 }
 
 /// `GET /.well-known/rootcard` ([HST-23]).
-pub async fn pointer(State(app): State<Arc<App>>) -> Response {
-    respond(well_known(&app.host.config, &app.cfg.origin))
+pub async fn pointer(State(app): State<Arc<App>>, headers: axum::http::HeaderMap) -> Response {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok());
+    respond(well_known(&app.host.config, app.origin_for_host(host)))
 }

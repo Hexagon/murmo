@@ -340,6 +340,16 @@ async function boot() {
     return;
   }
   info = await api.info();
+  const origins = info.origins ?? (info.origin ? [info.origin] : []);
+  if (origins.length && !origins.includes(location.origin)) {
+    // The server signs and checks everything for its configured origin (MURMO_ORIGIN): proofs to it and the
+    // WebSocket would fail here in confusing ways, so say what is wrong instead.
+    root.replaceChildren(h("div", { class: "center" }, h("div", { class: "auth card" },
+      h("p", { text: `Servern är inställd för ${info.origin}, men sidan öppnades på ${location.origin}. Inloggning och anslutning fungerar inte här.` }),
+      h("p", { class: "hint", text: "Öppna Murmo på rätt adress, eller (för den som driver servern) sätt MURMO_ORIGIN till den här adressen och starta om servern." }),
+    )));
+    return;
+  }
   // A device remembered by the user's choice opens without the password.
   for (const a of await accounts.all()) {
     if (!a.remembered) continue;
@@ -567,8 +577,17 @@ function showCard(reg, password) {
 }
 
 async function loginAndEnter(homeInput, handle, password, remember) {
-  const home = await id.resolveHome(api, homeInput);
-  const login = await id.login(api, home, handle, password);
+  let home = await id.resolveHome(api, homeInput);
+  let login;
+  try {
+    login = await id.login(api, home, handle, password);
+  } catch (x) {
+    // An identity made on this server before it moved to a new domain has its home at the old address.
+    const old = (info.origins ?? []).filter((o) => o !== location.origin).map((o) => `${o}/id`);
+    if (homeInput.trim() || x?.code !== "not_home" || !old.length) throw x;
+    login = await loginAtOldHome(old, handle, password, x);
+    home = login.home;
+  }
   try {
     const account = login.state.account;
     if (home !== api.base) await api.connect(account, home); // the server fetches and verifies the log at that home
@@ -576,9 +595,13 @@ async function loginAndEnter(homeInput, handle, password, remember) {
     const store = await Store.open(account);
     await store.unlock(secret);
     secret.fill(0);
-    await store.remember(remember);
-    await accounts.put({ account, handle: login.state.handle, home, remembered: remember });
-    const setup = await setupDevice({ api, store, state: login.state, login, label: deviceLabel() });
+    let setup;
+    try {
+      setup = await setupDevice({ api, store, state: login.state, login, label: deviceLabel() });
+    } catch (x) {
+      store.close();
+      throw x;
+    }
     session = { token: login.token, home };
     if (!setup.ready) {
       const ok = await showLinkWait(setup, login.state.handle);
@@ -588,11 +611,26 @@ async function loginAndEnter(homeInput, handle, password, remember) {
         return;
       }
     }
+    // Only a device that is part of the account is remembered: a failed or cancelled link must not leave a device
+    // that opens without the password but can never connect.
+    await store.remember(remember);
+    await accounts.put({ account, handle: login.state.handle, home, remembered: remember });
     await enter({ store, account, handle: login.state.handle, home });
   } finally {
     login.unlocked.contents.accountSeed.fill(0);
     login.unlocked.vaultKey?.fill?.(0);
   }
+}
+
+async function loginAtOldHome(homes, handle, password, first) {
+  for (const h of homes) {
+    try {
+      return await id.login(api, h, handle, password);
+    } catch (x) {
+      if (x?.code !== "not_home" && x?.code !== "unknown_account") throw x;
+    }
+  }
+  throw first;
 }
 
 function showLinkWait(setup, handle) {

@@ -22,6 +22,9 @@ pub type RcHost = Host<Identities, MemoryChallengeStore, MemorySessionStore>;
 pub struct Config {
     /// Public origin, such as `https://murmo.example`.
     pub origin: String,
+    /// Earlier public origins that still reach this server (`https://mesg.example`): devices and identities from
+    /// before a move of domain keep working there, so they can hand their history over to devices on `origin`.
+    pub old_origins: Vec<String>,
     /// Address to bind.
     pub bind: String,
     /// SQLite database path.
@@ -605,9 +608,37 @@ impl Current {
 }
 
 impl App {
-    /// This server's own rootcard base URL.
+    /// This server's own rootcard base URL (for new identities).
     pub fn local_home(&self) -> String {
         format!("{}{}", self.cfg.origin, crate::rc::PREFIX)
+    }
+
+    /// All public origins of this server: `origin` first, then the old ones.
+    pub fn origins(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.cfg.origin.as_str())
+            .chain(self.cfg.old_origins.iter().map(String::as_str))
+    }
+
+    /// Whether `origin` is one of this server's public origins.
+    pub fn is_origin(&self, origin: &str) -> bool {
+        self.origins().any(|o| o == origin)
+    }
+
+    /// Whether `url` is one of this server's rootcard base URLs (under any of its origins).
+    pub fn is_local_home(&self, url: &str) -> bool {
+        url.strip_suffix(crate::rc::PREFIX)
+            .is_some_and(|o| self.is_origin(o))
+    }
+
+    /// The origin a request was made to, by its `Host` header; `origin` when it names none of them.
+    pub fn origin_for_host(&self, host: Option<&str>) -> &str {
+        let host = host.map(str::to_ascii_lowercase);
+        self.origins()
+            .find(|o| {
+                host.as_deref()
+                    .is_some_and(|h| o.split("://").nth(1) == Some(h))
+            })
+            .unwrap_or(self.cfg.origin.as_str())
     }
 
     /// The newest log events of an account, local or remote.
@@ -631,10 +662,13 @@ impl App {
                     .instance
                     .as_ref()
                     .ok_or(ApiError::new(410, "account_retired"))?;
-                if !self.host.config.is_own_key(&inst.home.key) {
+                if !self.host.config.is_own_key(&inst.home.key)
+                    || !self.is_local_home(&inst.home.url)
+                {
                     return Err(ApiError::new(409, "not_home"));
                 }
-                (stored.state, self.local_home())
+                let home = inst.home.url.clone();
+                (stored.state, home)
             }
             None => {
                 let r = self

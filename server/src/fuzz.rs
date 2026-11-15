@@ -77,6 +77,7 @@ fn harness() -> &'static Harness {
     H.get_or_init(|| {
         let cfg = Config {
             origin: "http://127.0.0.1:8080".into(),
+            old_origins: Vec::new(),
             bind: String::new(),
             db: ":memory:".into(),
             key_file: String::new(),

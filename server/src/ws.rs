@@ -36,18 +36,19 @@ pub async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if let Some(o) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok())
-        && o != app.cfg.origin
-    {
-        return ApiError::new(403, "bad_origin").into_response();
-    }
+    let origin = match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        Some(o) if !app.is_origin(o) => return ApiError::new(403, "bad_origin").into_response(),
+        Some(o) => Some(o.to_string()),
+        // Not a browser: the device may sign for any of this server's origins.
+        None => None,
+    };
     if let Err(e) = app.limits.by_addr("ws", addr, 60, 60) {
         return e.into_response();
     }
     ws.max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
         .on_upgrade(move |socket| async move {
-            let _ = run(app, socket).await;
+            let _ = run(app, socket, origin).await;
         })
 }
 
@@ -79,7 +80,11 @@ struct Authed {
     device: String,
 }
 
-async fn authenticate(app: &Arc<App>, socket: &mut WebSocket) -> Option<Authed> {
+async fn authenticate(
+    app: &Arc<App>,
+    socket: &mut WebSocket,
+    origin: Option<&str>,
+) -> Option<Authed> {
     let nonce = base64url_encode(&random::<32>());
     socket
         .send(frame(
@@ -110,15 +115,25 @@ async fn authenticate(app: &Arc<App>, socket: &mut WebSocket) -> Option<Authed> 
         let _ = socket.send(error("unknown_device")).await;
         return None;
     };
-    if verify_ws_auth(dev, &account, &nonce, &app.cfg.origin, sig).is_err() {
+    let signed = match origin {
+        Some(o) => verify_ws_auth(dev, &account, &nonce, o, sig).is_ok(),
+        None => app
+            .origins()
+            .any(|o| verify_ws_auth(dev, &account, &nonce, o, sig).is_ok()),
+    };
+    if !signed {
         let _ = socket.send(error("bad_signature")).await;
         return None;
     }
     Some(Authed { account, device })
 }
 
-async fn run(app: Arc<App>, mut socket: WebSocket) -> Result<(), axum::Error> {
-    let Some(me) = authenticate(&app, &mut socket).await else {
+async fn run(
+    app: Arc<App>,
+    mut socket: WebSocket,
+    origin: Option<String>,
+) -> Result<(), axum::Error> {
+    let Some(me) = authenticate(&app, &mut socket, origin.as_deref()).await else {
         let _ = socket.send(Message::Close(None)).await;
         return Ok(());
     };
