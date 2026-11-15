@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import * as rc from "../client/vendor/rootcard/src/index.js";
 import * as p from "../client/js/protocol.js";
 import * as emoji from "../client/js/emoji.js";
+import * as giphy from "../client/js/giphy.js";
+import { validReaction } from "../client/js/core.js";
 
 async function device(label) {
   const kp = await p.newKeyPair("Ed25519");
@@ -163,4 +165,29 @@ test("emoji: only-emoji messages and the recent list", () => {
   assert.deepEqual(r, ["❤️", "😀", "👍"]); // newest first, no duplicates, only emoji from the picker
   for (let i = 0; i < 100; i++) r = emoji.remember(r, emoji.CATEGORIES[0].emoji[i % 90]);
   assert.equal(r.length, emoji.RECENT_MAX);
+});
+
+test("reactions are one emoji or empty", () => {
+  for (const e of ["", "👍", "❤️", "🏳️‍🌈"]) assert.ok(validReaction(e), e);
+  for (const e of ["👍👍", "a", "<b>", null, 1, "👍 ", "😀".repeat(20)]) assert.ok(!validReaction(e), String(e));
+});
+
+test("GIPHY: only its media hosts, without tracking parameters, within the size limit", () => {
+  assert.equal(giphy.mediaUrl("https://media2.giphy.com/media/abc/giphy.gif?cid=x&rid=y"), "https://media2.giphy.com/media/abc/giphy.gif");
+  for (const u of ["http://media2.giphy.com/a.gif", "https://evil.example/a.gif", "https://media2.giphy.com.evil.example/a.gif", "https://media2.giphy.com:8443/a.gif", "javascript:alert(1)", "", null]) {
+    assert.equal(giphy.mediaUrl(u), null, String(u));
+  }
+  const im = (host, size) => ({ url: `https://${host}/media/x/a.gif?cid=1`, size: String(size) });
+  const json = {
+    data: [
+      { id: "a", title: "Katt", images: { fixed_width_small: im("media1.giphy.com", 10), original: im("media1.giphy.com", 20e6), downsized: im("media1.giphy.com", 1e6) } },
+      { id: "b", images: { fixed_width_small: im("evil.example", 10), original: im("media1.giphy.com", 10) } },
+      { id: "c", images: { fixed_width_small: im("i.giphy.com", 10), original: im("i.giphy.com", 20e6) } },
+      "junk",
+    ],
+  };
+  const r = giphy.parseResults(json, 8 * 1024 * 1024);
+  assert.equal(r.length, 1);
+  assert.deepEqual(r[0], { id: "a", title: "Katt", preview: "https://media1.giphy.com/media/x/a.gif", full: "https://media1.giphy.com/media/x/a.gif" });
+  assert.deepEqual(giphy.parseResults(null, 1), []);
 });

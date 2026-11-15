@@ -3,8 +3,9 @@
 import * as p from "./protocol.js";
 import { Api, ApiError } from "./api.js";
 import * as id from "./identity.js";
-import { GIF_MAX_COUNT, Messenger, Store, setupDevice, validRetention } from "./core.js";
+import { GIF_MAX_BYTES, GIF_MAX_COUNT, Messenger, Store, setupDevice, validRetention } from "./core.js";
 import * as emoji from "./emoji.js";
+import * as giphy from "./giphy.js";
 import { accounts } from "./store.js";
 import * as notify from "./notify.js";
 import * as rc from "../vendor/rootcard/src/index.js";
@@ -100,7 +101,12 @@ const MESSAGES = {
   gif_too_large: "GIF:en är för stor för samlingen (högst 8 MB).",
   too_big_image: "Bilden har för många bildpunkter.",
   gifs_full: `Samlingen är full (högst ${GIF_MAX_COUNT} GIF:ar). Ta bort någon först.`,
-  gif_missing: "GIF:en finns inte kvar på den här enheten.",
+  gif_missing: "GIF:en har inte kommit till den här enheten än.",
+  giphy_limit: "GIPHY tar inte emot fler sökningar från den här servern just nu. Försök igen om en stund.",
+  giphy_key: "GIPHY-nyckeln på servern fungerar inte. Säg till den som driver servern.",
+  giphy_failed: "Det gick inte att nå GIPHY.",
+  bad_reaction: "Det går bara att reagera med en emoji.",
+  no_message: "Meddelandet finns inte längre.",
 };
 
 function say(err) {
@@ -279,7 +285,8 @@ const HELP = [
   ["Filer", [
     "Filer krypteras med en egen nyckel som bara finns i det krypterade meddelandet om filen.",
     "Är mottagaren ansluten går filen direkt, via servern, utan att sparas. Är den inte ansluten kan servern hålla den krypterad tills mottagaren hämtat den, högst 14 dagar. Det går att stänga av under Konto och inställningar; då skickas filen i stället när ni båda är anslutna samtidigt. Servern ser filens ungefärliga storlek, aldrig namn eller innehåll.",
-    "Emoji är vanlig text som ritas av enhetens eget typsnitt. GIF:ar skickas som filer. Dina sparade GIF:ar finns krypterade bara på den här enheten, och Murmo frågar aldrig någon GIF-tjänst – ingen utanför samtalet ser vad du söker efter eller skickar.",
+    "Emoji är vanlig text som ritas av enhetens eget typsnitt, och reaktioner skickas krypterade som andra meddelanden. GIF:ar skickas som filer. Dina sparade GIF:ar finns krypterade på dina enheter och synkas mellan dem, krypterat.",
+    "Om servern har GIPHY-sökning påslagen hämtar din webbläsare sökresultat och GIF:ar direkt från GIPHY. GIPHY ser då din IP-adress och vad du söker, och den trafiken skyddas bara av HTTPS – inte av end-to-end-krypteringen. Inget hämtas från GIPHY förrän du själv söker.",
   ]],
   ["Notiser", [
     "Notiser är på från början om du tillåter dem när webbläsaren frågar. Du kan stänga av dem under Konto och inställningar, och valet gäller bara den enhet du gör det på.",
@@ -728,6 +735,7 @@ async function enter({ store, account, handle, home }) {
   messenger = new Messenger({ api, store, account, handle, home, realms: info.realms, fileQueue: () => settings().fileQueue });
   messenger.addEventListener("contacts", () => { renderSidebar(); refreshConversation(); });
   messenger.addEventListener("messages", (e) => { if (e.detail.conv === current) renderThread(); renderSidebar(); });
+  messenger.addEventListener("gifs", () => refreshGifHashes().then(renderThread).catch(() => {}));
   messenger.addEventListener("status", (e) => {
     renderSidebar();
     if (e.detail !== "online") return;
@@ -742,6 +750,7 @@ async function enter({ store, account, handle, home }) {
     await logout(true);
   });
   await messenger.start();
+  await refreshGifHashes().catch(() => {});
   renderShell();
   askNotifications();
 }
@@ -1270,26 +1279,58 @@ async function emojiPanel(panel, pick, alive) {
 }
 
 /**
- * The user's own GIFs, saved encrypted on this device: one tap sends one. New ones come from a file on the device
- * or from a GIF someone sent (the viewer's "Spara i mina GIF:ar"). No GIF service is asked: a search there would
- * tell it what the user is about to say, and to whom it is close in time (docs/DESIGN.md §9.2).
+ * The GIF panel: "Mina" (the user's collection, one tap sends one) and, when the server has a GIPHY key, "Sök" (one
+ * tap saves a result in the collection). The collection is encrypted on the device and shared with the account's
+ * other devices (docs/DESIGN.md §9.2–9.3).
  */
 async function gifPanel(panel, c, { sent, close, alive, track }) {
+  const body = h("div", { class: "gif-body" });
+  const search = info?.giphy?.key ? info.giphy : null;
+  const tabs = h("div", { class: "seg gif-tabs", role: "tablist" });
+  const show = (which) => {
+    put(tabs,
+      h("button", { type: "button", role: "tab", class: which === "mine" ? "on" : "", "aria-selected": String(which === "mine"), text: "Mina GIF:ar", onclick: () => show("mine") }),
+      search ? h("button", { type: "button", role: "tab", class: which === "search" ? "on" : "", "aria-selected": String(which === "search"), text: "Sök på GIPHY", onclick: () => show("search") }) : null,
+    );
+    const still = () => alive() && tabs.dataset.on === which;
+    tabs.dataset.on = which;
+    (which === "mine" ? gifMine(body, c, { sent, close, alive: still, track }) : gifSearch(body, search, { alive: still, track, mine: () => show("mine") }))
+      .catch((x) => { if (still()) put(body, h("p", { class: "hint", text: say(x) })); });
+  };
+  put(panel, tabs, body);
+  show("mine");
+}
+
+/** The user's collection: one tap sends a GIF, the cross removes it (on all own devices). */
+async function gifMine(box, c, { sent, close, alive, track }) {
   const pickFile = h("input", { type: "file", class: "hidden", accept: "image/gif" });
   const grid = h("div", { class: "gif-grid" });
-  let shown = []; // this panel's object URLs, replaced on each render
+  let shown = []; // object URLs of this view, replaced on each render
   const render = async () => {
     const list = await messenger.gifs();
     if (!alive()) return;
     if (!list.length) {
-      put(grid, h("p", { class: "hint", text: "Inga sparade GIF:ar än. Välj en GIF-fil, eller öppna en GIF någon skickat och välj ”Spara i mina GIF:ar”." }));
+      put(grid, h("p", { class: "hint", text: info?.giphy?.key
+        ? "Inga sparade GIF:ar än. Sök på GIPHY, välj en GIF-fil, eller öppna en GIF någon skickat och välj ”Spara i mina GIF:ar”."
+        : "Inga sparade GIF:ar än. Välj en GIF-fil, eller öppna en GIF någon skickat och välj ”Spara i mina GIF:ar”." }));
       return;
     }
     const items = [];
     const made = [];
     for (const g of list) {
       const blob = await messenger.gifBlob(g.id);
-      if (!blob) continue;
+      const remove = h("button", {
+        type: "button",
+        class: "gif-remove",
+        "aria-label": "Ta bort från mina GIF:ar",
+        title: "Ta bort från mina GIF:ar",
+        onclick: () => messenger.removeGif(g.id).catch((x) => toast(say(x))),
+      }, icon("close"));
+      if (!blob) {
+        // Saved on another device; the bytes are on their way (or come when that device is connected).
+        items.push(h("div", { class: "gif" }, h("div", { class: "gif-send wait", text: "Hämtas…", title: "Sparad på en annan enhet, hämtas därifrån" }), remove));
+        continue;
+      }
       const url = URL.createObjectURL(blob);
       made.push(url);
       items.push(h(
@@ -1307,17 +1348,8 @@ async function gifPanel(panel, c, { sent, close, alive, track }) {
               toast(say(x));
             }
           },
-        }, h("img", { src: url, alt: "Sparad GIF", loading: "lazy", width: String(g.width), height: String(g.height) })),
-        h("button", {
-          type: "button",
-          class: "gif-remove",
-          "aria-label": "Ta bort från mina GIF:ar",
-          title: "Ta bort från mina GIF:ar",
-          onclick: async () => {
-            await messenger.removeGif(g.id);
-            render();
-          },
-        }, icon("close")),
+        }, h("img", { src: url, alt: "Sparad GIF", width: String(g.width), height: String(g.height) })),
+        remove,
       ));
     }
     if (!alive()) {
@@ -1329,6 +1361,9 @@ async function gifPanel(panel, c, { sent, close, alive, track }) {
     shown = made;
     made.forEach(track);
   };
+  // Saved, removed or arrived on another device while the panel is open.
+  const onGifs = () => (alive() ? render().catch(() => {}) : messenger.removeEventListener("gifs", onGifs));
+  messenger.addEventListener("gifs", onGifs);
   pickFile.addEventListener("change", async () => {
     const files = [...pickFile.files];
     pickFile.value = "";
@@ -1345,21 +1380,108 @@ async function gifPanel(panel, c, { sent, close, alive, track }) {
         toast(say(x));
       }
     }
-    render();
   });
   put(
-    panel,
+    box,
     h(
       "div",
       { class: "picker-head" },
-      h("div", { class: "picker-title", text: "Dina GIF:ar" }),
+      h("p", { class: "hint", text: "Tryck på en GIF för att skicka den. Samlingen är krypterad och finns på alla dina enheter." }),
       h("button", { type: "button", class: "btn small", text: "Välj GIF-fil…", onclick: () => pickFile.click() }),
     ),
-    h("p", { class: "hint", text: "Sparas krypterat bara på den här enheten. Inga GIF-tjänster tillfrågas, så ingen utanför samtalet ser vad du väljer." }),
     grid,
     pickFile,
   );
   await render();
+}
+
+/**
+ * Search at GIPHY, straight from the browser. Nothing is asked before the user types; a tap saves a result in the
+ * collection. The warning says what GIPHY gets to see.
+ */
+async function gifSearch(box, config, { alive, track, mine }) {
+  const input = h("input", { class: "input", type: "search", placeholder: "Sök GIF:ar…", spellcheck: "false", autocomplete: "off", "aria-label": "Sök GIF:ar på GIPHY" });
+  const grid = h("div", { class: "gif-grid" });
+  const status = h("p", { class: "hint", text: "Skriv minst två tecken." });
+  let ctl = null;
+  let timer = 0;
+  let shown = [];
+  const run = async (q) => {
+    ctl?.abort();
+    ctl = new AbortController();
+    const signal = ctl.signal;
+    status.textContent = "Söker…";
+    let results;
+    try {
+      results = await giphy.search(config, q, { maxBytes: GIF_MAX_BYTES, signal });
+    } catch (x) {
+      if (x?.name === "AbortError" || !alive()) return;
+      status.textContent = say(x);
+      return;
+    }
+    if (!alive() || signal.aborted) return;
+    status.textContent = results.length ? "Tryck på en GIF för att spara den bland dina GIF:ar." : "Inga träffar.";
+    for (const u of shown) URL.revokeObjectURL(u);
+    shown = [];
+    put(grid, results.map((r) => {
+      const img = h("img", { alt: r.title || "GIF från GIPHY" });
+      const tile = h("button", {
+        type: "button",
+        class: "gif-send",
+        title: r.title ? `Spara: ${r.title}` : "Spara bland mina GIF:ar",
+        onclick: async () => {
+          if (tile.classList.contains("busy") || tile.classList.contains("saved")) return;
+          tile.classList.add("busy");
+          try {
+            const res = await messenger.saveGif(await giphy.fetchGif(r.full, GIF_MAX_BYTES));
+            tile.classList.add("saved");
+            toast(res === "exists" ? "Den finns redan bland dina GIF:ar." : "Sparad bland dina GIF:ar.");
+          } catch (x) {
+            toast(say(x));
+          } finally {
+            tile.classList.remove("busy");
+          }
+        },
+      }, img, h("span", { class: "gif-ok", "aria-hidden": "true", text: "✓" }));
+      // Previews as blobs (fetch, no cookies or referrer): no <img> points at GIPHY.
+      giphy.fetchGif(r.preview, GIF_MAX_BYTES, signal).then((b) => {
+        if (!alive() || signal.aborted) return;
+        const u = URL.createObjectURL(b);
+        shown.push(u);
+        track(u);
+        img.src = u;
+      }, () => {});
+      return tile;
+    }));
+  };
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (q.length < 2) {
+      ctl?.abort();
+      status.textContent = "Skriv minst två tecken.";
+      put(grid);
+      return;
+    }
+    timer = setTimeout(() => run(q), 450); // not a request per keystroke
+  });
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+  put(
+    box,
+    h(
+      "div",
+      { class: "warn-note", role: "note" },
+      h("strong", { text: "Hämtas direkt från GIPHY. " }),
+      "Sökningen och GIF:arna hämtas av din webbläsare från GIPHY, som ser din IP-adress och vad du söker. Den trafiken skyddas bara av HTTPS, inte av Murmos end-to-end-kryptering. Det du sedan skickar är krypterat som vanligt.",
+    ),
+    input,
+    status,
+    grid,
+    h("div", { class: "gif-foot" },
+      h("button", { type: "button", class: "link", text: "Visa mina GIF:ar", onclick: mine }),
+      h("span", { class: "hint", text: "Powered by GIPHY" })),
+  );
+  if (matchMedia("(hover: hover)").matches) input.focus();
 }
 
 let renderSeq = 0;
@@ -1406,7 +1528,134 @@ function message(m) {
     );
   }
   else if (m.dir === "out" && m.delivered !== undefined) meta.append(deliveryMark(m));
-  return h("div", { class: `msg ${m.dir}${media}` }, body, meta);
+  if (m.kind === "file" && m.file?.have && m.file.mime === "image/gif") meta.append(saveGifButton(m));
+  const canReact = ["text", "file"].includes(m.kind) && messenger.contacts.get(m.conv)?.state === "accepted";
+  if (canReact) meta.append(reactButton(m));
+  return h("div", { class: `msg ${m.dir}${media}` }, body, reactionsView(m, canReact), meta);
+}
+
+// ── saving GIFs from a conversation ─────────────────────────────────────────────────────────────────────────────
+
+/** SHA-256 of the GIFs in the collection, to show which GIFs of a conversation are already saved. */
+let gifHashes = new Set();
+async function refreshGifHashes() {
+  gifHashes = new Set((await messenger.gifs()).map((g) => g.sha256));
+}
+
+/** "Spara GIF" under a GIF in the thread (also in the viewer): into the collection, on all own devices. */
+function saveGifButton(m) {
+  const saved = gifHashes.has(m.file.sha256);
+  return h("button", {
+    type: "button",
+    class: saved ? "save-gif-inline saved" : "save-gif-inline",
+    text: saved ? "✓ Sparad" : "Spara GIF",
+    title: saved ? "Finns bland dina GIF:ar" : "Spara bland dina GIF:ar",
+    disabled: saved,
+    onclick: async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const r = await messenger.saveGif(await messenger.fileBlob(m.file.f, "image/gif"));
+        toast(r === "exists" ? "Den finns redan bland dina GIF:ar." : "Sparad bland dina GIF:ar.");
+      } catch (x) {
+        btn.disabled = false;
+        toast(say(x));
+      }
+    },
+  });
+}
+
+// ── reactions ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The reactions offered with one tap; the rest of the emoji are one more tap away. */
+const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
+async function react(m, e) {
+  try {
+    await messenger.react(m.conv, m.id, e);
+  } catch (x) {
+    toast(say(x));
+  }
+}
+
+function personName(account) {
+  if (account === messenger.me.account) return "Du";
+  return splitHandle(messenger.contacts.get(account)?.handle ?? "")[0] || "Någon";
+}
+
+/** The reactions under a message: one chip per emoji; tapping one's own takes it back, another's adds the same. */
+function reactionsView(m, canReact) {
+  const by = new Map();
+  for (const [who, r] of Object.entries(m.reactions ?? {})) {
+    if (!r?.e) continue;
+    if (!by.has(r.e)) by.set(r.e, []);
+    by.get(r.e).push(who);
+  }
+  if (!by.size) return null;
+  return h("div", { class: "reactions" }, [...by].map(([e, who]) => {
+    const mine = who.includes(messenger.me.account);
+    const names = who.map(personName).join(", ");
+    return h("button", {
+      type: "button",
+      class: mine ? "reaction mine" : "reaction",
+      title: mine ? `${names} · tryck för att ta bort din` : names,
+      "aria-label": `${e} från ${names}`,
+      disabled: !canReact,
+      onclick: () => react(m, mine ? "" : e),
+    }, h("span", { text: e }), who.length > 1 ? h("span", { class: "n", text: String(who.length) }) : null);
+  }));
+}
+
+function reactButton(m) {
+  const btn = h("button", { type: "button", class: "react-btn", "aria-label": "Reagera", title: "Reagera", "aria-haspopup": "menu" }, icon("smile"));
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    reactMenu(btn, m);
+  });
+  return btn;
+}
+
+/** A small row of quick reactions by the message, and "more" for the whole emoji picker. */
+function reactMenu(anchor, m) {
+  const open = document.querySelector(".react-menu");
+  open?.remove();
+  if (open?.dataset.id === m.id) return; // the same button again closes it
+  const mine = m.reactions?.[messenger.me.account]?.e;
+  const close = () => {
+    menu.remove();
+    document.removeEventListener("pointerdown", outside, true);
+    document.removeEventListener("keydown", esc, true);
+  };
+  const outside = (e) => { if (!menu.contains(e.target) && !anchor.contains(e.target)) close(); };
+  const esc = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); anchor.focus(); } };
+  const menu = h(
+    "div",
+    { class: "react-menu", role: "menu", "aria-label": "Reagera" },
+    QUICK_REACTIONS.map((e) => h("button", {
+      type: "button",
+      role: "menuitem",
+      class: e === mine ? "on" : "",
+      text: e,
+      title: e === mine ? "Ta bort din reaktion" : `Reagera med ${e}`,
+      onclick: () => { close(); react(m, e === mine ? "" : e); },
+    })),
+    h("button", { type: "button", role: "menuitem", class: "more", "aria-label": "Fler emoji", title: "Fler emoji", onclick: () => { close(); reactDialog(m); } }, icon("plus")),
+  );
+  menu.dataset.id = m.id;
+  anchor.closest(".msg").append(menu);
+  document.addEventListener("pointerdown", outside, true);
+  document.addEventListener("keydown", esc, true);
+  menu.querySelector("button")?.focus({ preventScroll: true });
+}
+
+function reactDialog(m) {
+  const panel = h("div", { class: "picker in-dialog" });
+  const d = dialog(
+    h("h2", { text: "Reagera" }),
+    panel,
+    h("div", { class: "actions" }, h("button", { class: "btn", text: "Avbryt", onclick: () => d.close() })),
+  );
+  emojiPanel(panel, (e) => { d.close(); react(m, e); }, () => d.open).catch(() => {});
 }
 
 /** A ring while the server holds the message for the recipient, a ring with a check once a device of theirs has it. */

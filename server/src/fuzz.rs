@@ -93,6 +93,8 @@ fn harness() -> &'static Harness {
             file_queue_sender: 1 << 19,
             file_queue_account: 1 << 21,
             push_hosts: Vec::new(),
+            giphy_key: String::new(),
+            giphy_rating: "pg-13".into(),
             push_contact: String::new(),
         };
         let db = crate::db::Db::open(":memory:").expect("database");

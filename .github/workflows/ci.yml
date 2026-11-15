@@ -43,6 +43,7 @@ jobs:
           MURMO_HOST_KEY_FILE: ${{ runner.temp }}/ui.key
           MURMO_LIMIT_SCALE: "10"
           MURMO_REMOTE_HOMES: ""
+          MURMO_GIPHY_KEY: testkey # GIPHY is answered inside the test, never reached
           CHROME: /usr/bin/google-chrome
           SHOTS: ${{ runner.temp }}/shots
         run: |

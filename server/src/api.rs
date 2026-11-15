@@ -114,6 +114,15 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
     if app.push.enabled() {
         m.insert("push_key", app.push.public.as_str().into());
     }
+    if !app.cfg.giphy_key.is_empty() {
+        m.insert(
+            "giphy",
+            Map::new()
+                .with("key", app.cfg.giphy_key.as_str())
+                .with("rating", app.cfg.giphy_rating.as_str())
+                .into(),
+        );
+    }
     if let Some(build) = client_build(&app.cfg.client_dir) {
         m.insert("build", build.into());
     }

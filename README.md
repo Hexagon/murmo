@@ -31,10 +31,11 @@ that log rather than in trust in the server. The server is one Rust binary that 
   server can keep the encrypted chunks until they are fetched (at most 14 days; the sender can turn this off, and so
   can the operator); otherwise the file is sent when both are connected. Images (PNG, JPEG, GIF, WebP) show inline.
   Your own devices can later fetch a file from each other.
-- **Emoji and GIFs.** An emoji picker in the composer (plain Unicode drawn by the system font; messages of only a few
-  emoji are shown larger), and a GIF collection of your own, kept encrypted on the device: save a GIF someone sent or
-  pick one from a file, and send it with a tap. No GIF service (GIPHY, Tenor) is ever asked, so nobody outside the
-  conversation learns what you search for or send.
+- **Emoji, reactions and GIFs.** An emoji picker in the composer (plain Unicode drawn by the system font; messages of
+  only a few emoji are shown larger), end-to-end encrypted emoji reactions on messages, and a GIF collection of your
+  own, kept encrypted and shared between your devices: save a GIF someone sent, pick one from a file or, if the
+  operator set a GIPHY key, search GIPHY, and send it with a tap. GIPHY search runs directly from the browser and the
+  app says so: GIPHY sees your address and what you search for, protected by HTTPS only.
 - **Notifications** in the browser and the installed app (PWA), on by default once the browser's permission is given (and a setting per device): an empty Web Push wakes the browser,
   the notification says only "Nytt meddelande", and being woken does not make the device look connected.
 - **Encrypted local storage** unlocked by the rootcard password: a secret in the rootcard vault unlocks each device's
@@ -78,6 +79,8 @@ Configuration (environment):
 | `MURMO_FILE_QUEUE_ACCOUNT_MB` | `300` | file chunks one account may queue in total |
 | `MURMO_PUSH_HOSTS` | the push services of Chrome, Firefox, Safari, Edge | push-service hosts accepted for notifications (`*.` for subdomains, empty: no push) |
 | `MURMO_PUSH_CONTACT` | `MURMO_ORIGIN` | contact sent to push services (`mailto:` or `https:` URL) |
+| `MURMO_GIPHY_KEY` | empty | GIPHY API key; lets users search GIPHY to fill their GIF collection, directly from the browser (empty: no search). A beta key allows 100 searches an hour for the whole server |
+| `MURMO_GIPHY_RATING` | `pg-13` | GIPHY content rating for searches (`g`, `pg`, `pg-13`, `r`) |
 
 Murmo was called mesg before. The old variable names (`MESG_…`) still work when the new ones are not set, and an
 existing `mesg.sqlite` / `mesg-host.key` is used when the new default files do not exist yet.

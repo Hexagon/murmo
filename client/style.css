@@ -253,6 +253,45 @@ pre.cardtext {
 @media (hover: none) { .gif-remove { opacity: 1; } }
 .gif-remove svg { width: 14px; height: 14px; }
 .msg .body.jumbo { font-size: 40px; line-height: 1.2; }
+
+/* reactions: chips under a message, a quiet button by the time, a row of quick choices */
+.msg { position: relative; }
+.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; white-space: normal; }
+.msg.out .reactions { justify-content: flex-end; }
+.reaction { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 1px 8px; font-size: 15px; line-height: 22px; }
+.reaction .n { font-size: 12px; color: var(--muted); }
+.reaction.mine { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.reaction[disabled] { cursor: default; }
+.save-gif-inline { border: 0; background: transparent; color: var(--accent); font-size: 11px; padding: 0 2px; margin-left: 8px; text-decoration: underline; }
+.save-gif-inline.saved { color: var(--ok); text-decoration: none; cursor: default; }
+.react-btn { border: 0; background: transparent; color: var(--faint); padding: 0 2px; margin-left: 6px; vertical-align: -4px; border-radius: 6px; opacity: 0; }
+.react-btn svg { width: 16px; height: 16px; }
+.msg:hover .react-btn, .react-btn:focus-visible, .react-btn[aria-expanded="true"] { opacity: 1; }
+.react-btn:hover { color: var(--text); }
+@media (hover: none) { .react-btn { opacity: .75; padding: 2px 4px; } .react-btn svg { width: 18px; height: 18px; } }
+.react-menu {
+  position: absolute; bottom: calc(100% + 4px); z-index: 5; display: flex; gap: 2px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px; box-shadow: var(--shadow); white-space: nowrap;
+}
+.msg.in .react-menu { left: 0; }
+.msg.out .react-menu { right: 0; }
+.react-menu button { border: 0; background: transparent; width: 36px; height: 36px; border-radius: 50%; font-size: 21px; padding: 0; display: grid; place-items: center; color: var(--muted); }
+.react-menu button:hover, .react-menu button:focus-visible, .react-menu button.on { background: var(--bubble); }
+.picker.in-dialog { box-shadow: none; border: 0; padding: 0; margin: 0; width: 100%; max-height: min(380px, 60dvh); }
+
+/* GIF panel: tabs, the GIPHY note, results */
+.gif-tabs { flex: none; }
+.gif-body { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+.gif-body .input { flex: none; }
+.warn-note { font-size: 12px; line-height: 1.45; padding: 8px 10px; border-radius: 10px; background: color-mix(in srgb, #c98a00 14%, var(--panel)); border: 1px solid color-mix(in srgb, #c98a00 35%, var(--line)); color: var(--text); }
+.gif-send.wait { display: grid; place-items: center; font-size: 12px; color: var(--muted); }
+.gif-send { position: relative; }
+.gif-send.busy { opacity: .5; cursor: progress; }
+.gif-ok { display: none; position: absolute; right: 6px; bottom: 6px; width: 22px; height: 22px; border-radius: 50%; background: var(--ok); color: #fff; font-size: 13px; line-height: 22px; text-align: center; }
+.gif-send.saved .gif-ok { display: block; }
+.gif-foot { display: flex; justify-content: space-between; align-items: center; flex: none; }
+.picker { max-height: min(420px, 55dvh); }
+
 .msg.out:has(.body.jumbo) { background: transparent; padding: 0; }
 
 .request-box { width: min(768px, calc(100% - 32px)); margin: 8px auto 18px; border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; background: var(--panel); }
@@ -295,7 +334,7 @@ dialog.viewer .close svg { width: 22px; height: 22px; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px 8px 14px;
   font-size: 14px; box-shadow: var(--shadow);
 }
-.toasts { position: fixed; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 10; }
+.toasts { pointer-events: none; position: fixed; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 10; }
 .toast { background: var(--text); color: var(--bg); padding: 9px 14px; border-radius: 10px; font-size: 14px; box-shadow: var(--shadow); }
 
 .drop { outline: 2px dashed var(--accent); outline-offset: -8px; }

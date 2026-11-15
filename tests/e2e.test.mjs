@@ -234,6 +234,31 @@ test("retention: old messages are deleted on all own devices, new ones kept", as
   await until(async () => alice2.contacts.get(conv)?.retention === 0);
 });
 
+test("reactions: one per person, the latest wins, on all devices of both", async () => {
+  const conv = bob.me.account;
+  const target = (await alice.messages(conv)).find((m) => m.text === "Från laptopen");
+  await bob.react(alice.me.account, target.id, "👍");
+  await until(async () => (await alice.store.message(target.id)).reactions?.[bob.me.account]?.e === "👍");
+  await until(async () => (await alice2.store.message(target.id)).reactions?.[bob.me.account]?.e === "👍");
+  // Alice's own reaction reaches her other device and Bob; changing it replaces it.
+  await alice.react(conv, target.id, "❤️");
+  await alice.react(conv, target.id, "😂");
+  for (const [dev, id] of [[bob, target.id], [alice2, target.id]]) {
+    await until(async () => (await dev.store.message(id)).reactions?.[alice.me.account]?.e === "😂");
+  }
+  // Taken back: kept as "" so that an older reaction arriving late does not come back.
+  await bob.react(alice.me.account, target.id, "");
+  await until(async () => (await alice.store.message(target.id)).reactions?.[bob.me.account]?.e === "");
+  await alice.applyReaction(conv, target.id, bob.me.account, "👍", 1);
+  assert.equal((await alice.store.message(target.id)).reactions[bob.me.account].e, "");
+  // Only an emoji, only to a message of that conversation, only from accepted contacts.
+  await assert.rejects(alice.react(conv, target.id, "<b>hej</b>"), (x) => x.code === "bad_reaction");
+  await assert.rejects(alice.react(conv, "nope", "👍"), (x) => x.code === "no_message");
+  await bob.deliver(await bob.peerTargets(alice.me.account), "reaction", alice.me.account, { id: target.id, e: "text" });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal((await alice.store.message(target.id)).reactions[bob.me.account].e, "");
+});
+
 test("files go live to connected devices, wait for absent ones, and own devices federate later", async () => {
   const data = noise(150_000);
   const file = new File([data], "bild.png", { type: "image/png" });
@@ -278,6 +303,7 @@ test("files go live to connected devices, wait for absent ones, and own devices 
   assert.equal(await a2.fetchFromOwnDevices(bob.me.account, f2), 1);
   await fed;
   assert.deepEqual(await a2.store.file(f2), data2);
+  alice2 = a2; // Alice's second device from here on
 
   // A file for a recipient that is not connected waits, encrypted, on the server and arrives when it connects.
   bob.ws.close();
@@ -327,9 +353,35 @@ test("the GIF collection: only real GIFs, encrypted locally, sent as an ordinary
   assert.equal(m.file.mime, "image/gif");
   assert.deepEqual(await bob.store.file(f), gif);
 
-  await alice.removeGif(g.id);
-  assert.deepEqual(await alice.gifs(), []);
+  // The collection is the same on Alice's other device: the entry comes as a message, the bytes over the relay.
+  await until(async () => (await alice2.gifs()).some((x) => x.id === g.id) && (await alice2.gifBlob(g.id)));
+  assert.deepEqual(new Uint8Array(await (await alice2.gifBlob(g.id)).arrayBuffer()), gif);
+  // A bad entry from an own device is ignored; Bob cannot add to Alice's collection at all.
+  await alice.deliver(await alice.ownTargets(), "gifs", alice.me.account, { add: [{ ...g, id: "x", size: 1e9 }] });
+  await bob.deliver(await bob.peerTargets(alice.me.account), "gifs", alice.me.account, { add: [{ ...g, id: "B".repeat(22), sha256: "other" }] });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal((await alice2.gifs()).length, 1);
+  assert.equal((await alice.gifs()).length, 1);
+
+  await alice2.removeGif(g.id);
+  await until(async () => (await alice.gifs()).length === 0);
   assert.equal(await alice.gifBlob(g.id), null);
+});
+
+test("a GIF saved while another own device is away reaches it later", async () => {
+  alice2.ws.close();
+  await new Promise((r) => setTimeout(r, 300));
+  const gif = Uint8Array.from(Buffer.from("R0lGODlhAgACAIAAAP///wAAACH5BAEAAAAALAAAAAACAAIAAAIChFEAOw==", "base64")); // 2 × 2
+  alice.fileQueue = () => false; // nothing kept on the server: the device asks for the bytes itself
+  assert.equal(await alice.saveGif(new Blob([gif])), "saved");
+  alice.fileQueue = () => true;
+  const [g] = await alice.gifs();
+  const back = waitFor(alice2, "status", (s) => s === "online");
+  await alice2.start();
+  await back;
+  await until(async () => (await alice2.gifBlob(g.id)) !== null, 20000);
+  assert.deepEqual(new Uint8Array(await (await alice2.gifBlob(g.id)).arrayBuffer()), gif);
+  await alice.removeGif(g.id);
 });
 
 test("chunks are stored as they come: before the file message, out of order, within a budget per sender", async () => {
