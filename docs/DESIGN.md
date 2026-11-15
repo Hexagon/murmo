@@ -475,7 +475,7 @@ Database `mesg-<account>`:
 | `contacts` | encrypted contact records: handle, pinned device list, state (requested, accepted, blocked) |
 | `messages` | encrypted messages, indexed by conversation and time |
 | `files` | one header per complete file (`{ n, size }`), by file id; written last, after all its parts |
-| `parts` | encrypted file contents in 48 KiB parts, each encrypted on its own (`<file tag>:<index>`) |
+| `parts` | encrypted file contents in 48 KiB parts, each encrypted on its own (`<file tag>:<index>`: four digits below 10 000, then `~` and eight digits, so that keys sort in part order) |
 | `incoming` | chunks that came before their `file` message, still encrypted with the file key (temporary) |
 
 Files are never held in memory whole: a file being sent is read with `File.slice`, hashed incrementally and stored
@@ -484,6 +484,13 @@ parts are hashed in order as they become contiguous. Chunks that come before the
 (at most 16 MiB per sender account and 64 MiB in all; beyond that a chunk is refused and, if queued, not acknowledged
 so it comes again) and are forgotten after 10 minutes without it. Parts without a header and incoming chunks older
 than an hour are deleted at start. Files stored by version 1 (one record in `files`) are still read.
+A file that does not fit on the device (`QuotaExceededError`) is deleted at once, on the sender before it is sent
+(*no room on this device*) and on a receiver while it arrives (it can be fetched again later).
+
+A file is put together in memory (as a `Blob`, built a batch of parts at a time) only to be shown or played in the
+conversation: images up to 25 MiB, videos up to 100 MiB (`MAX_INLINE`). Larger files are offered for saving only, and
+where the browser has `showSaveFilePicker` they are written to the chosen file part by part; elsewhere they are
+handed to the browser as a `Blob` (Chromium keeps large ones on disk, other browsers may hold them in memory).
 
 **Retention per conversation.** A contact record can carry `retention` (seconds; 0 or absent: keep). Messages of
 that conversation sent before *now − retention* are deleted from IndexedDB together with their files: when the
@@ -514,7 +521,8 @@ The client compares a file against `file` before it sends it (a file of `size` b
 `ceil(size × 1.4) + 256 × chunks` queued bytes): one that can never fit is not offered to the queue, its row above
 the composer says so before the transfer starts, and account settings show the largest file the queue takes.
 
-1. The sender picks a file (at most 100 MiB). It makes a random file key and file id, hashes the file (SHA-256), and
+1. The sender picks a file (at most 1 GiB, `MAX_FILE`: files are read, stored and sent part by part, so the limit
+   is not one of memory; the file queue usually takes less, see above, and a larger file then goes live only). It makes a random file key and file id, hashes the file (SHA-256), and
    asks the server which of the recipient's devices and its own other devices are **connected right now**
    (`presence`).
 2. It sends a `file` message through the mailbox to all devices of both accounts, as usual: name, type, size, hash,
@@ -543,6 +551,18 @@ the composer says so before the transfer starts, and account settings show the l
 5. **Later federation between one account's devices:** a device that has the metadata but not the content can ask its
    own connected devices (`file-req` over the relay). A device that has the file streams it back the same way. Only
    devices in the account's own verified device list are served.
+
+**Large files are taken, not pushed.** A file over 50 MiB (`ASK_ABOVE`) is not streamed or queued to any device,
+since a phone on mobile data should not download hundreds of megabytes because a contact sent them. Its `file` message
+carries `ask: true`, and the sending device keeps the file. The recipient's devices show it with *Ta emot*. The
+device where that is pressed asks the device that sent the message for it (`{ k: "file-req", f }` over the relay,
+only when that device is connected; otherwise the button says to try later). The sender streams it live to that
+device only, and only after checking that the contact is accepted, the asking device is in the contact's verified
+device list and the file was sent to that conversation with `ask`. It runs one stream per file and device at a
+time. The recipient therefore chooses whether to receive the file at all, and on which device. Its other devices
+can take it too, or fetch it from that one (step 5). The receipt is sent when the file has arrived, so the sender's
+message says *waiting for the recipient* until then. The sender's own other devices are not pushed the file either,
+and fetch it with step 5. A file below the limit behaves as before.
 
 Relay frames carry `{ k: "chunk", f, i, n, c }` or `{ k: "file-req", f }` as base64url canonical JSON. Chunks are
 authenticated by the file key from the signed `file` message and the final hash, so the relay needs no extra signature.
@@ -717,6 +737,8 @@ What clients from before emoji, reactions and the shared GIF collection get from
 | tombstones (`retracted`, `deleted`) in a history hand-over | stored, shown as an empty message until the device is updated |
 | `sync` with `remove` | the part it does not know is ignored: the message stays on the older own device |
 | `ephemeral` | dropped, never shown or stored, and not acknowledged with a receipt: a disappearing message is lost on an older device rather than kept for good |
+| a `file` message for a file over 100 MiB, and its chunks | dropped: clients before 1 GiB files took at most 100 MiB and 4096 chunks per file. The file is not shown there, also not after a later update; the sender cannot tell. Such clients last only until the page is reloaded (the server's `build` changes and an open page offers a reload) |
+| a `file` message with `ask` (over 50 MiB) | shown as a file not received yet, with only *Hämta från mina enheter*: the older device cannot take it. Once updated, it can |
 | `gifs` to an own older device | dropped; that device has no collection until it is updated, and then gets only GIFs saved after that. The bytes are pulled with `file-req` (§9.2), so no chunks are pushed to it; a `file-req` for `gif:…` sent to an older device finds no file message and is ignored |
 
 An older device sends nothing new, so a newer device has nothing to handle from it.

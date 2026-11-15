@@ -27,9 +27,25 @@ export const MAX_DEVICES = 8;
 export const PREKEY_ROTATE = 7 * 24 * 3600;
 export const PREKEY_KEEP = 21 * 24 * 3600;
 export const CHUNK = 48 * 1024;
-export const MAX_FILE = 100 * 1024 * 1024;
+/**
+ * The largest file. Files are read, stored and sent part by part, so this is not bounded by memory; the server's file
+ * queue usually takes less (its `file_queue_limits`, compared with `queuedBytes`), and a larger file then goes live only.
+ */
+export const MAX_FILE = 1024 * 1024 * 1024;
 /** How many CHUNK-sized parts a file of `size` bytes has (an empty file still has one). */
 export const chunkCount = (size) => Math.max(1, Math.ceil(size / CHUNK));
+/**
+ * Above this a file is not sent to any device by itself: the recipient chooses whether and on which device to take it
+ * (mobile data). It goes only live, from the sending device, never through the file queue.
+ */
+export const ASK_ABOVE = 50 * 1024 * 1024;
+/** The most parts a file can have. */
+export const MAX_PARTS = chunkCount(MAX_FILE);
+/**
+ * The largest file shown or played in the conversation: it is put together in memory first (as a `Blob`). Larger
+ * files are offered for saving only, written part by part where the browser allows it.
+ */
+export const MAX_INLINE = 100 * 1024 * 1024;
 /**
  * Bytes a file of `size` bytes takes in the server's file queue, per device: the encrypted chunks as sent (base64
  * and framing), an upper bound. The unit of `relay-space` and of `file_queue_limits` in `/api/v1/info`.
@@ -483,9 +499,9 @@ export function inlineImage(mime, size) {
 /** Video types offered for playing in the conversation (whether the browser can decode one is known only by trying). */
 export const VIDEO_TYPES = ["video/mp4", "video/webm", "video/ogg", "video/quicktime", "video/x-m4v", "video/3gpp"];
 
-/** Whether a file of this type can be played in the conversation instead of only saved. */
-export function inlineVideo(mime) {
-  return VIDEO_TYPES.includes(mime);
+/** Whether a file of this type and size can be played in the conversation instead of only saved. */
+export function inlineVideo(mime, size) {
+  return VIDEO_TYPES.includes(mime) && size <= MAX_INLINE;
 }
 
 /** Whether bytes start like a GIF file ("GIF87a" or "GIF89a"), whatever type the sender claimed. */

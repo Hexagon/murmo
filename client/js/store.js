@@ -28,7 +28,11 @@ function openDb(name, upgrade) {
 
 /** All keys of one file's parts: `<file tag>:<index>`. */
 const partsOf = (k) => IDBKeyRange.bound(`${k}:`, `${k}:\uffff`);
-const partKey = (k, i) => `${k}:${String(i).padStart(4, "0")}`;
+/**
+ * The key of part `i`: four digits below 10 000 (as files have always been stored), and from there `~` and eight
+ * digits, so that keys sort in the order of the parts (`~` sorts after every digit) and a block of parts is one range.
+ */
+export const partKey = (k, i) => (i < 10_000 ? `${k}:${String(i).padStart(4, "0")}` : `${k}:~${String(i).padStart(8, "0")}`);
 /**
  * How many parts of a file are written or read in one transaction. One transaction per 48 KB part made a large file
  * take long to store (and to read back) on browsers where each commit waits for the disk.
