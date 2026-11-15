@@ -3,6 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as rc from "../client/vendor/rootcard/src/index.js";
 import * as p from "../client/js/protocol.js";
+import * as emoji from "../client/js/emoji.js";
 
 async function device(label) {
   const kp = await p.newKeyPair("Ed25519");
@@ -145,4 +146,21 @@ test("image dimensions come from the header, without decoding", () => {
 
   assert.equal(p.imageSize(p.utf8("<svg/>")), null);
   assert.ok(!p.imageFits(null));
+});
+
+test("GIF signature", () => {
+  assert.ok(p.isGif(p.utf8("GIF89a....")));
+  assert.ok(p.isGif(p.utf8("GIF87a")));
+  assert.ok(!p.isGif(p.utf8("GIF8")));
+  assert.ok(!p.isGif(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])));
+});
+
+test("emoji: only-emoji messages and the recent list", () => {
+  for (const t of ["👍", "😀 😀😀", "🇸🇪", "1️⃣", "👨‍👩‍👧", "🏳️‍🌈", " ❤️\n"]) assert.ok(emoji.emojiOnly(t), t);
+  for (const t of ["", "  ", "hej 😀", "😀😀😀😀", "abc", ":)", "1", "😀".repeat(40)]) assert.ok(!emoji.emojiOnly(t), t);
+  let r = [];
+  for (const e of ["😀", "👍", "😀", "<b>", "❤️"]) r = emoji.remember(r, e);
+  assert.deepEqual(r, ["❤️", "😀", "👍"]); // newest first, no duplicates, only emoji from the picker
+  for (let i = 0; i < 100; i++) r = emoji.remember(r, emoji.CATEGORIES[0].emoji[i % 90]);
+  assert.equal(r.length, emoji.RECENT_MAX);
 });

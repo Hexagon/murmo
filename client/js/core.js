@@ -37,6 +37,9 @@ const RECEIPT_MAX = 200;
 /** Longest retention a conversation can be set to (seconds); 0 keeps messages until the conversation is deleted. */
 export const RETENTION_MAX = 10 * 365 * 24 * 3600;
 const PRUNE_EVERY = 60_000;
+/** The user's own GIF collection, kept encrypted on this device only (docs/DESIGN.md §9.2). */
+export const GIF_MAX_BYTES = 8 * 1024 * 1024;
+export const GIF_MAX_COUNT = 60;
 
 /** Whether `r` is a retention in seconds this client accepts (0: keep). */
 export function validRetention(r) {
@@ -1097,6 +1100,69 @@ export class Messenger extends EventTarget {
 
   async messages(conv) {
     return this.store.messages(conv);
+  }
+
+  // ── the user's GIF collection (DESIGN.md §9.2) ────────────────────────────────────────────────────────────────
+  //
+  // Local to this device and encrypted like everything else in the store: the list in a secret, each GIF as a file
+  // under its own id (`gif:<id>`), apart from the files of messages so that pruning a conversation keeps it. Nothing
+  // is fetched from or sent to any GIF service.
+
+  /** The saved GIFs, newest first: `[{ id, size, width, height, sha256 }]`. */
+  async gifs() {
+    const list = await this.store.secret("gifs");
+    return Array.isArray(list) ? list : [];
+  }
+
+  /**
+   * Save a GIF (a Blob) in the collection. Only a real GIF is taken (by its header, whatever its type says), at most
+   * GIF_MAX_BYTES and with dimensions that fit (p.imageFits). Returns `"saved"` or `"exists"`; throws
+   * `not_gif`, `gif_too_large`, `too_big_image` or `gifs_full`.
+   */
+  async saveGif(blob) {
+    if (!blob || blob.size > GIF_MAX_BYTES) throw new ApiError(413, blob ? "gif_too_large" : "not_gif");
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    if (!p.isGif(bytes)) throw new ApiError(400, "not_gif");
+    const size = p.imageSize(bytes.subarray(0, IMAGE_HEAD));
+    if (!p.imageFits(size)) throw new ApiError(400, "too_big_image");
+    const hash = new p.Sha256();
+    hash.update(bytes);
+    const sha256 = p.b64(hash.digest());
+    const list = await this.gifs();
+    if (list.some((g) => g.sha256 === sha256)) return "exists";
+    if (list.length >= GIF_MAX_COUNT) throw new ApiError(409, "gifs_full");
+    const id = p.b64(p.random(16));
+    await this.store.putFile(`gif:${id}`, bytes);
+    await this.store.setSecret("gifs", [{ id, size: bytes.length, width: size.width, height: size.height, sha256 }, ...list]);
+    return "saved";
+  }
+
+  /** The bytes of a saved GIF as a Blob of type image/gif, or null. */
+  async gifBlob(id) {
+    return this.fileBlob(`gif:${id}`, "image/gif");
+  }
+
+  async removeGif(id) {
+    await this.store.setSecret("gifs", (await this.gifs()).filter((g) => g.id !== id));
+    await this.store.deleteFile(`gif:${id}`);
+  }
+
+  /** Send a saved GIF: an ordinary file message, under a neutral name. */
+  async sendGif(conv, id) {
+    const blob = await this.gifBlob(id);
+    if (!blob) throw new ApiError(404, "gif_missing");
+    return this.sendFile(conv, new File([blob], "animation.gif", { type: "image/gif" }));
+  }
+
+  // ── recently used emoji, encrypted on this device ──────────────────────────────────────────────────────────────
+
+  async recentEmoji() {
+    const r = await this.store.secret("recentEmoji");
+    return Array.isArray(r) ? r.filter((x) => typeof x === "string") : [];
+  }
+
+  async setRecentEmoji(list) {
+    await this.store.setSecret("recentEmoji", list);
   }
 }
 

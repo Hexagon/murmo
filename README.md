@@ -31,6 +31,10 @@ that log rather than in trust in the server. The server is one Rust binary that 
   server can keep the encrypted chunks until they are fetched (at most 14 days; the sender can turn this off, and so
   can the operator); otherwise the file is sent when both are connected. Images (PNG, JPEG, GIF, WebP) show inline.
   Your own devices can later fetch a file from each other.
+- **Emoji and GIFs.** An emoji picker in the composer (plain Unicode drawn by the system font; messages of only a few
+  emoji are shown larger), and a GIF collection of your own, kept encrypted on the device: save a GIF someone sent or
+  pick one from a file, and send it with a tap. No GIF service (GIPHY, Tenor) is ever asked, so nobody outside the
+  conversation learns what you search for or send.
 - **Notifications** in the browser and the installed app (PWA), on by default once the browser's permission is given (and a setting per device): an empty Web Push wakes the browser,
   the notification says only "Nytt meddelande", and being woken does not make the device look connected.
 - **Encrypted local storage** unlocked by the rootcard password: a secret in the rootcard vault unlocks each device's

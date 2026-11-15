@@ -305,6 +305,33 @@ test("files go live to connected devices, wait for absent ones, and own devices 
   });
 });
 
+test("the GIF collection: only real GIFs, encrypted locally, sent as an ordinary file", async () => {
+  const gif = Uint8Array.from(Buffer.from("R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==", "base64")); // 1 × 1
+  assert.equal(await alice.saveGif(new Blob([gif], { type: "image/gif" })), "saved");
+  assert.equal(await alice.saveGif(new Blob([gif])), "exists"); // by content, whatever the type says
+  await assert.rejects(alice.saveGif(new Blob([noise(100)], { type: "image/gif" })), (x) => x.code === "not_gif");
+  const huge = Uint8Array.from(gif);
+  huge.set([0x50, 0xc3, 0x50, 0xc3], 6); // 50000 × 50000 in the header
+  await assert.rejects(alice.saveGif(new Blob([huge])), (x) => x.code === "too_big_image");
+  const [g, ...rest] = await alice.gifs();
+  assert.equal(rest.length, 0);
+  assert.deepEqual([g.width, g.height, g.size], [1, 1, gif.length]);
+  // Stored under its own file id, encrypted: the bytes are not in the database in the clear.
+  assert.deepEqual(new Uint8Array(await (await alice.gifBlob(g.id)).arrayBuffer()), gif);
+
+  const bobGot = waitFor(bob, "file");
+  await alice.sendGif(bob.me.account, g.id);
+  const { f } = await bobGot;
+  const m = (await bob.messages(alice.me.account)).find((x) => x.file?.f === f);
+  assert.equal(m.file.name, "animation.gif");
+  assert.equal(m.file.mime, "image/gif");
+  assert.deepEqual(await bob.store.file(f), gif);
+
+  await alice.removeGif(g.id);
+  assert.deepEqual(await alice.gifs(), []);
+  assert.equal(await alice.gifBlob(g.id), null);
+});
+
 test("chunks are stored as they come: before the file message, out of order, within a budget per sender", async () => {
   const conv = alice.me.account;
   const from = { account: alice.me.account, from: alice.me.device };

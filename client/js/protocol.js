@@ -396,6 +396,13 @@ export function inlineImage(mime, size) {
   return IMAGE_TYPES.includes(mime) && size <= 25 * 1024 * 1024;
 }
 
+/** Whether bytes start like a GIF file ("GIF87a" or "GIF89a"), whatever type the sender claimed. */
+export function isGif(b) {
+  if (!b || b.length < 6) return false;
+  const sig = String.fromCharCode(...b.subarray(0, 6));
+  return sig === "GIF87a" || sig === "GIF89a";
+}
+
 /** Inline images larger than this many pixels are offered only for saving (a small file can decode to gigabytes). */
 export const MAX_PIXELS = 40_000_000;
 

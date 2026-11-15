@@ -363,6 +363,31 @@ A file that does not fit is sent live later, when both devices are connected.
 Relay frames carry `{ k: "chunk", f, i, n, c }` or `{ k: "file-req", f }` as base64url canonical JSON. Chunks are
 authenticated by the file key from the signed `file` message and the final hash, so the relay needs no extra signature.
 
+### 9.1 Emoji
+
+Emoji are Unicode text in an ordinary `text` message; nothing in the protocol changes. The picker offers a fixed set
+compiled into the client (`client/js/emoji.js`) and the system's own emoji font draws them: no images, fonts or
+sprite sheets are loaded from anywhere, and text is still only ever set with `textContent`. A message of at most three
+emoji and nothing else is shown larger (a CSS class; the text is unchanged). The recently used emoji are kept in the
+device's encrypted store (§8.1, secret `recentEmoji`), not in `localStorage`.
+
+### 9.2 GIFs
+
+A GIF is an ordinary file (§9) and is shown inline like other images, within the same limits. There is no GIF search:
+services such as GIPHY or Tenor would learn every search term and the user's address as it is typed, and an image
+fetched from them would tell them when a conversation is open. The page's CSP would also have to allow them.
+Instead each device keeps the user's own collection:
+
+- New GIFs come from a file on the device (the GIF panel's *Välj GIF-fil…*, which also sends it) or from a GIF in a
+  conversation (*Spara i mina GIF:ar* in the image viewer). Only bytes that start with `GIF87a`/`GIF89a` are taken,
+  whatever type the sender claimed, at most 8 MiB each and 60 in all, and only when the header's dimensions pass the
+  same pixel limit as inline images. Duplicates (same SHA-256) are not stored twice.
+- The collection is stored encrypted like message files (§8.1): the list in the secret `gifs`, each GIF in parts
+  under the file id `gif:<random id>`, separate from message files, so a conversation's retention or deletion does
+  not remove it. It is not synchronised between devices and not sent to the server.
+- Sending one is a new `file` message under the neutral name `animation.gif`; the recipient sees nothing that marks it
+  as coming from a collection.
+
 ## 10. Server API (v1)
 
 All bodies are canonical JSON. Errors are `{ "error": "<code>" }`.

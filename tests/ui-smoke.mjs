@@ -102,6 +102,37 @@ try {
   await ch3.accept([`${shots}/bomb.png`]);
   await b.waitForFunction(() => [...document.querySelectorAll(".msg .filecard .fs")].some((e) => /50000 × 50000/.test(e.textContent)), { timeout: 20000 });
   if ((await b.$$(".msg img.inline")).length !== 1) throw new Error("the oversized image was shown inline");
+  // Emoji: picked from the panel into the text, and a message of only emoji is shown larger.
+  await a.click('.composer .icon-btn[aria-label="Emoji"]');
+  await a.waitForSelector(".picker .emoji-grid .emoji", { visible: true, timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-6c-emoji.png` });
+  await a.click(".picker .emoji-grid .emoji");
+  await a.click(".picker .emoji-grid .emoji");
+  await a.focus(".composer textarea");
+  await a.keyboard.press("Enter");
+  await b.waitForSelector(".msg .body.jumbo", { timeout: 20000 });
+  if (await a.$(".picker:not(.hidden)")) await a.keyboard.press("Escape");
+  // GIFs: picked from a file (and kept in the collection), then saved by the recipient from the viewer and resent.
+  fs.writeFileSync(`${shots}/tiny.gif`, Buffer.from("R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==", "base64"));
+  await a.click(".composer .gif-btn");
+  await a.waitForSelector(".picker .gif-grid", { visible: true, timeout: 5000 });
+  const [ch4] = await Promise.all([a.waitForFileChooser(), clickText(a, "Välj GIF-fil…")]);
+  await ch4.accept([`${shots}/tiny.gif`]);
+  await a.waitForSelector(".picker .gif-grid .gif img", { timeout: 10000 });
+  await a.screenshot({ path: `${shots}/a-6d-gifs.png` });
+  await b.waitForFunction(() => document.querySelectorAll(".msg img.inline").length === 2, { timeout: 20000 });
+  await sleep(500);
+  const imgs = await b.$$(".msg img.inline");
+  await imgs[imgs.length - 1].click();
+  await b.waitForSelector("dialog.viewer .save-gif", { visible: true, timeout: 5000 });
+  await b.click("dialog.viewer .save-gif");
+  await b.waitForFunction(() => !document.querySelector("dialog.viewer"), { timeout: 5000 });
+  await b.click(".composer .gif-btn");
+  await b.waitForSelector(".picker .gif-grid .gif img", { timeout: 10000 });
+  await b.click(".picker .gif-grid .gif-send");
+  await a.waitForFunction(() => document.querySelectorAll(".msg img.inline").length === 3, { timeout: 20000 });
+  // The toasts ("GIF:en skickad.") go away by themselves; later steps click where they were.
+  for (const pg of [a, b]) await pg.waitForFunction(() => !document.querySelector(".toast"), { timeout: 10000 });
   await a.screenshot({ path: `${shots}/a-6-chat.png` });
   await b.screenshot({ path: `${shots}/b-6-chat.png` });
   await clickText(b, "Säkerhetskod");
