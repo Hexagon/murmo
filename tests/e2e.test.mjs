@@ -373,7 +373,7 @@ test("the server advertises the file queue's limits", () => {
   const MiB = 1024 * 1024;
   assert.equal(info.file_queue, true);
   // The defaults: 150 MiB per device, 50 MiB per sender and device, 300 MiB per sender; one file at most the smallest.
-  assert.deepEqual(info.file_queue_limits, { file: 50 * MiB, device: 150 * MiB, sender: 50 * MiB, account: 300 * MiB });
+  assert.deepEqual({ ...info.file_queue_limits }, { file: 50 * MiB, device: 150 * MiB, sender: 50 * MiB, account: 300 * MiB });
 });
 
 test("files go live to connected devices, wait for absent ones, and own devices federate later", async () => {
