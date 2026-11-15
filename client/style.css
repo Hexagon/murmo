@@ -199,6 +199,13 @@ pre.cardtext {
 .msg .meta .pending { color: var(--danger); }
 .msg .meta .delivery { display: inline-flex; vertical-align: -3px; margin-left: 5px; color: var(--muted); }
 .msg .meta .delivery.ok { color: var(--ok); }
+.auth .card > .link { display: block; margin: 14px auto 0; }
+.recover { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.recover[hidden] { display: none; }
+.recover ol { padding-left: 20px; margin: 8px 0 14px; }
+.recover li { margin: 6px 0; }
+.recover li a { display: inline-block; margin-top: 4px; color: var(--accent); }
+.lone { font-size: 13px; padding: 10px 12px; border-radius: 10px; background: var(--bubble); }
 .link { border: 0; background: none; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
 
 /* the composer: one rounded box, like a prompt field */

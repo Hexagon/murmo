@@ -107,7 +107,8 @@ client/        the web client: plain ES modules, no build step, no dependencies 
   js/protocol.js   device lists, prekeys, envelopes, signatures, codes, file chunks (pure, also runs in Node)
   js/core.js       the messenger engine (requests, sync, history, files)
   js/app.js        the interface
-  vendor/rootcard  rootcard 0.3.4 from npm, unmodified (npm tarball SHA-256 433607bb…b1c92b)
+  vendor/rootcard  rootcard 0.3.4 from npm, unmodified (npm tarball SHA-256 433607bb…b1c92b); its keytool.html is
+                   offered as a download for resetting an identity of this home with the recovery card
 docs/          DESIGN.md (protocol), THREAT_MODEL.md, PLAN.md
 tests/         protocol tests, end-to-end tests (two servers, a move of domain, real client engine), browser smoke test
 ```

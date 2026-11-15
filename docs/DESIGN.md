@@ -141,6 +141,12 @@ A password alone is not enough to add a device:
 
 A password thief can create link requests, which the owner sees and can decline; the thief cannot complete one.
 
+If no device is left (the only browser's data was cleared), nobody can approve. The client says so on the link screen
+and when a request expires unanswered: the way back is a new instance with the recovery card (§4.1), which starts a new
+list and loses the history (§7). Murmo does not do this itself (§3): for identities of this home it offers rootcard's
+`keytool.html` (vendored, unmodified) as a download to open from disk; for identities of other homes it names the home.
+While an account has a single device, the start page and the device list say what losing it would mean.
+
 ### 4.4 Removing a device
 
 Any present device can sign a `remove` entry for any device, including itself ("log out everywhere else" removes the
