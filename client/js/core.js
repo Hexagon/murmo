@@ -151,6 +151,9 @@ export class Messenger extends EventTarget {
       const set = this.missed.get(e.detail.ref);
       if (set) for (const d of e.detail.devices ?? []) set.add(d);
     });
+    // A second start (after the connection was closed) replaces the timers instead of adding to them.
+    clearInterval(this.retryTimer);
+    clearInterval(this.pruneTimer);
     this.retryTimer = setInterval(() => this.flushFiles().catch(() => {}), FILE_RETRY_EVERY);
     this.pruneTimer = setInterval(() => this.prune().catch(() => {}), PRUNE_EVERY);
     this.prune().catch(() => {});

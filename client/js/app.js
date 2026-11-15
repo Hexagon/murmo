@@ -287,6 +287,21 @@ const HELP = [
   ]],
 ];
 
+/** "Version 0.1.0 · commit 1a2b3c4d5e6f", linking to the source of that commit; null if the server does not say. */
+function versionLine() {
+  if (typeof info?.version !== "string") return null;
+  const commit = /^[0-9a-f]{7,40}$/.test(info.commit ?? "") ? info.commit : null;
+  const source = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(info.source ?? "") ? info.source : null;
+  const short = commit?.slice(0, 12);
+  return h(
+    "p",
+    { class: "hint version" },
+    `Version ${info.version}`,
+    commit ? " · commit " : null,
+    commit && source ? h("a", { href: `${source}/commit/${commit}`, target: "_blank", rel: "noopener noreferrer", text: short }) : short,
+  );
+}
+
 function showHelp() {
   const d = dialog(
     h("h2", { text: "Säkerhet och integritet" }),
@@ -295,6 +310,7 @@ function showHelp() {
       { class: "help" },
       HELP.map(([title, items]) => h("section", {}, h("h3", { text: title }), h("ul", {}, items.map((t) => h("li", { text: t }))))),
     ),
+    versionLine(),
     h("div", { class: "actions" }, h("button", { class: "btn", text: "Stäng", onclick: () => d.close() })),
   );
   d.classList.add("wide");

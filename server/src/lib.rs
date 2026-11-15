@@ -123,6 +123,8 @@ fn config() -> Result<Config, String> {
         limit_scale: env("MESG_LIMIT_SCALE", "1").parse().unwrap_or(1),
         file_queue: megabytes("MESG_FILE_QUEUE_MB", 150),
         file_queue_total: megabytes("MESG_FILE_QUEUE_TOTAL_MB", 2048),
+        file_queue_sender: megabytes("MESG_FILE_QUEUE_SENDER_MB", 50),
+        file_queue_account: megabytes("MESG_FILE_QUEUE_ACCOUNT_MB", 300),
         push_hosts: list(&env(
             "MESG_PUSH_HOSTS",
             "fcm.googleapis.com,updates.push.services.mozilla.com,*.push.apple.com,*.notify.windows.com",

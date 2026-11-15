@@ -89,6 +89,8 @@ fn harness() -> &'static Harness {
             limit_scale: 1_000_000,
             file_queue: 1 << 20,
             file_queue_total: 1 << 22,
+            file_queue_sender: 1 << 19,
+            file_queue_account: 1 << 21,
             push_hosts: Vec::new(),
             push_contact: String::new(),
         };

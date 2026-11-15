@@ -46,10 +46,26 @@ pub struct Config {
     pub file_queue: i64,
     /// Bytes of queued file chunks kept in total.
     pub file_queue_total: i64,
+    /// Bytes of queued file chunks one sender account may keep for one device of another account.
+    pub file_queue_sender: i64,
+    /// Bytes of queued file chunks one sender account may keep in total.
+    pub file_queue_account: i64,
     /// Push services whose endpoints are accepted for notifications (empty: no push).
     pub push_hosts: Vec<String>,
     /// Contact in push requests (`mailto:` or `https:` URL); the origin by default.
     pub push_contact: String,
+}
+
+impl Config {
+    /// The byte limits of the file queue.
+    pub fn queue_limits(&self) -> crate::db::QueueLimits {
+        crate::db::QueueLimits {
+            device: self.file_queue,
+            pair: self.file_queue_sender,
+            account: self.file_queue_account,
+            total: self.file_queue_total,
+        }
+    }
 }
 
 /// Seconds since the epoch.

@@ -304,6 +304,13 @@ Files go live between connected devices. For devices that are not connected the 
 chunks (the *file queue*), like the mailbox keeps envelopes; the sender can turn that off, and the operator can turn
 it off for the whole server (`MESG_FILE_QUEUE_MB=0`).
 
+The queue has four byte budgets, checked together when a chunk is queued and when a sender asks for room
+(`relay-space`, which also counts what it grants to one device against the totals for the next): per receiving device
+(150 MiB), per sender account and receiving device of another account (50 MiB), per sender account over all devices
+(300 MiB) and for the server (2 GiB). One account can therefore neither fill a device's share, blocking files from
+real contacts, nor the whole server. Chunks to the sender's own devices count against its account budget only.
+A file that does not fit is sent live later, when both devices are connected.
+
 1. The sender picks a file (at most 100 MiB). It makes a random file key and file id, hashes the file (SHA-256), and
    asks the server which of the recipient's devices and its own other devices are **connected right now**
    (`presence`).
