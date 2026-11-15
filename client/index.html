@@ -59,6 +59,16 @@
           <li data-i18n="page.check3">Ingen sökning, inga kontaktlistor på servern</li>
           <li data-i18n="page.check4">Öppen källkod – granska koden eller kör en egen server</li>
         </ul>
+        <div class="install" id="install" hidden>
+          <img src="icon.svg" alt="" width="40" height="40">
+          <div class="install-text">
+            <strong data-i18n="page.installTitle">Installera Murmo som app</strong>
+            <span data-install="prompt" data-i18n="page.installPrompt">Eget fönster, en ikon att starta från och notiser om nya meddelanden.</span>
+            <span data-install="ios" hidden data-i18n="page.installIos">Tryck på Dela och sedan ”Lägg till på hemskärmen”. Då får du en ikon att starta från och notiser om nya meddelanden.</span>
+            <span data-install="mac" hidden data-i18n="page.installMac">Välj Arkiv och sedan ”Lägg till i Dock”. Då får du ett eget fönster och notiser om nya meddelanden.</span>
+          </div>
+          <button class="btn primary" type="button" id="install-btn" data-install="prompt" data-i18n="page.installButton">Installera</button>
+        </div>
       </div>
       <div class="hero-app" id="konto">
         <div id="app" aria-live="polite"></div>

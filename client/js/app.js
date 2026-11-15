@@ -8,6 +8,7 @@ import * as emoji from "./emoji.js";
 import * as giphy from "./giphy.js";
 import { accounts } from "./store.js";
 import * as notify from "./notify.js";
+import "./install.js";
 import * as i18n from "./i18n.js";
 import { has, t as tr, tn } from "./i18n.js";
 import * as rc from "../vendor/rootcard/src/index.js";
