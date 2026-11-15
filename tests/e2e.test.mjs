@@ -369,6 +369,13 @@ test("editing: only the author's own text, within the window, the latest edit wi
   assert.equal((await alice.store.message(id)).text, undefined);
 });
 
+test("the server advertises the file queue's limits", () => {
+  const MiB = 1024 * 1024;
+  assert.equal(info.file_queue, true);
+  // The defaults: 150 MiB per device, 50 MiB per sender and device, 300 MiB per sender; one file at most the smallest.
+  assert.deepEqual({ ...info.file_queue_limits }, { file: 50 * MiB, device: 150 * MiB, sender: 50 * MiB, account: 300 * MiB });
+});
+
 test("files go live to connected devices, wait for absent ones, and own devices federate later", async () => {
   const data = noise(150_000);
   const file = new File([data], "bild.png", { type: "image/png" });
@@ -418,6 +425,11 @@ test("files go live to connected devices, wait for absent ones, and own devices 
   // A file for a recipient that is not connected waits, encrypted, on the server and arrives when it connects.
   bob.ws.close();
   await new Promise((r) => setTimeout(r, 300));
+  // Unless it is larger than the server's queue takes: then the server is not even asked, and the file waits.
+  alice.queueLimit = () => p.queuedBytes(10_000);
+  const big = await alice.sendFile(bob.me.account, new File([noise(20_000)], "stor.bin"));
+  assert.deepEqual(big, { live: 0, queued: 0, waiting: 1, tooBig: true });
+  alice.queueLimit = () => info.file_queue_limits.file;
   const data3 = noise(120_000);
   const r3 = await alice.sendFile(bob.me.account, new File([data3], "foto.jpg", { type: "image/jpeg" }));
   assert.deepEqual(r3, { live: 0, queued: 1, waiting: 0 });

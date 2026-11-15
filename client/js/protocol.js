@@ -30,6 +30,23 @@ export const CHUNK = 48 * 1024;
 export const MAX_FILE = 100 * 1024 * 1024;
 /** How many CHUNK-sized parts a file of `size` bytes has (an empty file still has one). */
 export const chunkCount = (size) => Math.max(1, Math.ceil(size / CHUNK));
+/**
+ * Bytes a file of `size` bytes takes in the server's file queue, per device: the encrypted chunks as sent (base64
+ * and framing), an upper bound. The unit of `relay-space` and of `file_queue_limits` in `/api/v1/info`.
+ */
+export const queuedBytes = (size) => Math.ceil(size * 1.4) + chunkCount(size) * 256;
+/** The largest file (at most MAX_FILE) whose queued bytes fit in `limit`; -1 if not even an empty one does. */
+export function largestQueued(limit) {
+  if (!(limit >= queuedBytes(0))) return -1;
+  let lo = 0;
+  let hi = MAX_FILE;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (queuedBytes(mid) <= limit) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
 export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 export const b64 = rc.base64urlEncode;
