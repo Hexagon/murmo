@@ -425,6 +425,11 @@ test("files go live to connected devices, wait for absent ones, and own devices 
   // A file for a recipient that is not connected waits, encrypted, on the server and arrives when it connects.
   bob.ws.close();
   await new Promise((r) => setTimeout(r, 300));
+  // Unless it is larger than the server's queue takes: then the server is not even asked, and the file waits.
+  alice.queueLimit = () => p.queuedBytes(10_000);
+  const big = await alice.sendFile(bob.me.account, new File([noise(20_000)], "stor.bin"));
+  assert.deepEqual(big, { live: 0, queued: 0, waiting: 1, tooBig: true });
+  alice.queueLimit = () => info.file_queue_limits.file;
   const data3 = noise(120_000);
   const r3 = await alice.sendFile(bob.me.account, new File([data3], "foto.jpg", { type: "image/jpeg" }));
   assert.deepEqual(r3, { live: 0, queued: 1, waiting: 0 });

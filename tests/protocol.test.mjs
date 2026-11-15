@@ -262,3 +262,17 @@ test("relay pacing: stays under the server's byte budgets and waits out a refusa
   assert.equal(s.relayLimits.peer, 96 * 1024 * 1024);
   assert.equal(sent.length, 2);
 });
+
+test("queued bytes of a file and the largest file a queue limit takes", () => {
+  assert.equal(p.queuedBytes(0), 256);
+  assert.equal(p.queuedBytes(p.CHUNK), Math.ceil(p.CHUNK * 1.4) + 256);
+  assert.equal(p.queuedBytes(p.CHUNK + 1), Math.ceil((p.CHUNK + 1) * 1.4) + 512);
+  for (const limit of [256, 100_000, 50 * 1024 * 1024, 150 * 1024 * 1024]) {
+    const max = p.largestQueued(limit);
+    assert.ok(p.queuedBytes(max) <= limit, `${limit}`);
+    if (max < p.MAX_FILE) assert.ok(p.queuedBytes(max + 1) > limit, `${limit}`);
+  }
+  assert.equal(p.largestQueued(255), -1);
+  assert.equal(p.largestQueued(0), -1);
+  assert.equal(p.largestQueued(1e12), p.MAX_FILE);
+});

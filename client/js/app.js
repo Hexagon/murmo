@@ -187,6 +187,18 @@ function deviceLabel() {
   return os ? tr("common.deviceOn", { browser: b, os }) : b;
 }
 
+/** The server's limit on one queued file, in queued bytes (`/api/v1/info`), or null when it gives none. */
+function queueLimit() {
+  const l = info?.file_queue_limits?.file;
+  return info?.file_queue && Number.isSafeInteger(l) && l >= 0 ? l : null;
+}
+
+/** The largest file the server's queue takes (null: no known limit), and -1 if none. */
+function queueMaxFile() {
+  const l = queueLimit();
+  return l === null ? null : p.largestQueued(l);
+}
+
 function bytes(n) {
   if (n < 1024) return `${i18n.num(n)} B`;
   if (n < 1024 * 1024) return `${i18n.num(n / 1024, { maximumFractionDigits: 0 })} kB`;
@@ -817,7 +829,7 @@ function recoveryHelp(home, handle) {
 // ── the main view ───────────────────────────────────────────────────────────────────────────────────────────────
 
 async function enter({ store, account, handle, home }) {
-  messenger = new Messenger({ api, store, account, handle, home, realms: info.realms, fileQueue: () => settings().fileQueue });
+  messenger = new Messenger({ api, store, account, handle, home, realms: info.realms, fileQueue: () => settings().fileQueue, queueLimit: () => queueLimit() ?? Infinity });
   messenger.addEventListener("contacts", () => { renderSidebar(); refreshConversation(); });
   messenger.addEventListener("messages", (e) => { if (e.detail.conv === current) renderThread(); renderSidebar(); });
   messenger.addEventListener("gifs", () => refreshGifHashes().then(renderThread).catch(() => {}));
@@ -1300,11 +1312,12 @@ function composer(c) {
   };
   // Files on their way, one row each above the composer: name, how far it has come, then how it went.
   const uploads = h("div", { class: "uploads", role: "status", "aria-live": "polite" });
-  const upload = async (name, run) => {
+  // `note`: told before the file is sent (that the server cannot keep it).
+  const upload = async (name, run, note = null) => {
     const bar = h("progress", { max: 1, value: 0 });
     const state = h("span", { class: "state", text: tr("compose.preparing") });
     const label = h("span", { class: "name", dir: "auto", text: name });
-    const row = h("div", { class: "upload" }, h("span", { class: "spinner" }), label, state, bar);
+    const row = h("div", { class: "upload" }, h("span", { class: "spinner" }), label, state, note ? h("span", { class: "note", text: note }) : null, bar);
     uploads.append(row);
     let id = null;
     const finish = (kind, text, ms) => {
@@ -1333,6 +1346,7 @@ function composer(c) {
       });
       if (r.live) finish("ok", tr("compose.sent"), 2500);
       else if (r.queued) finish("wait", tr("compose.queued"), 7000);
+      else if (r.tooBig) finish("wait", tr("compose.laterTooBig", { size: bytes(Math.max(0, queueMaxFile() ?? 0)) }), 12000);
       else finish("wait", tr("compose.later"), 7000);
     } catch (x) {
       finish("fail", say(x), 12000);
@@ -1345,7 +1359,12 @@ function composer(c) {
   };
   const sendFiles = async (files) => {
     if (ttl) return toast(tr("err.ephemeral_files"));
-    for (const f of files) await upload(f.name, (progress) => messenger.sendFile(c.account, f, progress));
+    // Whether the server could keep a file for devices that are away is known before it is sent: said in its row.
+    const max = settings().fileQueue ? queueMaxFile() : null;
+    for (const f of files) {
+      const note = max !== null && f.size > max && f.size <= p.MAX_FILE ? tr("compose.tooBigToQueue", { size: bytes(Math.max(0, max)) }) : null;
+      await upload(f.name, (progress) => messenger.sendFile(c.account, f, progress), note);
+    }
   };
   /** Put text where the cursor is (or over the selection), and keep the cursor after it. */
   const insert = (text) => {
@@ -2330,6 +2349,7 @@ function showAccountMenu() {
           {},
           tr("acct.queue"),
           h("span", { class: "hint", style: "display:block", text: tr(info.file_queue ? "acct.queueHint" : "acct.queueOff") }),
+          queueMaxFile() > 0 ? h("span", { class: "hint", style: "display:block", text: tr("acct.queueLimit", { size: bytes(queueMaxFile()) }) }) : null,
         ),
       ),
       h(

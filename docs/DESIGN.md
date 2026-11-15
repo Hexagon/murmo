@@ -486,6 +486,9 @@ chunk text (the encrypted chunks as sent, larger than the file): `device`, `send
 three budgets above, and `file` is the most one file can take for one device of another account, the smallest of
 the four. They are upper bounds for a sender to compare a file against; whether it fits right now, with other
 files queued, is still answered by `relay-space`. Without a file queue the field is absent.
+The client compares a file against `file` before it sends it (a file of `size` bytes is counted as
+`ceil(size × 1.4) + 256 × chunks` queued bytes): one that can never fit is not offered to the queue, its row above
+the composer says so before the transfer starts, and account settings show the largest file the queue takes.
 
 1. The sender picks a file (at most 100 MiB). It makes a random file key and file id, hashes the file (SHA-256), and
    asks the server which of the recipient's devices and its own other devices are **connected right now**

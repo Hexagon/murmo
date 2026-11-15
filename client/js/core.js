@@ -186,10 +186,14 @@ async function loadDevice(store) {
 }
 
 export class Messenger extends EventTarget {
-  /** `fileQueue()`: whether the server may keep encrypted file chunks for devices that are away (a setting). */
-  constructor({ api, store, account, handle, home, realms, fileQueue = () => true }) {
+  /**
+   * `fileQueue()`: whether the server may keep encrypted file chunks for devices that are away (a setting).
+   * `queueLimit()`: the most queued bytes the server takes for one file (`file_queue_limits.file` in `/api/v1/info`).
+   */
+  constructor({ api, store, account, handle, home, realms, fileQueue = () => true, queueLimit = () => Infinity }) {
     super();
     this.fileQueue = fileQueue;
+    this.queueLimit = queueLimit;
     this.pendingFiles = []; // [{ conv, id, time }] files some device has not been given yet
     this.missed = new Map(); // f → Set(device): "relay-missed" during a transfer
     this.refused = new Set(); // refs of transfers of which the server refused a chunk
@@ -1053,7 +1057,8 @@ export class Messenger extends EventTarget {
   /**
    * Send a file: live to the devices connected now and, unless the user turned that off, as encrypted chunks the
    * server keeps for the devices that are away. Devices that got neither are tried again when they are connected.
-   * Returns `{ live, queued, waiting }` (numbers of the recipient's devices). `progress({ phase, done, total, id })`
+   * Returns `{ live, queued, waiting }` (numbers of the recipient's devices), with `tooBig: true` when the file would
+   * have been queued but is larger than the server's queue takes for one file. `progress({ phase, done, total, id })`
    * is told how far it has come: "read" while it is read and stored, "send" while it is sent (`id` is the message's
    * from then on).
    */
@@ -1082,8 +1087,9 @@ export class Messenger extends EventTarget {
     const all = [...peers, ...owns].map((t) => t.device);
     const online = await this.ws.presence(all);
     const away = all.filter((d) => !online.includes(d));
-    // Asked before the transfer, so that a file is queued whole or not at all.
-    const queued = this.fileQueue() ? await this.ws.relaySpace(away, Math.ceil(size * 1.4) + n * 256) : [];
+    // Asked before the transfer, so that a file is queued whole or not at all; not at all when it can never fit.
+    const tooBig = this.fileQueue() && p.queuedBytes(size) > this.queueLimit();
+    const queued = this.fileQueue() && !tooBig ? await this.ws.relaySpace(away, p.queuedBytes(size)) : [];
     await this.store.finishFile(f, n, size);
     const { id, time } = await this.deliver([...peers, ...owns], "file", conv, meta);
     const m = { id, conv, dir: "out", time, kind: "file", file: { ...meta, have: true }, device: this.me.device, delivered: 0 };
@@ -1096,11 +1102,13 @@ export class Messenger extends EventTarget {
     if (to.length) m.file.missed.push(...(await this.streamFile(meta, await this.store.fileReader(f), to, queued.length > 0, sending)));
     await this.settleFile(m);
     const isPeer = (d) => m.file.peers.includes(d);
-    return {
+    const r = {
       live: online.filter((d) => isPeer(d) && !m.file.missed.includes(d)).length,
       queued: queued.filter((d) => isPeer(d) && !m.file.missed.includes(d)).length,
       waiting: m.file.missed.filter(isPeer).length,
     };
+    if (tooBig && away.length) r.tooBig = true;
+    return r;
   }
 
   /**
