@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS relay_queue (
   data    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS relay_queue_device ON relay_queue (device, id);
+CREATE INDEX IF NOT EXISTS relay_queue_account ON relay_queue (account, device);
 CREATE TABLE IF NOT EXISTS push_subs (
   device   TEXT PRIMARY KEY,
   endpoint TEXT NOT NULL
@@ -443,23 +444,17 @@ impl Db {
 
     // ── queued file chunks (ciphertext for devices that were not connected) ─────────────────────────────────────
 
-    /// Bytes of queued chunks, of one device or of all.
-    pub fn relay_bytes(&self, device: Option<&str>) -> Result<i64, StoreError> {
-        let c = self.conn()?;
-        match device {
-            Some(d) => c.query_row(
-                "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE device = ?1",
-                params![d],
-                |r| r.get(0),
-            ),
-            None => c.query_row("SELECT COALESCE(SUM(size), 0) FROM relay_queue", [], |r| {
-                r.get(0)
-            }),
-        }
-        .map_err(store_err)
+    /// What a sender account has queued for a device, and the totals its limits are checked against; `None` if
+    /// the device is unknown.
+    pub fn relay_usage(
+        &self,
+        device: &str,
+        account: &str,
+    ) -> Result<Option<QueueUsage>, StoreError> {
+        usage(&*self.conn()?, device, account)
     }
 
-    /// Queue a chunk for a device unless that would exceed `max_device` bytes for it.
+    /// Queue a chunk for a device unless that would exceed one of `limits`.
     pub fn relay_enqueue(
         &self,
         device: &str,
@@ -467,20 +462,14 @@ impl Db {
         account: &str,
         data: &str,
         expires: i64,
-        max_device: i64,
+        limits: &QueueLimits,
     ) -> Result<bool, StoreError> {
         let size = i64::try_from(data.len()).unwrap_or(i64::MAX);
         let mut c = self.conn()?;
         let tx = c.transaction().map_err(store_err)?;
-        let used: i64 = tx
-            .query_row(
-                "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE device = ?1",
-                params![device],
-                |r| r.get(0),
-            )
-            .map_err(store_err)?;
-        if used.saturating_add(size) > max_device {
-            return Ok(false);
+        match usage(&tx, device, account)? {
+            Some(u) if u.room(limits) >= size => {}
+            _ => return Ok(false),
         }
         tx.execute(
             "INSERT INTO relay_queue (device, sender, account, size, expires, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -773,5 +762,161 @@ impl IdentityStore for Identities {
             }
         }
         Ok((cursor, out))
+    }
+}
+
+// ── file queue budgets ──────────────────────────────────────────────────────────────────────────────────────────
+
+/// Byte limits of the file queue.
+#[derive(Debug, Clone, Copy)]
+pub struct QueueLimits {
+    /// Per receiving device.
+    pub device: i64,
+    /// Per sender account and receiving device of another account.
+    pub pair: i64,
+    /// Per sender account, over all receiving devices.
+    pub account: i64,
+    /// For the whole server.
+    pub total: i64,
+}
+
+/// Bytes queued, as seen from one sender account and one receiving device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueUsage {
+    /// For the device, from anyone.
+    pub device: i64,
+    /// For the device, from the sender account.
+    pub pair: i64,
+    /// From the sender account, for any device.
+    pub account: i64,
+    /// On the whole server.
+    pub total: i64,
+    /// The device belongs to the sender account (the pair limit does not apply).
+    pub own: bool,
+}
+
+impl QueueUsage {
+    /// Bytes more that fit under every limit (negative if one is already exceeded).
+    pub fn room(&self, l: &QueueLimits) -> i64 {
+        let pair = if self.own {
+            i64::MAX
+        } else {
+            l.pair.saturating_sub(self.pair)
+        };
+        (l.device.saturating_sub(self.device))
+            .min(pair)
+            .min(l.account.saturating_sub(self.account))
+            .min(l.total.saturating_sub(self.total))
+    }
+}
+
+fn usage(c: &Connection, device: &str, account: &str) -> Result<Option<QueueUsage>, StoreError> {
+    let owner: Option<String> = c
+        .query_row(
+            "SELECT account FROM prekeys WHERE device = ?1",
+            params![device],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(store_err)?;
+    let Some(owner) = owner else {
+        return Ok(None);
+    };
+    let sum = |sql: &str, p: &[&dyn rusqlite::ToSql]| -> Result<i64, StoreError> {
+        c.query_row(sql, p, |r| r.get(0)).map_err(store_err)
+    };
+    Ok(Some(QueueUsage {
+        device: sum(
+            "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE device = ?1",
+            &[&device],
+        )?,
+        pair: sum(
+            "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE account = ?1 AND device = ?2",
+            &[&account, &device],
+        )?,
+        account: sum(
+            "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE account = ?1",
+            &[&account],
+        )?,
+        total: sum("SELECT COALESCE(SUM(size), 0) FROM relay_queue", &[])?,
+        own: owner == account,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LIMITS: QueueLimits = QueueLimits {
+        device: 100,
+        pair: 40,
+        account: 70,
+        total: 150,
+    };
+
+    fn db() -> Db {
+        let db = Db::open(":memory:").expect("database");
+        for (account, device) in [
+            ("A", "a1"),
+            ("B", "b1"),
+            ("B", "b2"),
+            ("C", "c1"),
+            ("D", "d1"),
+        ] {
+            db.put_prekey(account, device, &Value::from("p"))
+                .expect("prekey");
+        }
+        db
+    }
+
+    fn put(db: &Db, to: &str, from_account: &str, n: usize) -> bool {
+        db.relay_enqueue(to, "dev", from_account, &"x".repeat(n), 10, &LIMITS)
+            .expect("enqueue")
+    }
+
+    #[test]
+    fn one_sender_cannot_fill_a_device() {
+        let db = db();
+        assert!(put(&db, "b1", "A", 40));
+        assert!(!put(&db, "b1", "A", 1), "pair limit");
+        // Other senders still have room on the same device, up to the device limit.
+        assert!(put(&db, "b1", "C", 40));
+        assert!(put(&db, "b1", "D", 20));
+        assert!(!put(&db, "b1", "D", 1), "device limit");
+        // Acknowledged or expired chunks free the budget again.
+        db.purge(11).expect("purge");
+        assert!(put(&db, "b1", "A", 40));
+    }
+
+    #[test]
+    fn one_sender_cannot_fill_the_server() {
+        let db = db();
+        assert!(put(&db, "b1", "A", 40));
+        assert!(put(&db, "c1", "A", 30));
+        assert!(!put(&db, "d1", "A", 1), "account limit");
+        assert!(put(&db, "d1", "B", 40));
+        assert!(put(&db, "a1", "B", 30));
+        assert!(!put(&db, "c1", "C", 11), "total limit");
+        assert!(put(&db, "c1", "C", 10));
+    }
+
+    #[test]
+    fn own_devices_have_no_pair_limit() {
+        let db = db();
+        assert!(put(&db, "b2", "B", 70));
+        assert!(!put(&db, "b2", "B", 1), "the account limit still applies");
+        let u = db.relay_usage("b2", "B").expect("usage").expect("known");
+        assert!(u.own);
+        assert_eq!(u.room(&LIMITS), 0);
+        let u = db.relay_usage("b2", "A").expect("usage").expect("known");
+        assert_eq!((u.own, u.device, u.pair), (false, 70, 0));
+        assert_eq!(u.room(&LIMITS), 30);
+    }
+
+    #[test]
+    fn unknown_devices_get_nothing() {
+        let db = db();
+        assert!(!put(&db, "nobody", "A", 1));
+        assert!(db.relay_usage("nobody", "A").expect("usage").is_none());
     }
 }

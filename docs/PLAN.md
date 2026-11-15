@@ -22,13 +22,12 @@
 - [x] Persistent rate limits behind a reverse proxy (`X-Forwarded-For` only from a trusted proxy)
 - [x] Fuzz targets for the server parsers (`fuzz/`: JSON bodies and device lists, WebSocket frames, query/proxy/origin text; a minute each in CI)
 - [x] Run the browser smoke test in CI
+- [x] Per-sender quota in the file queue: per (sender account, device) and per sender account, checked by
+      `relay-space` too (`MESG_FILE_QUEUE_SENDER_MB`, `MESG_FILE_QUEUE_ACCOUNT_MB`)
+- [x] Version and commit shown under "Säkerhet och integritet" (`/api/v1/info`: `version`, `commit`, `source`)
 
 Open, in order of priority:
 
-- [ ] **Per-sender quota in the file queue.** Any authenticated device can queue chunks to any known device id: one
-      account can fill a victim's 150 MiB (blocking files from real contacts for 14 days, since the victim's client
-      only acknowledges junk it reads) or the whole 2 GiB queue for everyone. Limit queued bytes per (sender account,
-      device) and per sender account in total, and count `relay-space` against the same budget.
 - [ ] **Bounded memory for incoming files.** Chunks that arrive before their `file` message are buffered without a
       byte limit (only 64 such files, swept after 10 minutes), and assembly holds the file about three times
       (chunks, plaintext parts, joined copy) before one large IndexedDB write: a 100 MiB file can exhaust a phone.

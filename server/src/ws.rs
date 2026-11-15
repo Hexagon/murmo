@@ -416,12 +416,6 @@ fn relay(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
 }
 
 fn queue_chunk(app: &App, me: &Authed, device: &str, data: &str) -> Result<bool, ApiError> {
-    if !app.db.device_known(device).map_err(ApiError::internal)?
-        || app.db.relay_bytes(None).map_err(ApiError::internal)? + data.len() as i64
-            > app.cfg.file_queue_total
-    {
-        return Ok(false);
-    }
     app.db
         .relay_enqueue(
             device,
@@ -429,13 +423,14 @@ fn queue_chunk(app: &App, me: &Authed, device: &str, data: &str) -> Result<bool,
             &me.account,
             data,
             now() + MAILBOX_TTL,
-            app.cfg.file_queue,
+            &app.cfg.queue_limits(),
         )
         .map_err(ApiError::internal)
 }
 
-/// Which of the given devices have room for `bytes` more of queued chunks (asked before a transfer, so that a file
-/// is queued whole or not at all).
+/// Which of the given devices have room for `bytes` more of queued chunks from this account (asked before a
+/// transfer, so that a file is queued whole or not at all). The same budgets as [`queue_chunk`]; what is granted to
+/// one device counts against the account's and the server's totals for the next.
 fn relay_space(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
     app.limits
         .check(format!("presence:{}", me.device), 120, 60)?;
@@ -451,18 +446,25 @@ fn relay_space(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiEr
     if devices.len() > MAX_PRESENCE {
         return Err(ApiError::new(400, "bad_field"));
     }
+    let limits = app.cfg.queue_limits();
     let mut ok: Vec<Value> = Vec::new();
+    let mut granted = 0i64;
     if app.cfg.file_queue > 0 {
-        let mut total = app.db.relay_bytes(None).map_err(ApiError::internal)?;
         for d in devices.iter().filter_map(Value::as_str) {
-            if d == me.device || !app.db.device_known(d).map_err(ApiError::internal)? {
+            if d == me.device || ok.iter().any(|o| o.as_str() == Some(d)) {
                 continue;
             }
-            let used = app.db.relay_bytes(Some(d)).map_err(ApiError::internal)?;
-            if used.saturating_add(bytes) <= app.cfg.file_queue
-                && total.saturating_add(bytes) <= app.cfg.file_queue_total
-            {
-                total = total.saturating_add(bytes);
+            let Some(mut u) = app
+                .db
+                .relay_usage(d, &me.account)
+                .map_err(ApiError::internal)?
+            else {
+                continue;
+            };
+            u.account = u.account.saturating_add(granted);
+            u.total = u.total.saturating_add(granted);
+            if u.room(&limits) >= bytes {
+                granted = granted.saturating_add(bytes);
                 ok.push(d.into());
             }
         }

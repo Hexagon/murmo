@@ -64,8 +64,13 @@ Configuration (environment):
 | `MESG_TRUST_PROXY` | `0` | proxies whose `X-Forwarded-For` is believed: `0` none, `1` loopback and private networks, or a list of addresses and CIDR ranges (`10.1.2.3,fd00::/8`) |
 | `MESG_FILE_QUEUE_MB` | `150` | encrypted file chunks kept per device that is away (`0`: files only go live) |
 | `MESG_FILE_QUEUE_TOTAL_MB` | `2048` | file chunks kept in total |
+| `MESG_FILE_QUEUE_SENDER_MB` | `50` | file chunks one account may queue for one device of another account |
+| `MESG_FILE_QUEUE_ACCOUNT_MB` | `300` | file chunks one account may queue in total |
 | `MESG_PUSH_HOSTS` | the push services of Chrome, Firefox, Safari, Edge | push-service hosts accepted for notifications (`*.` for subdomains, empty: no push) |
 | `MESG_PUSH_CONTACT` | `MESG_ORIGIN` | contact sent to push services (`mailto:` or `https:` URL) |
+
+The version shown in the app ("Säkerhet och integritet") is the commit the server was built from: `MESG_COMMIT` or
+`GITHUB_SHA` at build time, otherwise `git rev-parse HEAD`.
 
 The `MESG_ORIGIN` goes into users' signed rootcard logs as their home address: choose it once.
 

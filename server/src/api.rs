@@ -101,7 +101,12 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
         .with("realm", app.cfg.realm.as_str())
         .with("realms", Value::Array(realms))
         .with("homes", homes)
-        .with("file_queue", app.cfg.file_queue > 0);
+        .with("file_queue", app.cfg.file_queue > 0)
+        .with("version", env!("CARGO_PKG_VERSION"))
+        .with("source", env!("CARGO_PKG_REPOSITORY"));
+    if !env!("MESG_COMMIT").is_empty() {
+        m.insert("commit", env!("MESG_COMMIT").into());
+    }
     if app.push.enabled() {
         m.insert("push_key", app.push.public.as_str().into());
     }

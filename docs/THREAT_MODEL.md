@@ -65,7 +65,7 @@ service.
 | T26 | The page leaks data to third parties | X6 | CSP `connect-src` lists only this server and the allowed homes (all of https with `*`) | With `*`, a script running in the page could reach any https host (AR1 already covers running script) |
 | T27 | Push reveals activity | X3, push service | Pushes carry no payload; only messages to the other party are marked; at most one push per device per 10 s; needs the browser's notification permission and can be turned off per device | The push service (Google, Mozilla, Apple) learns when a browser is woken by this server; the server learns that a device asked for push |
 | T28 | Push endpoints used to make the server send requests (SSRF) | X2 | Endpoints accepted only on configured push-service hosts (exact host or `*.` suffix, https), no redirects, 10 s | – |
-| T29 | File queue used to fill the server's disk | X2 | Only devices in a verified list; per-device and total quotas; asked before sending; 14 days | A contact can fill one device's quota (150 MiB) until it reads it |
+| T29 | File queue used to fill the server's disk | X2 | Only devices in a verified list; quotas per device, per sender account and device, per sender account and in total; asked before sending; 14 days | Three accounts can fill one device's quota (150 MiB) and seven the server's, until the chunks are read or expire |
 | T18 | Quantum adversary records traffic | future | – (X25519 and Ed25519 only) | Hybrid ML-KEM prekeys in a later phase |
 
 ## 4. Accepted risks

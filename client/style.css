@@ -234,6 +234,8 @@ dialog.wide { width: min(640px, calc(100% - 24px)); max-height: calc(100dvh - 32
 .help h3 { font-size: 15px; margin: 16px 0 6px; }
 .help ul, .about ul { margin: 0; padding-left: 18px; }
 .help li { margin: 4px 0; font-size: 14px; }
+.version { margin-top: 16px; font-variant-numeric: tabular-nums; }
+.version a { color: inherit; }
 .about { font-size: 13px; color: var(--muted); padding: 4px 4px 0; }
 .about li { margin: 3px 0; }
 .about .link { margin-top: 8px; font-size: 13px; }

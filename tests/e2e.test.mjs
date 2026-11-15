@@ -373,7 +373,7 @@ test("the server keeps no delivered messages and no files", async () => {
   assert.equal(left, 0);
   const queued = db2count("relay_queue");
   assert.equal(queued, 0);
-  assert.deepEqual(tables, ["changes", "device_lists", "identities", "mailbox", "prekeys", "push_subs", "relay_queue", "remote_ids", "settings", "sqlite_sequence"]);
+  assert.deepEqual(tables, ["changes", "device_lists", "identities", "mailbox", "prekeys", "push_subs", "rate_limits", "relay_queue", "remote_ids", "settings", "sqlite_sequence"]);
 });
 
 function db2count(table) {
