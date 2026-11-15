@@ -244,6 +244,14 @@ export default {
   "side.account": "Konto och inställningar",
   "side.back": "Tillbaka till konversationerna",
 
+  // ── search ──
+  "search.placeholder": "Sök",
+  "search.label": "Sök i konversationer",
+  "search.messages": "Meddelanden",
+  "search.you": "Du: ",
+  "search.more": "Visar de {n} senaste träffarna. Skriv mer för att begränsa.",
+  "search.none": "Inga träffar.",
+
   // ── conversation ──
   "conv.retentionTitle": "Meddelanden raderas från dina enheter efter den här tiden",
   "conv.retention": " · raderas efter {time}",

@@ -244,6 +244,14 @@ export default {
   "side.account": "Cuenta y ajustes",
   "side.back": "Volver a las conversaciones",
 
+  // ── search ──
+  "search.placeholder": "Buscar",
+  "search.label": "Buscar en conversaciones",
+  "search.messages": "Mensajes",
+  "search.you": "Tú: ",
+  "search.more": "Se muestran los {n} resultados más recientes. Escribe más para acotar.",
+  "search.none": "Sin resultados.",
+
   // ── conversation ──
   "conv.retentionTitle": "Los mensajes se eliminan de tus dispositivos pasado este tiempo",
   "conv.retention": " · se elimina tras {time}",

@@ -244,6 +244,14 @@ export default {
   "side.account": "Konto und Einstellungen",
   "side.back": "Zurück zu den Unterhaltungen",
 
+  // ── search ──
+  "search.placeholder": "Suchen",
+  "search.label": "In Unterhaltungen suchen",
+  "search.messages": "Nachrichten",
+  "search.you": "Du: ",
+  "search.more": "Die {n} neuesten Treffer werden angezeigt. Schreib mehr, um sie einzugrenzen.",
+  "search.none": "Keine Treffer.",
+
   // ── conversation ──
   "conv.retentionTitle": "Nachrichten werden nach dieser Zeit von deinen Geräten gelöscht",
   "conv.retention": " · gelöscht nach {time}",

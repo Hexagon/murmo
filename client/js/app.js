@@ -18,6 +18,9 @@ let messenger = null;
 let session = null; // { token, home } while a rootcard session exists
 let info = null; // what this server accepts (GET /api/v1/info)
 let current = null; // open conversation (account id)
+// Search (DESIGN.md §6.9): the query in the sidebar, and a message to show when its conversation opens.
+let search = "";
+let jumpTo = null;
 const objectUrls = new Map();
 /**
  * The open conversation's rendered messages, by id: `{ sig, node }`. A message whose `sig` is unchanged keeps its node
@@ -98,6 +101,7 @@ const ICONS = {
   clock: "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 0 0 0-17zM12 7.5V12l3 2",
   undo: "M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
   bellOff: "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0M3 3l18 18",
+  search: "M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 0 0 0-13zM15.5 15.5L20 20",
   timer: "M12 6a7.5 7.5 0 1 0 0 15a7.5 7.5 0 0 0 0-15zM12 9.5v4l2.5 1.5M10 2.5h4M18.5 6.5l1.5-1.5",
 };
 
@@ -832,7 +836,11 @@ function recoveryHelp(home, handle) {
 async function enter({ store, account, handle, home }) {
   messenger = new Messenger({ api, store, account, handle, home, realms: info.realms, fileQueue: () => settings().fileQueue, queueLimit: () => queueLimit() ?? Infinity });
   messenger.addEventListener("contacts", () => { renderSidebar(); refreshConversation(); });
-  messenger.addEventListener("messages", (e) => { if (e.detail.conv === current) renderThread(); renderSidebar(); });
+  messenger.addEventListener("messages", (e) => {
+    searchCache.delete(e.detail.conv);
+    if (e.detail.conv === current) renderThread();
+    renderSidebar();
+  });
   messenger.addEventListener("gifs", () => refreshGifHashes().then(renderThread).catch(() => {}));
   messenger.addEventListener("status", (e) => {
     renderSidebar();
@@ -1000,6 +1008,32 @@ const ui = {};
 
 function renderShell() {
   ui.sideList = h("nav", { class: "side-list", "aria-label": tr("side.conversations") });
+  ui.search = h("input", {
+    class: "input", type: "search", placeholder: tr("search.placeholder"), "aria-label": tr("search.label"),
+    spellcheck: "false", autocomplete: "off", autocapitalize: "off", enterkeyhint: "search",
+  });
+  ui.search.value = search;
+  let wait = 0;
+  ui.search.addEventListener("input", () => {
+    clearTimeout(wait);
+    wait = setTimeout(() => setSearch(ui.search.value), 150);
+  });
+  // Esc empties the field, and an empty field closes; so does leaving it empty.
+  ui.search.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    if (!ui.search.value) return showSearch(false);
+    clearTimeout(wait);
+    ui.search.value = "";
+    setSearch("");
+  });
+  ui.search.addEventListener("blur", () => { if (!ui.search.value) showSearch(false); });
+  ui.searchRow = h("div", { class: `side-search${search ? "" : " hidden"}`, role: "search" }, ui.search);
+  ui.searchBtn = h("button", {
+    class: "icon-btn search-btn", "aria-label": tr("search.label"), title: `${tr("search.label")} (${shortcut})`,
+    "aria-expanded": String(!!search), onclick: () => showSearch(ui.searchRow.classList.contains("hidden")),
+    onmousedown: (e) => e.preventDefault(), // the field keeps the focus, so it is not closed by its blur first
+  }, icon("search"));
   ui.foot = h("div", { class: "side-foot" });
   ui.main = h("main", { class: "main" });
   ui.bell = h("button", { class: "icon-btn bell-off", hidden: true, onclick: async () => toast(await setNotifications(true).catch((x) => say(x))) }, icon("bellOff"));
@@ -1017,9 +1051,11 @@ function renderShell() {
           "div",
           { class: "side-actions" },
           ui.bell,
-          h("button", { class: "icon-btn", "aria-label": tr("side.newConversation"), title: tr("side.newConversation"), onclick: () => openConversation(null, true) }, icon("plus")),
+          ui.searchBtn,
+          h("button", { class: "icon-btn new-btn", "aria-label": tr("side.newConversation"), title: tr("side.newConversation"), onclick: () => openConversation(null, true) }, icon("plus")),
         ),
       ),
+      ui.searchRow,
       ui.sideList,
       ui.foot,
     ),
@@ -1031,26 +1067,31 @@ function renderShell() {
   openConversation(current);
 }
 
+/** A conversation in the sidebar. */
+function convItem(c) {
+  const [name, tag] = splitHandle(c.handle);
+  return h(
+    "button",
+    { class: `conv${c.account === current ? " on" : ""}`, onclick: () => openConversation(c.account) },
+    h("span", { class: "avatar small", text: name.slice(0, 1).toUpperCase() }),
+    h("span", { class: "name" }, name, h("span", { class: "tag", text: tag })),
+    c.state === "incoming" ? h("span", { class: "badge", text: tr("side.badgeNew") }) : null,
+    c.state === "outgoing" ? h("span", { class: "badge muted", text: tr("side.badgeWaiting") }) : null,
+    c.state === "accepted" && unread.has(c.account) ? h("span", { class: "unread", "aria-label": tr("side.unread") }) : null,
+    c.fork ? h("span", { class: "badge", text: "!" }) : null,
+  );
+}
+
 function renderSidebar() {
   if (!ui.sideList || !messenger) return;
   updateBell();
+  renderFoot();
+  if (search) return renderSearch();
   const all = messenger.contactList().sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
   const incoming = all.filter((c) => c.state === "incoming");
   const convs = all.filter((c) => c.state === "accepted" || c.state === "outgoing");
   const blocked = all.filter((c) => c.state === "blocked");
-  const item = (c) => {
-    const [name, tag] = splitHandle(c.handle);
-    return h(
-      "button",
-      { class: `conv${c.account === current ? " on" : ""}`, onclick: () => openConversation(c.account) },
-      h("span", { class: "avatar small", text: name.slice(0, 1).toUpperCase() }),
-      h("span", { class: "name" }, name, h("span", { class: "tag", text: tag })),
-      c.state === "incoming" ? h("span", { class: "badge", text: tr("side.badgeNew") }) : null,
-      c.state === "outgoing" ? h("span", { class: "badge muted", text: tr("side.badgeWaiting") }) : null,
-      c.state === "accepted" && unread.has(c.account) ? h("span", { class: "unread", "aria-label": tr("side.unread") }) : null,
-      c.fork ? h("span", { class: "badge", text: "!" }) : null,
-    );
-  };
+  const item = convItem;
   put(ui.sideList,
     incoming.length ? h("div", { class: "side-head", text: tr("side.requests") }) : null,
     ...incoming.map(item),
@@ -1061,6 +1102,122 @@ function renderSidebar() {
     blocked.length ? h("div", { class: "side-head", text: tr("side.blocked") }) : null,
     ...blocked.map(item),
   );
+}
+
+// ── search (DESIGN.md §6.9) ──────────────────────────────────────────────────────────────────────────────────────
+// Messages are stored encrypted on the device and the server never sees them, so the search runs here: over the
+// decrypted texts and file names of every conversation, while a query is typed. Disappearing messages are not
+// searched. What has been decrypted for it is kept per conversation while the search is open (dropped when a
+// conversation changes) and forgotten when the field is emptied.
+
+const SEARCH_MAX = 100;
+/** conversation → its searchable messages, newest first: `{ id, time, dir, text, folded }`. */
+const searchCache = new Map();
+let searchSeq = 0;
+
+const fold = (s) => s.replace(/\s+/g, " ").toLocaleLowerCase();
+
+const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl+K";
+
+/** Open the search field (and put the cursor in it), or close it and empty it. */
+function showSearch(on) {
+  if (!ui.searchRow) return;
+  ui.searchRow.classList.toggle("hidden", !on);
+  ui.searchBtn.setAttribute("aria-expanded", String(on));
+  if (on) {
+    // On a narrow screen the list is behind an open conversation: back to it.
+    if (current && matchMedia("(max-width: 760px)").matches) closeConversation();
+    ui.search.focus();
+    ui.search.select();
+  } else {
+    ui.search.value = "";
+    setSearch("");
+  }
+}
+addEventListener("keydown", (e) => {
+  if (e.key.toLowerCase() !== "k" || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || !ui.searchRow?.isConnected) return;
+  if (document.querySelector("dialog[open]")) return;
+  e.preventDefault();
+  showSearch(true);
+});
+
+function setSearch(q) {
+  const next = q.trim().replace(/\s+/g, " ");
+  if (next === search) return;
+  search = next;
+  if (!search) searchCache.clear();
+  renderSidebar();
+}
+
+/** The messages of a conversation that a search looks in. */
+async function searchable(conv) {
+  let list = searchCache.get(conv);
+  if (list) return list;
+  list = [];
+  for (const m of await messenger.messages(conv)) {
+    const text = m.kind === "text" ? m.text : m.kind === "file" ? m.file?.name : null;
+    if (!text) continue;
+    const one = text.replace(/\s+/g, " ").trim();
+    list.push({ id: m.id, time: m.time, dir: m.dir, text: one, folded: fold(one) });
+  }
+  list.reverse();
+  searchCache.set(conv, list);
+  return list;
+}
+
+/** A line of a found text: some words before the match, the match marked, what follows (cut off by the list). */
+function snippet(text, q) {
+  const at = fold(text).indexOf(q);
+  // Lower case can change the length of a few letters; then the place is not known and the text is shown unmarked.
+  if (at < 0 || fold(text).length !== text.length) return [text];
+  let from = Math.max(0, at - 28);
+  if (from > 0) {
+    const space = text.indexOf(" ", from);
+    from = space >= 0 && space < at ? space + 1 : from;
+  }
+  return [from > 0 ? `…${text.slice(from, at)}` : text.slice(0, at), h("mark", { text: text.slice(at, at + q.length) }), text.slice(at + q.length)];
+}
+
+async function renderSearch() {
+  const seq = ++searchSeq;
+  const q = fold(search);
+  const all = messenger.contactList().filter((c) => c.state !== "declined").sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
+  const people = all.filter((c) => fold(c.handle).includes(q));
+  const hits = [];
+  for (const c of all) {
+    const list = await searchable(c.account);
+    if (seq !== searchSeq) return;
+    for (const m of list) if (m.folded.includes(q)) hits.push({ c, m });
+  }
+  if (seq !== searchSeq || !ui.sideList) return;
+  hits.sort((a, b) => b.m.time - a.m.time);
+  const hit = ({ c, m }) => {
+    const [name, tag] = splitHandle(c.handle);
+    return h(
+      "button",
+      { class: "conv hit", onclick: () => { jumpTo = m.id; openConversation(c.account); } },
+      h("span", { class: "avatar small", text: name.slice(0, 1).toUpperCase() }),
+      h(
+        "span",
+        { class: "hit-body" },
+        h("span", { class: "hit-top" },
+          h("span", { class: "name" }, name, h("span", { class: "tag", text: tag })),
+          h("time", { datetime: i18n.iso(m.time), title: i18n.dateTime(m.time), text: i18n.daysAgo(m.time) === 0 ? clock(m.time) : dayLabel(m.time) })),
+        h("span", { class: "snippet", dir: "auto" }, m.dir === "out" ? h("span", { class: "you", text: tr("search.you") }) : null, ...snippet(m.text, q)),
+      ),
+    );
+  };
+  put(ui.sideList,
+    people.length ? h("div", { class: "side-head", text: tr("side.conversations") }) : null,
+    ...people.map(convItem),
+    hits.length ? h("div", { class: "side-head", text: tr("search.messages") }) : null,
+    ...hits.slice(0, SEARCH_MAX).map(hit),
+    hits.length > SEARCH_MAX ? h("p", { class: "hint search-more", text: tr("search.more", { n: i18n.num(SEARCH_MAX) }) }) : null,
+    !people.length && !hits.length ? h("p", { class: "hint search-none", text: tr("search.none") }) : null,
+  );
+}
+
+function renderFoot() {
   const [name] = splitHandle(messenger.handle);
   put(ui.foot,
     h("div", { class: "avatar", text: name.slice(0, 1).toUpperCase() }),
@@ -1823,6 +1980,16 @@ async function renderThread() {
   if (!msgs.length) out.push(h("div", { class: "day", text: tr("conv.empty") }));
   reconcile(ui.thread, out);
   if (nearBottom || seq === 1) ui.scroll.scrollTop = ui.scroll.scrollHeight;
+  // Opened from a search hit: the message in the middle, marked for a moment.
+  if (jumpTo) {
+    const node = msgNodes.get(jumpTo)?.node;
+    jumpTo = null;
+    if (node) {
+      node.scrollIntoView({ block: "center" });
+      node.classList.add("found");
+      setTimeout(() => node.classList.remove("found"), 2500);
+    }
+  }
   watchUnseen();
   tickFuses();
 }

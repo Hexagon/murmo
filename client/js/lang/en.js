@@ -244,6 +244,14 @@ export default {
   "side.account": "Account and settings",
   "side.back": "Back to the conversations",
 
+  // ── search ──
+  "search.placeholder": "Search",
+  "search.label": "Search conversations",
+  "search.messages": "Messages",
+  "search.you": "You: ",
+  "search.more": "Showing the {n} latest matches. Type more to narrow it down.",
+  "search.none": "No matches.",
+
   // ── conversation ──
   "conv.retentionTitle": "Messages are deleted from your devices after this time",
   "conv.retention": " · deleted after {time}",
