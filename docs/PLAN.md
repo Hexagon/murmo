@@ -66,7 +66,8 @@ Open, in order of priority:
 Kept in [DESIGN.md §13](DESIGN.md#13-ideas-not-decided) to be decided later: remote wipe, proofs of linked accounts,
 social recovery of the paper key, QR verification, identity timeline, aliases, calm messaging, "what the server
 knows about me", duress password, sealed sender, one-time secrets, shared objects, voice, on-device translation,
-calls, a contact widget, alerts and bots, checking the served client.
+calls, a contact widget, alerts and bots (with a worked plan for an AI assistant as a contact), checking the served
+client.
 
 ## Open questions
 

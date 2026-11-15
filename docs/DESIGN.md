@@ -858,6 +858,61 @@ message request (§6), with a one-time link for the visitor to read the answer. 
 for self-hosters who want encrypted alerts on their phone, and bots that are rootcard identities asking to be
 contacts like anyone else. Decide: where a bot keeps its device key, and whether bots are marked as bots.
 
+**An AI assistant (Claude) as a contact.** A worked plan for one such bot: an assistant that can read and send
+messages in Murmo through tools (MCP). Nothing here is built.
+
+*What already works.* The client engine runs headless: `tests/e2e.test.mjs` drives `core.js` in Node 22 against the
+real server through registration, login, device setup, requests, acceptance and text (`id.login` → `setupDevice` →
+`new Messenger(…)` → `request`, `sendText`, `messages`). The server accepts WebSockets without an `Origin` header
+(`ws.rs`: not a browser, the device signs for one of the server's origins). So no protocol change is needed.
+
+*Shape.*
+
+```
+assistant ──MCP tools──► murmo-bot (Node, long-running) ──HTTPS/WebSocket──► Murmo server ──► contacts' devices
+                         its own rootcard identity, e.g. Claude#7K2Q
+                         one device in its own device list
+                         encrypted local store on disk
+```
+
+1. **Its own identity, never a device of the user's account.** The bot registers as an ordinary identity
+   (`Claude#XXXX`); its owner keeps the recovery card offline. It reaches people only with a `request` they accept
+   (§6.2), like anyone else. Linking it as a device of the user's own account is possible but rejected: it could
+   then write as the user and would receive the whole history (§4.3, §7), against §4 and §8.
+2. **A long-running sidecar** on a machine the owner controls (next to the Murmo server, or the owner's computer as a
+   local MCP server). It must stay connected to receive replies, send receipts and rotate prekeys (§5.2: replaced
+   every 7 days, private keys kept 21 days, mailbox 14 days). An ephemeral cloud container is a poor home: its device
+   key is lost each time, every run would be a new device to link, and the list allows only 8 devices and 32 entries
+   (§4.1).
+3. **A small MCP server** around `Messenger`, with few tools: `list_contacts`, `read_messages(contact)`,
+   `send_message(contact, text)`, `request_contact(handle, note)`. Files, reactions and edits later, if at all.
+
+*What has to be built.*
+
+| Part | Work |
+|---|---|
+| Persistent store | `Store` uses IndexedDB; the tests use `fake-indexeddb`, which is in memory only, so the device key would be lost on restart. Either an IndexedDB shim on disk, or a file-backed store with the same interface. Records are already encrypted with the local key (§8), so the files reveal nothing more than the browser's database does. |
+| Unlocking at start | The local key comes from the local secret in the rootcard vault, which the password unlocks. Either the password is given at each start (a secret of the sidecar), or "remember me" (`store.remember`) keeps the key on disk, protected only by file permissions. |
+| Updates | The web client reloads when the server's `build` changes; the sidecar runs a pinned commit and must be updated and restarted by its owner. §12 keeps this safe, but kinds it does not know are dropped. |
+| MCP layer and a test | A few hundred lines; an e2e test in which the bot requests a contact, is accepted, sends, and receives a reply. |
+
+*Trust and safety, to settle before building.*
+
+- **The end of "end to end" is a third party.** Encryption reaches the bot; the plaintext then goes to the model
+  provider. This must be a new row in [THREAT_MODEL.md](THREAT_MODEL.md), and contacts must be able to see it: this is
+  the case for deciding that **bots are marked** (for example a flag in the profile or the device entry, shown with
+  the request and next to the safety code).
+- **Prompt injection.** Incoming messages are untrusted input to the assistant. The sidecar sends only to accepted
+  contacts (the engine already refuses others with `not_accepted`); sending should need the owner's confirmation or an
+  allowlist of contacts; message text is passed to the assistant as data, never as instructions.
+- **A leak costs the bot, not the user.** A stolen bot device can speak only as the bot. Replacing it is a new device
+  that contacts see (the safety code changes), and any device of the bot can `remove` it (§4.4).
+- Limits are no obstacle: 60 sends per minute per device, 64 KiB per envelope (§10).
+
+*Order of work.* 1) decide marking and add the threat-model row; 2) file-backed `Store` with tests; 3) the sidecar
+(login, unlock, `Messenger`, reconnects) under `tools/murmo-bot/`; 4) the MCP tools with confirmation before sending;
+5) an e2e test against the real server.
+
 ### 13.7 Trusting the client
 
 **Check the served client.** Extend the "signed, reproducible client" item in [PLAN.md](PLAN.md): the installed app
