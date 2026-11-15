@@ -70,7 +70,7 @@ impl Pusher {
                 key
             }
         };
-        let public = base64url_encode(key.verifying_key().to_encoded_point(false).as_bytes());
+        let public = base64url_encode(key.verifying_key().to_sec1_point(false).as_bytes());
         Ok(Pusher {
             key: Some(key),
             public,
