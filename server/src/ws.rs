@@ -139,8 +139,11 @@ async fn run(
     };
     let (tx, mut rx) = mpsc::channel::<Push>(PUSH_QUEUE);
     let conn = app.hub.register(&me.device, &me.account, tx);
+    // When each device was last connected, so the owner can tell which devices are still in use (`seen`).
+    let _ = app.db.set_seen(&me.device, now());
     let result = session(&app, &me, &mut socket, &mut rx).await;
     app.hub.unregister(&me.device, conn);
+    let _ = app.db.set_seen(&me.device, now());
     result
 }
 
@@ -259,6 +262,7 @@ fn handle(app: &Arc<App>, me: &Authed, m: &Map) -> Option<Message> {
         Some("relay-ack") => relay_ack(app, me, m),
         Some("relay-space") => relay_space(app, me, m),
         Some("presence") => presence(app, me, m),
+        Some("seen") => seen(app, me, m),
         Some("push-sub") => push_sub(app, me, m),
         Some("ping") => Ok(Some(frame(Map::new().with("t", "pong")))),
         _ => Err(ApiError::new(400, "bad_frame")),
@@ -530,6 +534,33 @@ fn push_sub(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError
 }
 
 /// Which of the given devices are connected now (to decide where a file transfer goes).
+/// When the account's own devices were last connected: `{ device: seconds }`, `0` for connected now. Only for the
+/// account's own devices: the server does not tell others when someone was around.
+fn seen(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
+    app.limits.check(format!("seen:{}", me.device), 30, 60)?;
+    let cur = app.current(&me.account)?;
+    let mut devices = Map::new();
+    for d in cur.list.iter().flat_map(|l| &l.present) {
+        let t = if app.hub.is_connected(&d.id) {
+            Some(0)
+        } else {
+            app.db.seen(&d.id).map_err(ApiError::internal)?
+        };
+        if let Some(t) = t {
+            devices.insert(d.id.as_str(), t.into());
+        }
+    }
+    let mut f = Map::new()
+        .with("t", "seen")
+        .with("devices", Value::Object(devices));
+    if let Some(r) = m.get("ref").and_then(Value::as_str)
+        && r.len() <= 64
+    {
+        f.insert("ref", r.into());
+    }
+    Ok(Some(frame(f)))
+}
+
 fn presence(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
     app.limits
         .check(format!("presence:{}", me.device), 120, 60)?;
