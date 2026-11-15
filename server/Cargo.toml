@@ -8,8 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-rootcard = { version = "=0.3.4", default-features = false }
-rootcard-host = "=0.3.4"
+rootcard = { version = "=0.3.5", default-features = false }
+rootcard-host = "=0.3.5"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 tower-http = { version = "0.6", features = ["fs", "set-header"] }
