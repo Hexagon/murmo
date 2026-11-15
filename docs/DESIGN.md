@@ -920,3 +920,107 @@ compares the served files' hashes with a list signed by a release key (for examp
 before running them, and warns otherwise. It answers AR1, the objection to every web messenger that the server can
 serve other code. Decide: how a service worker can reliably hold back a page it does not trust, and how the release
 key is replaced.
+
+### 13.8 Faster file relay
+
+**Why.** A 400 MB file takes about 8 minutes even between two 250 Mbit/s connections. Three causes, largest first:
+- *The budget.* The relay allows 96 MiB of chunk text per minute from one account into one device (§10), and the
+  client paces to 90 % of it. Files over `ASK_ABOVE` go to one device only, so this is the limit they meet.
+- *Double base64.* The ciphertext is base64url in `c`, and the whole `{ k, f, i, n, c }` is base64url again by
+  `pack()`. A 48 KiB chunk becomes about 87.5 KB of text (1.78×), and the budget counts text. With binary frames it
+  would be about 49.2 KB (1.0×), so the same budget carries 1.78× more file: about 4.4 minutes for 400 MB.
+- *Work per chunk.* Each of the ~8 100 chunks of a 400 MB file is base64-encoded twice by the sender, parsed as JSON,
+  checked character by character and copied once per recipient by the server, and then base64-decoded twice and
+  parsed by the receiver, which also writes it to IndexedDB in a transaction of its own. Base64 runs in pure JS
+  (`rc.base64urlEncode`). Before the budget is raised, this is not the limit. After, it is.
+
+Related bug, fixed in step 1 below: `queuedBytes()` counts a queued file as `1.4 × size`, but the server stores the
+double-base64 text (about 1.78×). `relay-space` can therefore grant room that the file then overruns, and the
+transfer is refused partway through.
+
+**How it could fit: binary WebSocket frames for file chunks only.** Everything else stays JSON text, `file-req`
+included. The server still forwards bytes it cannot read; only the encoding on the way changes.
+
+*Client → server* (one binary frame per chunk; all integers big-endian):
+
+| Bytes | Field |
+|---|---|
+| 1 | frame type `0x01` (relay chunk); any other value closes the connection |
+| 1 | flags: bit 0 `store`; other bits must be 0 |
+| 1 | `k`, the number of recipient devices (1–24, `MAX_RECIPIENTS`) |
+| 16 × k | recipient device ids, raw (a device id is base64url of 16 bytes) |
+| 8 | `ref`, random; echoed in base64url in `relay-missed` and `error` frames |
+| 4 | `ttl` in seconds, 0 for none (only with `store`) |
+| rest | payload, at most `MAX_RELAY_BIN` (64 KiB): `f` (1 byte length, at most 64, then the ASCII id), `i` (4), `n` (4), AES-GCM ciphertext |
+
+*Server → client:* type `0x02`, the sender's device id (16 bytes, raw), the sender's account (1 byte length, then the
+id), the queue id (8 bytes; 0 when live), then the payload unchanged. The receiver sets `binaryType = "arraybuffer"`,
+and the ciphertext goes to `crypto.subtle` with no copy and no decoding.
+
+**Security.** None of the following may be weaker than today:
+- *Parsing.* The server reads fixed offsets with checked bounds. It refuses a frame that is truncated, has `k = 0` or
+  `k > 24`, sets unknown flags, or has a payload over the limit. It never allocates more than the frame's own length.
+  Axum's `max_message_size` stays the hard limit, and binary frames are smaller than `MAX_FRAME`. A new fuzz target,
+  `ws_binary`, joins the existing ones and runs in CI.
+- *State.* A binary frame is accepted only after `auth`. Before it, the connection closes, as for any unexpected
+  frame.
+- *Identity.* As today, `from` and `account` come from the authenticated connection, never from the frame.
+- *Recipients and limits.* The same rules as the JSON `relay` frame: duplicates and the sender's own device are
+  dropped, and the frame limit (3 000 per minute) and the byte budgets are charged all or nothing, before anything is
+  forwarded. The payload's bytes are counted where the text was counted before.
+- *What the server learns.* It sees the same as today, since it could already decode `f`, `i` and `n` (T20). The
+  AAD (`f:i:n`) and the file key are unchanged, so a chunk is authenticated exactly as now (§9).
+- *Receiver.* The checks of `onRelay` are unchanged: chunks only from own devices and contacts, `i < n ≤ MAX_PARTS`,
+  ciphertext no longer than one chunk plus the tag, decrypted on arrival, the whole file hashed. Only the decoding
+  in front of them changes.
+- *No compression* (`permessage-deflate`): ciphertext does not compress, and it would only add CPU and parser
+  surface.
+- *At rest.* Parts stay encrypted in IndexedDB with the local key (§8.1). Removing that re-encryption is not part of
+  this change.
+
+**Performance.**
+- Server: `Push` gains a `Binary(Bytes)` variant. A chunk to several devices then shares one reference-counted
+  buffer instead of a copy of an 87 KB `String` for each device, and the per-character check of `data` goes away.
+- File queue: `relay_queue` stores chunks as `BLOB` with a format column. Chunks queued as text by older clients are
+  delivered as text, unchanged.
+- Receiver: write parts to IndexedDB in batches (for example 16 per transaction, or every 100 ms), as the sender
+  already does with `PART_BATCH`. Hashing stays in order. Acknowledgements are unchanged: queued chunks are still
+  acknowledged when the file is complete. A `QuotaExceededError` drops the whole batch together with the transfer,
+  as it drops one part today.
+- Sender: read and encrypt the next chunk while the current one is sent (one ahead), and wait in `drain()` for the
+  socket's buffer to empty instead of checking it every 20 ms where that is possible.
+
+**Mixed versions (§12).**
+- The server announces `relay.binary: 1` in `ready`. A client sends binary frames only to such a server, and falls
+  back to text otherwise.
+- A connection opts in to receiving binary frames with `caps: ["bin"]` in `auth`. To a connection that did not, the
+  server delivers nothing and lists the device in `relay-missed`. The file is then offered again later (§9, step 3),
+  which reaches the device once it is updated, and older pages last only until the next reload.
+  The server never converts a binary chunk to text: that would make it build the client's payload format.
+
+**Decide first.**
+1. *The budget.* Should it stay 96 MiB per minute in bytes of payload (1.78× more file per minute; T31 then allows
+   1.78× more data into a device), or be lowered so that the data a device can be sent stays the same? And should a
+   transfer the recipient asked for (`file-req` for an `ask` file, §9) be allowed a larger budget? It cannot be
+   flooding, because the recipient asked for it, but the server cannot see `file-req` either. It would have to be a
+   budget the receiving device grants, such as a short-lived token the recipient's device gives the server, with its
+   own limits.
+2. *A larger chunk size* (for example 256 KiB), for fewer frames, transactions and round trips. Older clients reject
+   a chunk larger than 48 KiB, so it would need a `chunk` field in the `file` message and a §12 row. Better as a
+   separate step after this one.
+3. *Whether `MURMO_LIMIT_SCALE` is enough for now.* It raises the relay budgets today without code, but also every
+   other limit, so a separate `MURMO_RELAY_SCALE` may be wanted.
+
+**Order of work.**
+1. Fix `queuedBytes()` to count the real overhead, which is safe today. Use the browser's native
+   `Uint8Array.prototype.toBase64` / `fromBase64` where it exists, keeping the JS version as a fallback.
+2. Server: parse binary frames (types and tests), add the fuzz target, add `Push::Binary`, charge the same limits,
+   and announce `relay.binary`. Also take `caps` in `auth`, and change the `relay_queue` migration (`BLOB` and a
+   format column).
+3. Client: `binaryType`, the frame codec in `protocol.js` with its own tests, `streamFile` and `onRelay` on binary
+   frames with text as the fallback, and pace by payload bytes.
+4. Receiver batching and sending one chunk ahead.
+5. Tests: Rust tests for the parser and the limits, protocol tests in Node, and an e2e test with a binary and a text
+   client in the same conversation (the binary one listed in `relay-missed` to the text one), plus a large-file
+   timing test.
+6. Update §9, §10 (frames and limits), §12 (a row for binary chunks), THREAT_MODEL T20/T31, and PLAN.md.
