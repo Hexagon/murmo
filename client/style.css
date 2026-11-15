@@ -271,7 +271,7 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
   display: flex; align-items: center;
 }
 .msg .frame:has(> img.inline) > .meta svg { display: block; }
-.msg .frame:has(> img.inline) > .meta :is(.delivery, .delivery.ok, .react-btn, .undo-btn, .save-gif-inline, .save-gif-inline.saved, .edited) { color: #fff; }
+.msg .frame:has(> img.inline) > .meta :is(.delivery, .delivery.ok, .react-btn, .undo-btn, .save-gif-inline, .save-gif-inline.saved, .edited, .fuse-wrap) { color: #fff; }
 .msg .frame:not(:has(> img.inline)) > .meta { margin-top: 3px; text-align: right; }
 .msg.in .frame:not(:has(> img.inline)) > .meta { text-align: left; }
 /* a tiny picture gets a frame big enough to tap, and sits in it at its own size; a long thin one keeps its shape */
@@ -325,7 +325,7 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .msg .meta .fuse-wrap { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; vertical-align: -2px; line-height: 1; color: var(--accent); font-variant-numeric: tabular-nums; }
 .msg .meta .fuse-wrap.waiting { color: var(--faint); }
 .msg .meta .fuse-wrap svg { flex: none; }
-.msg.ephemeral { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+.msg.ephemeral:not(.media) { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
 /* The last 3 s (DISSOLVE in app.js): fade and blur away, then the row folds so the thread closes up. */
 .msg.dissolve { overflow: hidden; animation: dissolve 3s ease-in forwards; pointer-events: none; }
 @keyframes dissolve {

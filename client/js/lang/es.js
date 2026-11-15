@@ -42,7 +42,8 @@ export default {
   "err.no_message": "El mensaje ya no existe.",
   "err.too_late": "El mensaje ya no se puede editar ni eliminar para todos (se puede durante 24 horas). Puedes eliminarlo para ti.",
   "err.unknown": "Algo salió mal ({code}).",
-  "err.ephemeral_files": "Los archivos y GIF todavía no se pueden enviar como mensajes temporales. Desactiva primero el temporizador.",
+  "err.ephemeral_files": "Con el temporizador activado solo se pueden enviar imágenes (PNG, JPEG, GIF, WebP). Desactiva el temporizador para enviar otros archivos.",
+  "err.ephemeral_gifs": "Los GIF de tu colección no se pueden enviar con el temporizador activado. Desactívalo primero.",
   "err.bad_ttl": "Tiempo no válido para un mensaje temporal.",
   "err.empty_text": "El mensaje no puede estar vacío. Elimínalo en su lugar.",
 
@@ -302,6 +303,7 @@ export default {
   "compose.yourGifs": "Tus GIF",
   "compose.attach": "Adjuntar archivo",
   "compose.sendFile": "Enviar archivo",
+  "compose.sendPicture": "Enviar imagen temporal",
   "compose.foot": "Cifrado de dispositivo a dispositivo. El servidor no guarda nada tras la entrega.",
 
   // ── emoji ──

@@ -459,14 +459,23 @@ fn relay(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
             .with("data", data)
             .into(),
     );
-    // `store`: keep the chunk for devices that are not connected (ciphertext, like the mailbox).
+    // `store`: keep the chunk for devices that are not connected (ciphertext, like the mailbox), for `ttl` seconds
+    // when given (disappearing pictures), never longer than the mailbox keeps a message.
     let store = m.get("store").and_then(Value::as_bool) == Some(true) && app.cfg.file_queue > 0;
+    let ttl = match m.get("ttl") {
+        None => MAILBOX_TTL,
+        Some(v) => v
+            .as_int()
+            .filter(|t| *t > 0)
+            .ok_or(ApiError::new(400, "bad_field"))?,
+    };
+    let expires = now() + ttl.clamp(1, MAILBOX_TTL);
     let mut missed: Vec<Value> = Vec::new();
     for d in to {
         let d = d.as_str().ok_or(ApiError::new(400, "bad_field"))?;
         let delivered = d != me.device
             && (app.hub.to_device(d, Push::Text(push.clone()))
-                || (store && queue_chunk(app, me, d, data)?));
+                || (store && queue_chunk(app, me, d, data, expires)?));
         if !delivered {
             missed.push(d.into());
         }
@@ -485,14 +494,20 @@ fn relay(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
     Ok(Some(frame(f)))
 }
 
-fn queue_chunk(app: &App, me: &Authed, device: &str, data: &str) -> Result<bool, ApiError> {
+fn queue_chunk(
+    app: &App,
+    me: &Authed,
+    device: &str,
+    data: &str,
+    expires: i64,
+) -> Result<bool, ApiError> {
     app.db
         .relay_enqueue(
             device,
             &me.device,
             &me.account,
             data,
-            now() + MAILBOX_TTL,
+            expires,
             &app.cfg.queue_limits(),
         )
         .map_err(ApiError::internal)
@@ -645,6 +660,11 @@ mod tests {
     use crate::app::Config;
 
     fn app() -> Arc<App> {
+        app_with_queue(0)
+    }
+
+    /// A test server whose file queue keeps up to `bytes` per device (and per sender, account and in all).
+    fn app_with_queue(bytes: i64) -> Arc<App> {
         let cfg = Config {
             origin: "http://127.0.0.1:8080".into(),
             old_origins: Vec::new(),
@@ -658,10 +678,10 @@ mod tests {
             any_home: false,
             trust_proxy: Vec::new(),
             limit_scale: 1,
-            file_queue: 0,
-            file_queue_total: 0,
-            file_queue_sender: 0,
-            file_queue_account: 0,
+            file_queue: bytes,
+            file_queue_total: bytes,
+            file_queue_sender: bytes,
+            file_queue_account: bytes,
             push_hosts: Vec::new(),
             giphy_key: String::new(),
             giphy_rating: "pg-13".into(),
@@ -853,6 +873,77 @@ mod tests {
                 Some("bad_field"),
                 "ttl should be rejected"
             );
+        }
+    }
+
+    /// A queued `relay` to the unconnected device b1, with `ttl` as the given JSON value (or absent).
+    fn relay_queued(app: &Arc<App>, me: &Authed, ttl: Option<Value>) -> Option<Map> {
+        let mut f = Map::new()
+            .with("t", "relay")
+            .with("to", Value::Array(vec![Value::from("b1")]))
+            .with("data", "abc")
+            .with("store", Value::Bool(true));
+        if let Some(ttl) = ttl {
+            f.insert("ttl", ttl);
+        }
+        match handle(app, me, &f) {
+            Some(Message::Text(t)) => match parse_limited(t.as_bytes(), MAX_FRAME) {
+                Ok(Value::Object(m)) => Some(m),
+                _ => panic!("not an object"),
+            },
+            None => None,
+            _ => panic!("unexpected reply"),
+        }
+    }
+
+    fn newest_chunk_expires(app: &Arc<App>) -> i64 {
+        app.db
+            .conn()
+            .expect("conn")
+            .query_row(
+                "SELECT expires FROM relay_queue ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("expires")
+    }
+
+    fn queue_sender() -> (Arc<App>, Authed) {
+        let app = app_with_queue(1 << 20);
+        app.db
+            .put_prekey("B", "b1", &Value::from("p"))
+            .expect("prekey");
+        (app, me("A", "a1"))
+    }
+
+    #[test]
+    fn relay_ttl_shortens_queued_chunk_lifetime() {
+        let (app, a) = queue_sender();
+        for (ttl, want) in [
+            (Some(Value::from(60i64)), 60),
+            (None, MAILBOX_TTL),
+            (Some(Value::from(MAILBOX_TTL * 10)), MAILBOX_TTL),
+        ] {
+            let before = now();
+            assert!(
+                relay_queued(&app, &a, ttl).is_none(),
+                "queued, nothing missed"
+            );
+            let after = now();
+            let expires = newest_chunk_expires(&app);
+            assert!(
+                (before + want..=after + want).contains(&expires),
+                "expires {expires}, want about now + {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn relay_bad_ttl_is_rejected() {
+        let (app, a) = queue_sender();
+        for bad in [Value::from("soon"), 0i64.into(), (-5i64).into()] {
+            let r = relay_queued(&app, &a, Some(bad)).expect("an error");
+            assert_eq!(r.get("error").and_then(Value::as_str), Some("bad_field"));
         }
     }
 }

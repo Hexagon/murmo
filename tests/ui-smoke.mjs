@@ -206,6 +206,23 @@ try {
   await b.screenshot({ path: `${shots}/b-6f-dissolve.png` });
   await b.waitForFunction(() => !document.querySelector(".msg.ephemeral"), { timeout: 10000 });
   await a.waitForFunction(() => !document.querySelector(".msg.ephemeral"), { timeout: 20000 });
+  // With the timer on, a picture goes as a disappearing picture (no "Spara" anywhere); another file is refused.
+  const [eph] = await Promise.all([a.waitForFileChooser(), a.click(".composer .icon-btn[aria-label='Bifoga fil']")]);
+  await eph.accept([new URL("../client/icon.svg", import.meta.url).pathname]);
+  await a.waitForFunction(() => [...document.querySelectorAll(".toast")].some((t) => /bara bilder/.test(t.textContent)), { timeout: 5000 });
+  const [eph2] = await Promise.all([a.waitForFileChooser(), a.click(".composer .icon-btn[aria-label='Bifoga fil']")]);
+  await eph2.accept([`${shots}/sample.png`]);
+  await b.waitForSelector(".msg.ephemeral.in.media img.inline[src]", { timeout: 20000 });
+  await b.waitForSelector(".msg.ephemeral.in .fuse[data-end]", { timeout: 20000 });
+  await a.waitForSelector(".msg.ephemeral.out.media .fuse[data-end]", { timeout: 20000 });
+  if (await b.$(".msg.ephemeral :is(.save-gif-inline, .filecard button)")) throw new Error("a disappearing picture can be saved");
+  await b.screenshot({ path: `${shots}/b-6g-ephemeral-picture.png` });
+  await b.click(".msg.ephemeral.in img.inline");
+  await b.waitForSelector("dialog.viewer[data-f]", { timeout: 5000 });
+  if (await b.$("dialog.viewer .save-gif")) throw new Error("the viewer offers to save a disappearing picture");
+  // When the time is up the viewer closes, and the picture is gone on both sides.
+  await b.waitForFunction(() => !document.querySelector("dialog.viewer") && !document.querySelector(".msg.ephemeral"), { timeout: 25000 });
+  await a.waitForFunction(() => !document.querySelector(".msg.ephemeral"), { timeout: 20000 });
   await a.click(".composer .timer-btn");
   await clickText(a, "Av", ".timer-menu button");
   await a.waitForFunction(() => !document.querySelector(".composer.ephemeral"), { timeout: 5000 });

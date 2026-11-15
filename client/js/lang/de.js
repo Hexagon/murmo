@@ -42,7 +42,8 @@ export default {
   "err.no_message": "Die Nachricht gibt es nicht mehr.",
   "err.too_late": "Die Nachricht kann nicht mehr für alle geändert oder gelöscht werden (das geht 24 Stunden lang). Du kannst sie für dich löschen.",
   "err.unknown": "Etwas ist schiefgegangen ({code}).",
-  "err.ephemeral_files": "Dateien und GIFs können noch nicht als verschwindende Nachrichten gesendet werden. Schalte zuerst den Timer aus.",
+  "err.ephemeral_files": "Mit eingeschaltetem Timer können nur Bilder gesendet werden (PNG, JPEG, GIF, WebP). Schalte den Timer aus, um andere Dateien zu senden.",
+  "err.ephemeral_gifs": "GIFs aus deiner Sammlung können nicht mit eingeschaltetem Timer gesendet werden. Schalte zuerst den Timer aus.",
   "err.bad_ttl": "Ungültige Zeit für eine verschwindende Nachricht.",
   "err.empty_text": "Die Nachricht darf nicht leer sein. Lösche sie stattdessen.",
 
@@ -302,6 +303,7 @@ export default {
   "compose.yourGifs": "Deine GIFs",
   "compose.attach": "Datei anhängen",
   "compose.sendFile": "Datei senden",
+  "compose.sendPicture": "Verschwindendes Bild senden",
   "compose.foot": "Von Gerät zu Gerät verschlüsselt. Der Server speichert nach der Zustellung nichts.",
 
   // ── emoji ──

@@ -283,9 +283,10 @@ export class Socket extends EventTarget {
   }
 
   /** `store`: the server keeps the chunk for devices that are not connected. Misses come as "relay-missed". */
-  relay(to, data, { store = false, ref } = {}) {
+  relay(to, data, { store = false, ref, ttl = 0 } = {}) {
     const frame = { t: "relay", to, data };
     if (store) frame.store = true;
+    if (store && ttl > 0) frame.ttl = ttl; // queued chunks kept no longer (disappearing pictures)
     if (ref) frame.ref = ref;
     this.send(frame);
     const now = Date.now();
