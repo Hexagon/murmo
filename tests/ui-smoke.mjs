@@ -92,6 +92,16 @@ try {
   await b.screenshot({ path: `${shots}/b-6b-viewer.png` });
   await b.click("dialog.viewer .close");
   await b.waitForFunction(() => !document.querySelector("dialog.viewer"), { timeout: 5000 });
+  // A PNG whose header claims 50000 × 50000 pixels is not decoded: it becomes a card with "Spara".
+  const bomb = Buffer.alloc(64);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]).copy(bomb);
+  bomb.writeUInt32BE(50000, 16);
+  bomb.writeUInt32BE(50000, 20);
+  fs.writeFileSync(`${shots}/bomb.png`, bomb);
+  const [ch3] = await Promise.all([a.waitForFileChooser(), a.click(".composer .icon-btn")]);
+  await ch3.accept([`${shots}/bomb.png`]);
+  await b.waitForFunction(() => [...document.querySelectorAll(".msg .filecard .fs")].some((e) => /50000 × 50000/.test(e.textContent)), { timeout: 20000 });
+  if ((await b.$$(".msg img.inline")).length !== 1) throw new Error("the oversized image was shown inline");
   await a.screenshot({ path: `${shots}/a-6-chat.png` });
   await b.screenshot({ path: `${shots}/b-6-chat.png` });
   await clickText(b, "Säkerhetskod");

@@ -395,3 +395,163 @@ export function safeMime(mime) {
 export function inlineImage(mime, size) {
   return IMAGE_TYPES.includes(mime) && size <= 25 * 1024 * 1024;
 }
+
+/** Inline images larger than this many pixels are offered only for saving (a small file can decode to gigabytes). */
+export const MAX_PIXELS = 40_000_000;
+
+/**
+ * Width and height from the header of a PNG, GIF, JPEG or WebP, without decoding it; `null` when they cannot be
+ * found in `head` (the first bytes of the file). For a GIF, the largest frame within the first bytes counts too.
+ */
+export function imageSize(head) {
+  const b = head;
+  const be16 = (o) => (b[o] << 8) | b[o + 1];
+  const le16 = (o) => b[o] | (b[o + 1] << 8);
+  const le24 = (o) => b[o] | (b[o + 1] << 8) | (b[o + 2] << 16);
+  const be32 = (o) => ((b[o] << 24) >>> 0) + ((b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]);
+  const ascii = (o, s) => [...s].every((ch, j) => b[o + j] === ch.charCodeAt(0));
+  if (b.length >= 24 && ascii(0, "\x89PNG\r\n\x1a\n") && ascii(12, "IHDR")) return { width: be32(16), height: be32(20) };
+  if (b.length >= 10 && (ascii(0, "GIF87a") || ascii(0, "GIF89a"))) {
+    let width = le16(6);
+    let height = le16(8);
+    // Frames may claim more than the logical screen; look at the descriptors that are in `head`.
+    let o = 13 + (b[10] & 0x80 ? 3 << ((b[10] & 7) + 1) : 0);
+    const skip = (o) => {
+      while (o < b.length && b[o]) o += b[o] + 1;
+      return o + 1;
+    };
+    while (o < b.length) {
+      if (b[o] === 0x21) o = skip(o + 2);
+      else if (b[o] === 0x2c && o + 10 <= b.length) {
+        width = Math.max(width, le16(o + 1) + le16(o + 5));
+        height = Math.max(height, le16(o + 3) + le16(o + 7));
+        o += 10 + (b[o + 9] & 0x80 ? 3 << ((b[o + 9] & 7) + 1) : 0);
+        o = skip(o + 1);
+      } else break;
+    }
+    return { width, height };
+  }
+  if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8) {
+    let o = 2;
+    while (o + 4 <= b.length) {
+      if (b[o] !== 0xff) return null;
+      const m = b[o + 1];
+      if (m === 0xff) {
+        o++;
+        continue;
+      }
+      if (m === 0xd8 || m === 0x01 || (m >= 0xd0 && m <= 0xd7)) {
+        o += 2;
+        continue;
+      }
+      if (m === 0xd9 || m === 0xda) return null; // end of image or scan before any frame header
+      const len = be16(o + 2);
+      const sof = m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc;
+      if (sof) return o + 9 <= b.length ? { width: be16(o + 7), height: be16(o + 5) } : null;
+      if (len < 2) return null;
+      o += 2 + len;
+    }
+    return null;
+  }
+  if (b.length >= 30 && ascii(0, "RIFF") && ascii(8, "WEBP")) {
+    if (ascii(12, "VP8X")) return { width: le24(24) + 1, height: le24(27) + 1 };
+    if (ascii(12, "VP8L") && b[20] === 0x2f) {
+      const bits = b[21] | (b[22] << 8) | (b[23] << 16) | (b[24] << 24);
+      return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 };
+    }
+    if (ascii(12, "VP8 ") && b[23] === 0x9d && b[24] === 0x01 && b[25] === 0x2a) {
+      return { width: le16(26) & 0x3fff, height: le16(28) & 0x3fff };
+    }
+  }
+  return null;
+}
+
+/** Whether an image of this size may be decoded for showing inline. */
+export function imageFits(size) {
+  return !!size && size.width > 0 && size.height > 0 && size.width * size.height <= MAX_PIXELS;
+}
+
+const K256 = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
+  0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+  0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+  0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08,
+  0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+/**
+ * Incremental SHA-256 (WebCrypto hashes only whole buffers): files are hashed chunk by chunk as they are read or
+ * arrive, so they never have to be in memory at once.
+ */
+export class Sha256 {
+  constructor() {
+    this.h = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
+    this.w = new Uint32Array(64);
+    this.buf = new Uint8Array(64);
+    this.fill = 0;
+    this.length = 0;
+  }
+
+  block(b, o) {
+    const w = this.w;
+    for (let i = 0; i < 16; i++) w[i] = (b[o + 4 * i] << 24) | (b[o + 4 * i + 1] << 16) | (b[o + 4 * i + 2] << 8) | b[o + 4 * i + 3];
+    for (let i = 16; i < 64; i++) {
+      const x = w[i - 15];
+      const y = w[i - 2];
+      const s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+      const s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+    }
+    const h = this.h;
+    let [a, bb, c, d, e, f, g, hh] = h;
+    for (let i = 0; i < 64; i++) {
+      const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      const t1 = (hh + S1 + ((e & f) ^ (~e & g)) + K256[i] + w[i]) | 0;
+      const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      const t2 = (S0 + ((a & bb) ^ (a & c) ^ (bb & c))) | 0;
+      hh = g;
+      g = f;
+      f = e;
+      e = (d + t1) | 0;
+      d = c;
+      c = bb;
+      bb = a;
+      a = (t1 + t2) | 0;
+    }
+    h[0] += a; h[1] += bb; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh; // prettier-ignore
+  }
+
+  update(bytes) {
+    let o = 0;
+    this.length += bytes.length;
+    if (this.fill) {
+      const n = Math.min(64 - this.fill, bytes.length);
+      this.buf.set(bytes.subarray(0, n), this.fill);
+      this.fill += n;
+      o = n;
+      if (this.fill < 64) return this;
+      this.block(this.buf, 0);
+      this.fill = 0;
+    }
+    for (; o + 64 <= bytes.length; o += 64) this.block(bytes, o);
+    this.buf.set(bytes.subarray(o), 0);
+    this.fill = bytes.length - o;
+    return this;
+  }
+
+  digest() {
+    const bits = this.length * 8;
+    const pad = new Uint8Array(((this.fill < 56 ? 56 : 120) - this.fill) + 8);
+    pad[0] = 0x80;
+    const dv = new DataView(pad.buffer);
+    dv.setUint32(pad.length - 8, Math.floor(bits / 2 ** 32));
+    dv.setUint32(pad.length - 4, bits >>> 0);
+    this.update(pad);
+    const out = new Uint8Array(32);
+    const v = new DataView(out.buffer);
+    for (let i = 0; i < 8; i++) v.setUint32(4 * i, this.h[i]);
+    return out;
+  }
+}
