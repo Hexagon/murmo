@@ -366,6 +366,8 @@ export default {
   "msg.queued": "Köat på servern – inte levererat än",
   "msg.tooBig": "{w} × {h} bildpunkter, för stor för att visas",
   "msg.cannotShow": "kan inte visas här",
+  "msg.play": "Spela upp",
+  "msg.cannotPlay": "kan inte spelas upp här",
   "msg.fetchOwn": "Hämta från mina enheter",
   "msg.fetchOwnTitle": "Filen har inte kommit till den här enheten. Den här frågar dina andra anslutna enheter.",
   "msg.asking": "Frågar dina anslutna enheter…",

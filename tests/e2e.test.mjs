@@ -18,6 +18,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Api, ApiError } from "../client/js/api.js";
 import * as id from "../client/js/identity.js";
 import { EPHEMERAL_TTLS, EPHEMERAL_WAIT, Messenger, Store, setupDevice } from "../client/js/core.js";
+import { PART_BATCH } from "../client/js/store.js";
 import * as p from "../client/js/protocol.js";
 
 const PORT = 18000 + Math.floor(Math.random() * 1000);
@@ -578,6 +579,23 @@ test("chunks are stored as they come: before the file message, out of order, wit
   const read = await bob.store.fileReader("old-file");
   assert.equal(read.n, 2);
   assert.deepEqual(await read(1), old.subarray(p.CHUNK));
+
+  // Parts are written and read in blocks of PART_BATCH: a file over several blocks comes back whole, and a part
+  // that is missing reads as missing without moving the parts after it.
+  const many = noise(2 * PART_BATCH * p.CHUNK + 5000);
+  await bob.store.putFile("many-parts", many);
+  assert.deepEqual(await bob.store.file("many-parts"), many);
+  const pk = `${await bob.store.tag("file", "many-parts")}:${String(PART_BATCH + 3).padStart(4, "0")}`;
+  const del = bob.store.db.transaction("parts", "readwrite");
+  del.objectStore("parts").delete(pk);
+  await new Promise((r) => (del.oncomplete = r));
+  const r2 = await bob.store.fileReader("many-parts");
+  assert.equal(r2.n, 2 * PART_BATCH + 1);
+  assert.equal(await r2(PART_BATCH + 3), undefined);
+  assert.deepEqual(await r2(PART_BATCH + 4), many.subarray((PART_BATCH + 4) * p.CHUNK, (PART_BATCH + 5) * p.CHUNK));
+  assert.deepEqual(await r2(2 * PART_BATCH), many.subarray(2 * PART_BATCH * p.CHUNK));
+  assert.equal(await r2(2 * PART_BATCH + 1), undefined);
+  assert.equal(await bob.store.file("many-parts"), undefined);
 });
 
 test("a message to a device that is away wakes it with an empty push", async () => {
