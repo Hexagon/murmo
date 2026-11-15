@@ -97,6 +97,7 @@ const ICONS = {
   smile: "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 0 0 0-17zM8.5 14a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01",
   clock: "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 0 0 0-17zM12 7.5V12l3 2",
   undo: "M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
+  bellOff: "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0M3 3l18 18",
   timer: "M12 6a7.5 7.5 0 1 0 0 15a7.5 7.5 0 0 0 0-15zM12 9.5v4l2.5 1.5M10 2.5h4M18.5 6.5l1.5-1.5",
 };
 
@@ -845,6 +846,7 @@ function wake() {
   if (document.visibilityState !== "visible") return;
   messenger?.wake();
   notify.clear().catch(() => {});
+  updateBell();
   checkVersion();
 }
 document.addEventListener("visibilitychange", wake);
@@ -884,8 +886,8 @@ function askNotifications() {
   if (!due()) return;
   document.addEventListener(
     "click",
-    async () => {
-      if (!due()) return;
+    async (e) => {
+      if (!due() || ui.bell?.contains(e.target)) return; // the bell asks itself
       setSetting("notifyPrompted", true);
       const text = await setNotifications(true).catch(() => null);
       if (text && notify.permission() === "granted") toast(text);
@@ -921,8 +923,43 @@ async function checkVersion() {
 }
 setInterval(checkVersion, 15 * 60_000);
 
+/**
+ * Why this device cannot show notifications although the setting is on (null: it can, or the user turned them off).
+ * The header shows a struck-through bell for it.
+ */
+function notifyProblem() {
+  if (!messenger || !settings().notify) return null;
+  const s = notify.support();
+  if (s === "ios-install") return tr("notify.ios");
+  if (s !== "ok") return tr("notify.unsupported");
+  const p = notify.permission();
+  if (p === "granted") return null;
+  return tr(p === "denied" ? "notify.blocked" : "notify.askHint");
+}
+
+function updateBell() {
+  if (!ui.bell) return;
+  const problem = notifyProblem();
+  ui.bell.hidden = !problem;
+  if (!problem) return;
+  const text = `${tr("notify.cannot")} ${problem}`;
+  ui.bell.title = text;
+  ui.bell.setAttribute("aria-label", text);
+}
+
+// The permission can change in the browser's settings while the page is open.
+navigator.permissions?.query({ name: "notifications" }).then((s) => s.addEventListener("change", updateBell)).catch(() => {});
+
 /** Turn notifications on (from a click) or off. Returns a text for the user. */
 async function setNotifications(on) {
+  try {
+    return await switchNotifications(on);
+  } finally {
+    updateBell();
+  }
+}
+
+async function switchNotifications(on) {
   if (!on) {
     setSetting("notify", false);
     await notify.unsubscribe().catch(() => {});
@@ -953,6 +990,7 @@ function renderShell() {
   ui.sideList = h("nav", { class: "side-list", "aria-label": tr("side.conversations") });
   ui.foot = h("div", { class: "side-foot" });
   ui.main = h("main", { class: "main" });
+  ui.bell = h("button", { class: "icon-btn bell-off", hidden: true, onclick: async () => toast(await setNotifications(true).catch((x) => say(x))) }, icon("bellOff"));
   ui.shell = h(
     "div",
     { class: "shell" },
@@ -963,7 +1001,12 @@ function renderShell() {
         "div",
         { class: "side-top" },
         h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo"),
-        h("button", { class: "icon-btn", "aria-label": tr("side.newConversation"), title: tr("side.newConversation"), onclick: () => openConversation(null, true) }, icon("plus")),
+        h(
+          "div",
+          { class: "side-actions" },
+          ui.bell,
+          h("button", { class: "icon-btn", "aria-label": tr("side.newConversation"), title: tr("side.newConversation"), onclick: () => openConversation(null, true) }, icon("plus")),
+        ),
       ),
       ui.sideList,
       ui.foot,
@@ -978,6 +1021,7 @@ function renderShell() {
 
 function renderSidebar() {
   if (!ui.sideList || !messenger) return;
+  updateBell();
   const all = messenger.contactList().sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
   const incoming = all.filter((c) => c.state === "incoming");
   const convs = all.filter((c) => c.state === "accepted" || c.state === "outgoing");

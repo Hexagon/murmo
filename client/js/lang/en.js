@@ -226,6 +226,8 @@ export default {
   "notify.noPush": "Notifications are on while Murmo is open in the background. This browser or the server does not support push, so a closed app is not woken.",
   "notify.on": "Notifications are on, even when Murmo is closed.",
   "notify.pushFailed": "Notifications are on while Murmo is open in the background. Push could not be turned on right now, so a closed app is not woken.",
+  "notify.cannot": "Murmo cannot send notifications.",
+  "notify.askHint": "Click to allow them.",
 
   // ── sidebar ──
   "side.conversations": "Conversations",

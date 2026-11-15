@@ -226,6 +226,8 @@ export default {
   "notify.noPush": "Notiser är på medan Murmo är öppet i bakgrunden. Den här webbläsaren eller servern stöder inte push, så en stängd app väcks inte.",
   "notify.on": "Notiser är på, även när Murmo är stängt.",
   "notify.pushFailed": "Notiser är på medan Murmo är öppet i bakgrunden. Push gick inte att slå på just nu, så en stängd app väcks inte.",
+  "notify.cannot": "Murmo kan inte skicka notiser.",
+  "notify.askHint": "Klicka för att tillåta dem.",
 
   // ── sidebar ──
   "side.conversations": "Konversationer",

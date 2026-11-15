@@ -320,7 +320,10 @@ try {
   await b.goBack();
   await b.waitForFunction(() => getComputedStyle(document.querySelector(".sidebar")).display !== "none" && getComputedStyle(document.querySelector(".main")).display === "none", { timeout: 5000 });
   await b.screenshot({ path: `${shots}/b-9-mobile-list.png` });
-  await b.click(".side-top .icon-btn");
+  // Headless Chrome has not been allowed to notify: the header shows a struck-through bell that says so.
+  const bell = await b.$eval(".side-top .bell-off", (e) => ({ shown: !e.hidden && e.offsetWidth > 0, title: e.title }));
+  if (!bell.shown || !bell.title.startsWith("Murmo kan inte skicka notiser.")) throw new Error(`no notification warning: ${JSON.stringify(bell)}`);
+  await b.click(".side-top .icon-btn:not(.bell-off)");
   await b.waitForSelector("#new-handle", { visible: true, timeout: 5000 });
   await b.screenshot({ path: `${shots}/b-10-mobile-new.png` });
   await clickText(b, "Säkerhet och integritet i detalj");
