@@ -3,3 +3,4 @@ target/
 *.sqlite
 *.sqlite-*
 mesg-host.key
+/deploy.sh
