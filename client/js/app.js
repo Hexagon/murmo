@@ -28,11 +28,12 @@ const imgNodes = new Map();
 const imgSizes = new Map();
 /** Outgoing files on their way: message id → share sent (0…1). */
 const sending = new Map();
-// Texts waiting for "Ångra" (holdForUndo): each entry sends its text now. When the page is hidden (another app on a
-// phone, a closed tab) they are sent at once rather than lost.
-const held = new Set();
+// Texts waiting for "Ångra" (DESIGN.md §6.6), by the message id they will be sent with: `{ m, fire, undo }`. They
+// are shown in the thread like sent messages. When the page is hidden (another app on a phone, a closed tab) they
+// are sent at once rather than lost.
+const heldMsgs = new Map();
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") for (const send of [...held]) send();
+  if (document.visibilityState === "hidden") for (const e of [...heldMsgs.values()]) e.fire();
 });
 
 // ── tiny DOM helpers ────────────────────────────────────────────────────────────────────────────────────────────
@@ -93,6 +94,7 @@ const ICONS = {
   close: "M6 6l12 12M18 6L6 18",
   smile: "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 0 0 0-17zM8.5 14a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01",
   clock: "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 0 0 0-17zM12 7.5V12l3 2",
+  undo: "M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
 };
 
 function icon(name) {
@@ -150,7 +152,8 @@ const MESSAGES = {
   giphy_failed: "Det gick inte att nå GIPHY.",
   bad_reaction: "Det går bara att reagera med en emoji.",
   no_message: "Meddelandet finns inte längre.",
-  too_late: "Meddelandet kan inte längre tas bort för alla (det går i 24 timmar). Du kan ta bort det för dig.",
+  too_late: "Meddelandet kan inte längre ändras eller tas bort för alla (det går i 24 timmar). Du kan ta bort det för dig.",
+  empty_text: "Meddelandet kan inte vara tomt. Ta bort det i stället.",
 };
 
 function say(err) {
@@ -339,7 +342,8 @@ const HELP = [
     "Den som känner till din identifierare kan se när dina enheter är anslutna (det behövs för att skicka filer direkt).",
   ]],
   ["Ångra och ta bort", [
-    "Med ”Ångra skickat” (på från början) väntar ett meddelande några sekunder innan det skickas. Ångrar du dig under tiden har ingen fått det – det är det enda sättet att vara helt säker.",
+    "Med ”Ångra skickat” (på från början) väntar ett meddelande några sekunder innan det skickas, med en ångra-knapp under. Ångrar du dig under tiden har ingen fått det – det är det enda sättet att vara helt säker.",
+    "Ett skickat meddelande kan redigeras i 24 timmar och märks då ”redigerat” hos er båda. Bara den senaste texten sparas. Den som redan läst meddelandet har sett den tidigare texten, och en äldre version av Murmo visar den fortfarande.",
     "”Ta bort för alla” går i 24 timmar och byter ut meddelandet mot en notering om att det togs bort, hos dig och mottagaren. Det kan inte nå det mottagaren redan sett eller sparat, och en enhet med en äldre eller ändrad version av Murmo kan behålla det. Bara den som skrev ett meddelande kan ta bort det för alla, och noteringen finns alltid kvar.",
     "”Ta bort för mig” tar bort meddelandet på alla dina enheter. Den andra parten behåller sitt exemplar och får inte veta något.",
   ]],
@@ -1269,9 +1273,9 @@ function composer(c) {
     ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`;
     send.disabled = !ta.value.trim();
   };
-  const sendNow = async (text) => {
+  const sendNow = async (text, id) => {
     try {
-      await messenger.sendText(c.account, text);
+      await messenger.sendText(c.account, text, id);
     } catch (x) {
       if (!ta.value.trim()) {
         ta.value = text;
@@ -1285,46 +1289,43 @@ function composer(c) {
     if (!text) return;
     ta.value = "";
     grow();
-    if (settings().undoSend) holdForUndo(text, sendNow, (back) => {
-      // Taken back before it was sent: nothing left this device. The text returns to an empty composer.
-      if (!ta.value.trim()) {
-        ta.value = back;
-        grow();
-        ta.focus();
-      } else toast("Meddelandet skickades inte.");
-    });
+    if (settings().undoSend) holdForUndo(text);
     else await sendNow(text);
+  };
+  // "Ångra": the text is shown in the thread like a sent message, with an undo button where the menu would be, and
+  // is encrypted and sent only after UNDO_SEND ms. It is sent under the id it is shown with, so the node stays.
+  const holdForUndo = (text) => {
+    const id = p.b64(p.random(16));
+    const e = {
+      m: { id, conv: c.account, dir: "out", time: p.now(), kind: "text", text, held: true },
+      fire: async () => {
+        if (e.m.firing) return;
+        clearTimeout(timer);
+        e.m = { ...e.m, firing: true }; // shown without the undo button from now on
+        renderThread();
+        await sendNow(text, id);
+        heldMsgs.delete(id);
+        renderThread();
+      },
+      undo: () => {
+        if (e.m.firing) return;
+        clearTimeout(timer);
+        heldMsgs.delete(id);
+        renderThread();
+        // Taken back before it was sent: nothing left this device. The text returns to an empty composer.
+        if (!ta.value.trim()) {
+          ta.value = text;
+          grow();
+          ta.focus();
+        } else toast("Meddelandet skickades inte.");
+      },
+    };
+    const timer = setTimeout(e.fire, UNDO_SEND);
+    heldMsgs.set(id, e);
+    renderThread();
   };
   // Files on their way, one row each above the composer: name, how far it has come, then how it went.
   const uploads = h("div", { class: "uploads", role: "status", "aria-live": "polite" });
-  // "Ångra": a text waits a few seconds above the composer before it is encrypted and sent (DESIGN.md §6.6).
-  const holdForUndo = (text, go, undo) => {
-    let left = Math.round(UNDO_SEND / 1000);
-    const state = h("span", { class: "state", text: `Skickas om ${left} s` });
-    const fire = () => {
-      clearInterval(tick);
-      held.delete(fire);
-      row.remove();
-      go(text);
-    };
-    const back = h("button", {
-      type: "button", class: "btn small", text: "Ångra",
-      onclick: () => {
-        clearInterval(tick);
-        held.delete(fire);
-        row.remove();
-        undo(text);
-      },
-    });
-    const row = h("div", { class: "upload held" }, h("span", { class: "mark", "aria-hidden": "true", text: "…" }), h("span", { class: "name", dir: "auto", text }), state, back);
-    const tick = setInterval(() => {
-      left -= 1;
-      if (left <= 0) fire();
-      else state.textContent = `Skickas om ${left} s`;
-    }, 1000);
-    held.add(fire);
-    uploads.append(row);
-  };
   const upload = async (name, run) => {
     const bar = h("progress", { max: 1, value: 0 });
     const state = h("span", { class: "state", text: "Förbereder…" });
@@ -1693,8 +1694,11 @@ async function renderThread() {
   if (!ui.thread || !current) return;
   const seq = ++renderSeq;
   const conv = current;
-  const msgs = await messenger.messages(conv);
+  const stored = await messenger.messages(conv);
   if (seq !== renderSeq || conv !== current) return;
+  // Texts waiting for "Ångra" come last, until the sent message (same id) is stored.
+  const ids = new Set(stored.map((m) => m.id));
+  const msgs = [...stored, ...[...heldMsgs.values()].map((e) => e.m).filter((m) => m.conv === conv && !ids.has(m.id))];
   const nearBottom = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 80;
   const out = [];
   const seen = new Set();
@@ -1724,7 +1728,7 @@ async function renderThread() {
 function messageSig(m) {
   const f = m.file;
   return JSON.stringify([
-    m.kind, m.text, m.time, m.dir, m.delivered, m.reactions ?? null,
+    m.kind, m.text, m.time, m.dir, m.delivered, m.reactions ?? null, m.edited ?? 0, m.held ? (m.firing ? 2 : 1) : 0,
     f ? [f.f, f.have, f.missed ?? null, f.peers ?? null, f.mime === "image/gif" && gifHashes.has(f.sha256)] : null,
     messenger.contacts.get(m.conv)?.state, sending.has(m.id),
   ]);
@@ -1742,9 +1746,9 @@ function showSending(id) {
   }
 }
 
-/** "Ta bort" under a message: for everyone (own, recent) or for me. */
+/** The menu under a message: edit (own text, recent), delete for everyone (own, recent) or for me. */
 function moreButton(m) {
-  const btn = h("button", { type: "button", class: "react-btn more-btn", "aria-label": "Ta bort meddelandet", title: "Ta bort…", "aria-haspopup": "dialog" }, icon("more"));
+  const btn = h("button", { type: "button", class: "react-btn more-btn", "aria-label": "Fler val för meddelandet", title: "Redigera eller ta bort…", "aria-haspopup": "dialog" }, icon("more"));
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
     messageMenu(m);
@@ -1752,8 +1756,44 @@ function moreButton(m) {
   return btn;
 }
 
+/** The undo button of a text waiting to be sent, where the menu of a sent message is. */
+function undoButton(m) {
+  return h("button", {
+    type: "button", class: "undo-btn", "aria-label": "Ångra – meddelandet har inte skickats än", title: "Ångra (skickas om några sekunder)",
+    onclick: (ev) => { ev.stopPropagation(); heldMsgs.get(m.id)?.undo(); },
+  }, icon("undo"));
+}
+
+/** Change the text of an own message for everyone. */
+function editDialog(m) {
+  const ta = h("textarea", { rows: 4, dir: "auto", maxlength: 8000, "aria-label": "Meddelandets text" });
+  ta.value = m.text ?? "";
+  const save = async () => {
+    const text = ta.value.trim();
+    if (!text) return toast(say({ code: "empty_text" }));
+    d.close();
+    try {
+      await messenger.edit(m.conv, m.id, text);
+    } catch (x) {
+      toast(say(x));
+    }
+  };
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
+  });
+  const d = dialog(
+    h("h2", { text: "Redigera meddelandet" }),
+    h("div", { class: "field" }, ta),
+    h("p", { class: "hint", text: `Den nya texten ersätter den gamla hos dig och ${personName(m.conv)}, märkt ”redigerat”. Har ${personName(m.conv)} redan läst meddelandet är den tidigare texten redan sedd, och en äldre version av Murmo visar den fortfarande.` }),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: "Avbryt", onclick: () => d.close() }), h("button", { class: "btn primary", text: "Spara", onclick: save })),
+  );
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+
 function messageMenu(m) {
   const forAll = m.kind !== "retracted" && messenger.canRetract(m);
+  const canEdit = messenger.canEdit(m);
   const run = async (fn, done) => {
     d.close();
     try {
@@ -1764,7 +1804,7 @@ function messageMenu(m) {
     }
   };
   const d = dialog(
-    h("h2", { text: m.kind === "retracted" ? "Ta bort platshållaren?" : "Ta bort meddelandet?" }),
+    h("h2", { text: m.kind === "retracted" ? "Ta bort platshållaren?" : canEdit ? "Redigera eller ta bort" : "Ta bort meddelandet?" }),
     forAll ? h("p", { class: "hint", text: `”Ta bort för alla” byter ut meddelandet mot ”Du tog bort det här meddelandet” på ${personName(m.conv)}s och dina enheter när de tar emot det. Har ${personName(m.conv)} redan sett det, sparat det eller använder en äldre version av Murmo kan det finnas kvar – det går inte att ta tillbaka det som redan visats.` }) : null,
     !forAll && m.dir === "out" && m.kind !== "retracted" ? h("p", { class: "hint", text: "Det går att ta bort ett meddelande för alla i 24 timmar efter att det skickats. Det här kan bara tas bort för dig." }) : null,
     h("p", { class: "hint", text: `”Ta bort för mig” tar bort det på alla dina enheter. ${personName(m.conv)} behåller sitt exemplar.` }),
@@ -1772,6 +1812,7 @@ function messageMenu(m) {
       "div",
       { class: "actions" },
       h("button", { class: "btn", text: "Avbryt", onclick: () => d.close() }),
+      canEdit ? h("button", { class: "btn", text: "Redigera", onclick: () => { d.close(); editDialog(m); } }) : null,
       h("button", { class: "btn danger", text: "Ta bort för mig", onclick: () => run(() => messenger.deleteForMe(m.conv, m.id), "Borttaget för dig.") }),
       forAll ? h("button", { class: "btn danger", text: "Ta bort för alla", onclick: () => run(() => messenger.retract(m.conv, m.id), "Borttaget för alla.") }) : null,
     ),
@@ -1789,6 +1830,12 @@ function message(m) {
   const body = m.kind === "file" ? fileView(m) : h("div", { class: emoji.emojiOnly(m.text) ? "body jumbo" : "body", dir: "auto", text: m.text ?? "" });
   const media = m.kind === "file" ? " media" : "";
   const meta = h("div", { class: "meta", text: clock(m.time) });
+  if (m.edited) meta.append(h("span", { class: "edited", text: " · redigerat", title: `Redigerat ${dayLabel(m.edited)} ${clock(m.edited)}` }));
+  if (m.held) {
+    // Waiting for "Ångra": looks like a sent message; not on the server yet, so no delivery mark.
+    if (!m.firing) meta.append(undoButton(m));
+    return h("div", { class: "msg out held" }, body, meta);
+  }
   if (sending.has(m.id)) meta.append(sendingNote(m.id));
   else if (Messenger.undelivered(m)) {
     meta.append(
