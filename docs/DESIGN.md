@@ -218,7 +218,7 @@ come with the Double Ratchet in phase 2 (PLAN.md).
   "v": 1,
   "id": "<16 random bytes>",
   "kind": "request",              // "request" | "accept" | "text" | "file" | "sync" | "history" | "receipt"
-                                  // | "reaction" | "gifs" (own devices only)
+                                  // | "reaction" | "retract" | "gifs" (own devices only)
   "from": { "account": "…", "device": "…" },
   "to":   { "account": "…", "device": "…" },
   "conv": "<account id of the other party>",
@@ -290,6 +290,45 @@ that conversation (text or file), `e` one emoji (`""` takes the reaction back). 
 per message; the one with the latest message time wins, and a taken-back reaction is kept as `""` with its time so
 that an older one arriving late does not come back. Reactions are stored on the message they belong to (§8.1), go
 along with the history to a newly linked device, and are only taken from accepted contacts. They do not notify.
+
+### 6.6 Taking messages back
+
+End-to-end encryption means that what has reached a device is on that device: no protocol can take it back for
+certain. Murmo therefore offers three things, and says in the interface what each can and cannot do.
+
+- **Ångra (undo send).** A text waits 5 seconds above the composer before it is encrypted and sent, and "Ångra"
+  puts it back in the composer. This is the only way to be sure that nobody got it. It is a setting per device (on
+  by default). When the page is hidden (another app on a phone, a closed tab) waiting texts are sent at once rather
+  than lost. Files are sent at once.
+- **Ta bort för alla (delete for everyone).** A `retract` message `{ id }` to the other party and the own other
+  devices, not marked `notify`, for an own `text` or `file` at most 24 hours after it was sent. A receiving device
+  takes it only from an accepted contact (or an own device) and only when:
+  - message `id` is of that conversation and is a `text` or `file`;
+  - the sender of the `retract` **is the author** of the message (the peer for an incoming message, the own account
+    for an outgoing one): neither party can delete the other's messages;
+  - the `retract` was sent at most 24 hours after the message (both times are signed by the author; 5 minutes of
+    clock slack) and arrives at most 14 days + 24 hours after the message was stored on this device (the mailbox
+    keeps it 14 days at most).
+
+  The message is then replaced by a **tombstone** `{ id, conv, dir, time, kind: "retracted", by, rt }`: its text, its
+  file (parts and anything still on its way), its reactions and its place in the list of files to offer again are
+  deleted. The thread shows "Du tog bort det här meddelandet" or "<namn> tog bort ett meddelande", so the reader
+  knows that something was there (a message is never made to vanish without a trace, which matters when the message
+  was abusive). A tombstone keeps the id, so a late copy of the message (a send that is retried, a history hand-over,
+  a file offered again) is not stored again, and it travels in history hand-overs instead of the message.
+
+  A `retract` can arrive before its message (a newly linked device that gets the history later). It is then stored as
+  a hidden tombstone (`pending: true`); when the message comes and the `retract` fits it (same conversation, same
+  author, within the window) the message becomes a visible tombstone, otherwise the hidden one is dropped and the
+  message is stored as usual.
+- **Ta bort för mig (delete for me).** The message (or a placeholder) is replaced by a hidden tombstone `{ kind:
+  "deleted" }` on this device and, through `sync` with `{ remove: [id] }`, on the account's other devices. The other
+  party keeps its copy and is told nothing.
+
+What it does not do: the server is not asked to drop a message it still holds (it does not know who sent what, and
+must not learn it); the envelope is simply followed by the `retract` in the same mailbox. A device with an older
+client keeps the message (§12), and so does a modified client. Whoever has seen the message has seen it. The OS
+notification of a message never had content, so nothing is left there.
 
 ## 7. Multi-device history
 
@@ -593,6 +632,9 @@ What clients from before emoji, reactions and the shared GIF collection get from
 | a GIF (from the collection or GIPHY) | an ordinary `file` message `animation.gif`; `image/gif` was already shown inline, within the same limits |
 | `reaction` | dropped. The older device never shows it, also not after a later update (the message was acknowledged). The sender sees its reaction at once and cannot tell. Reactions do not notify, so nothing is woken for it either |
 | `reactions` on messages in a history hand-over (§7) | stored with the message and not shown; shown once that device is updated |
+| `retract` (§6.6) | dropped: the older device keeps showing the message, also after a later update. The sender is told so before choosing "Ta bort för alla" ("…använder en äldre version av Murmo kan det finnas kvar") |
+| tombstones (`retracted`, `deleted`) in a history hand-over | stored, shown as an empty message until the device is updated |
+| `sync` with `remove` | the part it does not know is ignored: the message stays on the older own device |
 | `gifs` to an own older device | dropped; that device has no collection until it is updated, and then gets only GIFs saved after that. The bytes are pulled with `file-req` (§9.2), so no chunks are pushed to it; a `file-req` for `gif:…` sent to an older device finds no file message and is ignored |
 
 An older device sends nothing new, so a newer device has nothing to handle from it.
