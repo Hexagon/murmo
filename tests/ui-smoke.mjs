@@ -126,6 +126,13 @@ try {
   await b.setViewport({ width: 400, height: 760 });
   await sleep(300);
   await b.screenshot({ path: `${shots}/b-8-dark-mobile.png` });
+  // The conversation fits the window: the thread scrolls and the composer is on screen.
+  const fit = await b.evaluate(() => {
+    const c = document.querySelector(".composer")?.getBoundingClientRect();
+    const s = document.querySelector(".main .scroll");
+    return { composer: !!c && c.bottom <= innerHeight && c.top >= 0, scrolls: !!s && s.scrollHeight > s.clientHeight && getComputedStyle(s).overflowY === "auto" };
+  });
+  if (!fit.composer || !fit.scrolls) throw new Error(`conversation does not fit the window: ${JSON.stringify(fit)}`);
   // On a phone the start page is the list of conversations; back leads there from a conversation.
   await b.goBack();
   await b.waitForFunction(() => getComputedStyle(document.querySelector(".sidebar")).display !== "none" && getComputedStyle(document.querySelector(".main")).display === "none", { timeout: 5000 });
