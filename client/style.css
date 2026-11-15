@@ -205,6 +205,17 @@ pre.cardtext {
 .recover ol { padding-left: 20px; margin: 8px 0 14px; }
 .recover li { margin: 6px 0; }
 .recover li a { display: inline-block; margin-top: 4px; color: var(--accent); }
+.card.offer > div.btns { flex: 0 0 auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+form.paper { margin: 0 0 14px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+form.paper input { font-family: var(--mono); text-transform: uppercase; }
+pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-break: normal; }
+.paperbox { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.paperbox h3 { font-size: 15px; margin: 0 0 6px; }
+@media print {
+  body:has(dialog.printable[open]) > :not(dialog.printable) { display: none; }
+  dialog.printable { position: static; border: 0; box-shadow: none; width: auto; }
+  dialog.printable button, dialog.printable label, dialog.printable .actions { display: none; }
+}
 .lone { font-size: 13px; padding: 10px 12px; border-radius: 10px; background: var(--bubble); }
 .link { border: 0; background: none; padding: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
 

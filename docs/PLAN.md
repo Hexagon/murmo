@@ -30,6 +30,8 @@
       sender account and 64 MiB in all (`DESIGN.md` §8.1, §9)
 - [x] Image decompression bombs: dimensions read from the PNG/GIF/JPEG/WebP header before an image is decoded;
       above 40 MP, or unreadable, it is shown as a file card with "Spara"
+- [x] Paper key: a device on paper that, with the password, approves a new device when no other is left
+      (`DESIGN.md` §4.5); a request from an accepted contact is answered with `accept`
 
 Open, in order of priority:
 
@@ -38,6 +40,8 @@ Open, in order of priority:
       Advertise the queue's per-file and per-device limits in `/api/v1/info`, show before sending whether a file can be
       queued, and let live transfer go further once it no longer needs the whole file in memory (Phase 2).
 - [ ] Signed, reproducible client release with published hashes; installable copy not served by the server
+- [ ] History from contacts after every device is lost: a contact sends its copy of a conversation on request,
+      shown as the contact's copy (`DESIGN.md` §7.1, option 3)
 
 ## Phase 2: protocol
 

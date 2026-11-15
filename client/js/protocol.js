@@ -3,7 +3,8 @@
 // in Node 22 (used by the end-to-end test).
 
 import * as rc from "../vendor/rootcard/src/index.js";
-import { frame } from "../vendor/rootcard/src/crypto.js";
+import { frame, hkdf } from "../vendor/rootcard/src/crypto.js";
+import { B32, base32Normalize } from "../vendor/rootcard/src/encoding.js";
 
 const subtle = globalThis.crypto.subtle;
 const enc = new TextEncoder();
@@ -18,6 +19,8 @@ export const LABELS = {
   safety: "mesg/safety/v1",
   link: "mesg/link-code/v1",
   local: "mesg/local/v1",
+  paper: "murmo/paper-key/v1",
+  paperCheck: "murmo/paper-key/check/v1",
 };
 export const MAX_ENTRIES = 32;
 export const MAX_DEVICES = 8;
@@ -291,6 +294,68 @@ export async function safetyCode(a, b) {
 /** The code both screens show while linking a device. */
 export async function linkCode(account, deviceKey, requestId) {
   return digits(await sha256(frame(LABELS.link, rc.canonical({ account, device: deviceKey, request: requestId }))), 6);
+}
+
+// ── paper key (DESIGN.md §4.5) ──────────────────────────────────────────────────────────────────────────────────
+
+/** The label of a paper key in a device list. Only for showing: devices are told apart by their keys. */
+export const PAPER_LABEL = "Pappersnyckel";
+const PAPER_BYTES = 20;
+
+/** Whether a device of a list is a paper key (by its label; a paper key also never publishes a prekey). */
+export const isPaper = (d) => d?.label === PAPER_LABEL;
+
+async function paperChecksum(paper) {
+  return rc.base32Encode(await sha256(frame(LABELS.paperCheck, paper))).slice(0, 4);
+}
+
+/** The written form of a paper key: `MPK-XXXX-…` (32 characters of key and 4 of checksum, Crockford base32). */
+export async function formatPaperKey(paper) {
+  const body = rc.base32Encode(paper) + (await paperChecksum(paper));
+  const groups = [];
+  for (let i = 0; i < body.length; i += 4) groups.push(body.slice(i, i + 4));
+  return "MPK-" + groups.join("-");
+}
+
+/** Parse a typed paper key (case, spaces, dashes, I/L/O are forgiven); throws `bad_paper_key`. */
+export async function parsePaperKey(text) {
+  let s = base32Normalize(String(text ?? ""));
+  if (s.length === 39 && s.startsWith("MPK")) s = s.slice(3);
+  if (s.length !== 36 || [...s].some((c) => !B32.includes(c))) throw new Error("bad_paper_key");
+  let paper;
+  try {
+    paper = rc.base32Decode(s.slice(0, 32), PAPER_BYTES);
+  } catch {
+    throw new Error("bad_paper_key");
+  }
+  if (s.slice(32) !== (await paperChecksum(paper))) throw new Error("bad_paper_key");
+  return paper;
+}
+
+/**
+ * The Ed25519 seed of a paper key's device. It needs both the paper and the account's local secret from the rootcard
+ * vault (§8), which only the password unlocks: the paper alone, or the password alone, cannot add a device.
+ */
+export async function paperSeed(paper, localSecret, account) {
+  return hkdf(paper, localSecret, frame(LABELS.paper, rc.canonical({ account })));
+}
+
+/** The device-list value `{ id, key, label }` of a paper key's seed. */
+export async function paperDevice(seed) {
+  const pub = await rc.ed25519Public(seed);
+  return { id: await deviceId(pub), key: rc.formatKey("ed25519", pub), label: PAPER_LABEL };
+}
+
+/** A new paper key for an account: `{ paper, seed }`, drawn again while the seed is unusable (rootcard [CRY-9]). */
+export async function newPaperKey(localSecret, account) {
+  for (let i = 0; i < 64; i++) {
+    const paper = random(PAPER_BYTES);
+    const seed = await paperSeed(paper, localSecret, account);
+    if (rc.usableSeed(seed)) return { paper, seed };
+    paper.fill(0);
+    seed.fill(0);
+  }
+  throw new Error("cannot create a usable key");
 }
 
 // ── local key (DESIGN.md §8) ────────────────────────────────────────────────────────────────────────────────────
