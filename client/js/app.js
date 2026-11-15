@@ -8,6 +8,8 @@ import * as emoji from "./emoji.js";
 import * as giphy from "./giphy.js";
 import { accounts } from "./store.js";
 import * as notify from "./notify.js";
+import * as i18n from "./i18n.js";
+import { has, t as tr, tn } from "./i18n.js";
 import * as rc from "../vendor/rootcard/src/index.js";
 
 const api = new Api(location.origin);
@@ -112,50 +114,9 @@ function icon(name) {
   return s;
 }
 
-const MESSAGES = {
-  bad_handle: "Ange en fullständig identifierare, till exempel Alice#3F9C.",
-  unknown_account: "Ingen identitet med den identifieraren finns här.",
-  ambiguous_handle: "Identifieraren är tvetydig. Använd den längre taggen.",
-  not_home: "Identiteten finns inte på den här servern.",
-  self: "Det är din egen identifierare.",
-  no_devices: "Mottagaren har ingen ansluten enhet ännu.",
-  weak_password: "Lösenordet måste ha minst 12 tecken och får inte vara användarnamnet.",
-  bad_username: "Användarnamnet får bara innehålla A–Z, a–z, 0–9, _ . - (högst 32 tecken).",
-  username_policy: "Det användarnamnet är inte tillåtet här.",
-  handle_taken: "Identifieraren är upptagen. Försök igen.",
-  bad_signature: "Fel lösenord.",
-  rate_limited: "För många försök. Vänta en stund och försök igen.",
-  not_accepted: "Konversationen är inte accepterad ännu.",
-  fork: "Den här kontaktens enhetslista har ändrats på ett sätt som inte går att verifiera. Kontrollera säkerhetskoden.",
-  too_large: "Filen är för stor (högst 100 MB).",
-  offline: "Ingen anslutning till servern just nu. Försök igen om en stund.",
-  disconnected: "Anslutningen bröts. Försök igen.",
-  timeout: "Servern svarade inte. Försök igen.",
-  unsupported_browser: "Webbläsaren saknar stöd för Ed25519/X25519 i WebCrypto.",
-  home_not_allowed: "Den här Murmo-servern tar inte emot identiteter från den rootcard-servern.",
-  home_unreachable: "Det gick inte att nå rootcard-servern.",
-  bad_home: "Ange ett domännamn, till exempel rootcard.org.",
-  bad_proof: "Identiteten kunde inte bevisas för servern.",
-  wrong_host: "Domänen pekar på en annan server.",
-  bad_paper_key: "Det där är ingen giltig pappersnyckel. Kontrollera att alla tecken är rätt.",
-  wrong_paper_key: "Pappersnyckeln hör inte till det här kontot, eller så har den ersatts av en nyare.",
-  no_local_secret: "Kontot saknar lokal nyckel i valvet. Logga ut och in igen och försök sedan på nytt.",
-  not_gif: "Det är inte en GIF-fil.",
-  gif_too_large: "GIF:en är för stor för samlingen (högst 8 MB).",
-  too_big_image: "Bilden har för många bildpunkter.",
-  gifs_full: `Samlingen är full (högst ${GIF_MAX_COUNT} GIF:ar). Ta bort någon först.`,
-  gif_missing: "GIF:en har inte kommit till den här enheten än.",
-  giphy_limit: "GIPHY tar inte emot fler sökningar från den här servern just nu. Försök igen om en stund.",
-  giphy_key: "GIPHY-nyckeln på servern fungerar inte. Säg till den som driver servern.",
-  giphy_failed: "Det gick inte att nå GIPHY.",
-  bad_reaction: "Det går bara att reagera med en emoji.",
-  no_message: "Meddelandet finns inte längre.",
-  too_late: "Meddelandet kan inte längre tas bort för alla (det går i 24 timmar). Du kan ta bort det för dig.",
-};
-
 function say(err) {
   const code = err instanceof ApiError ? err.code : (err?.code ?? err?.message ?? String(err));
-  return MESSAGES[code] ?? `Något gick fel (${code}).`;
+  return has(`err.${code}`) ? tr(`err.${code}`, { max: GIF_MAX_COUNT }) : tr("err.unknown", { code });
 }
 
 function toast(text) {
@@ -176,16 +137,17 @@ function dialog(...children) {
 
 /** Choices for how long a conversation's messages are kept (seconds; 0: until the conversation is deleted). */
 const RETENTIONS = [
-  [0, "Tills vidare"],
-  [3600, "1 timme"],
-  [86400, "1 dag"],
-  [7 * 86400, "1 vecka"],
-  [30 * 86400, "30 dagar"],
-  [365 * 86400, "1 år"],
+  [0, "ret.forever"],
+  [3600, "ret.hour"],
+  [86400, "ret.day"],
+  [7 * 86400, "ret.week"],
+  [30 * 86400, "ret.30days"],
+  [365 * 86400, "ret.year"],
 ];
 
 function retentionLabel(r) {
-  return RETENTIONS.find(([s]) => s === r)?.[1] ?? `${Math.round(r / 86400)} dagar`;
+  const key = RETENTIONS.find(([s]) => s === r)?.[1];
+  return key ? tr(key) : tn("ret.days", Math.round(r / 86400));
 }
 
 function splitHandle(handle) {
@@ -195,37 +157,34 @@ function splitHandle(handle) {
 
 function deviceLabel() {
   const ua = navigator.userAgent;
-  const b = /Firefox\//.test(ua) ? "Firefox" : /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Webbläsare";
+  const b = /Firefox\//.test(ua) ? "Firefox" : /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : tr("common.browser");
   const os = /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Mac OS X/.test(ua) ? "macOS" : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : "";
-  return os ? `${b} på ${os}` : b;
+  return os ? tr("common.deviceOn", { browser: b, os }) : b;
 }
 
 function bytes(n) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} kB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n < 1024) return `${i18n.num(n)} B`;
+  if (n < 1024 * 1024) return `${i18n.num(n / 1024, { maximumFractionDigits: 0 })} kB`;
+  return `${i18n.num(n / 1024 / 1024, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} MB`;
 }
 
-function clock(t) {
-  return new Date(t * 1000).toLocaleTimeString("sv-SE", { hour: "2-digit", minute: "2-digit" });
+// Times are Unix seconds (UTC) everywhere; they become local time only when shown (i18n.js).
+const clock = i18n.clock;
+const dayLabel = i18n.dayLabel;
+
+/** A message's time: local text, with the UTC time for machines and the full local date and time on hover. */
+function timeView(t) {
+  return h("time", { datetime: i18n.iso(t), title: i18n.dateTime(t), text: clock(t) });
 }
 
 /** When a device was last connected, for the device list (`undefined`: not known). */
 function lastSeen(t) {
-  if (t === undefined) return "Senast ansluten: okänt";
-  if (t === 0) return "Ansluten nu";
-  const day = dayLabel(t);
+  if (t === undefined) return tr("seen.unknown");
+  if (t === 0) return tr("seen.now");
+  const ago = i18n.daysAgo(t);
+  const s = ago === 0 ? tr("seen.today", { time: clock(t) }) : ago === 1 ? tr("seen.yesterday", { time: clock(t) }) : tr("seen.date", { date: dayLabel(t) });
   const days = Math.floor((Date.now() / 1000 - t) / 86400);
-  return `Senast ansluten ${day === "Idag" || day === "Igår" ? day.toLowerCase() + " " + clock(t) : day}${days >= 2 ? ` (${days} dagar sedan)` : ""}`;
-}
-
-function dayLabel(t) {
-  const d = new Date(t * 1000);
-  const today = new Date();
-  const y = new Date(Date.now() - 864e5);
-  if (d.toDateString() === today.toDateString()) return "Idag";
-  if (d.toDateString() === y.toDateString()) return "Igår";
-  return d.toLocaleDateString("sv-SE", { day: "numeric", month: "long", year: d.getFullYear() === today.getFullYear() ? undefined : "numeric" });
+  return days >= 2 ? `${s} (${tn("seen.ago", days)})` : s;
 }
 
 // ── settings of this browser, per account ───────────────────────────────────────────────────────────────────────
@@ -254,7 +213,7 @@ function setSetting(k, v) {
 
 // ── theme: auto (system), light or dark ─────────────────────────────────────────────────────────────────────────
 
-const THEMES = [["auto", "Auto"], ["light", "Ljust"], ["dark", "Mörkt"]];
+const THEMES = [["auto", "theme.auto"], ["light", "theme.light"], ["dark", "theme.dark"]];
 
 function theme() {
   try {
@@ -276,12 +235,12 @@ function setTheme(t) {
 }
 
 function themePicker() {
-  const box = h("div", { class: "theme", role: "radiogroup", "aria-label": "Tema" });
+  const box = h("div", { class: "theme", role: "radiogroup", "aria-label": tr("theme.label") });
   const render = () =>
     put(
       box,
       THEMES.map(([v, label]) =>
-        h("button", { class: theme() === v ? "on" : "", role: "radio", "aria-checked": String(theme() === v), text: label, onclick: () => { setTheme(v); render(); } }),
+        h("button", { class: theme() === v ? "on" : "", role: "radio", "aria-checked": String(theme() === v), text: tr(label), onclick: () => { setTheme(v); render(); } }),
       ),
     );
   render();
@@ -289,6 +248,39 @@ function themePicker() {
 }
 
 setTheme(theme());
+
+// ── language ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** A share (0…1) as a local percentage. */
+function percent(share) {
+  return i18n.num(share, { style: "percent", maximumFractionDigits: 0 });
+}
+
+/** The language of the interface ("Auto": the browser's); `redraw` shows the current screen again in the new one. */
+function languagePicker(redraw) {
+  const chosen = (() => {
+    try {
+      return localStorage.getItem("murmo-lang") ?? "";
+    } catch {
+      return "";
+    }
+  })();
+  const select = h(
+    "select",
+    {
+      class: "input lang",
+      "aria-label": tr("common.language"),
+      onchange: () => {
+        i18n.setLanguage(select.value || null);
+        i18n.translatePage();
+        redraw();
+      },
+    },
+    h("option", { value: "", text: "Auto", selected: !chosen }),
+    i18n.LANGUAGES.map(([code, name]) => h("option", { value: code, lang: code, text: name, selected: chosen === code })),
+  );
+  return select;
+}
 
 function homeLabel(home) {
   if (!home || home === api.base) return "";
@@ -301,69 +293,28 @@ function homeLabel(home) {
 
 // ── how it works ────────────────────────────────────────────────────────────────────────────────────────────────
 
-const FACTS = [
-  "Krypteras i webbläsaren, separat till varje mottagande enhet (X25519 och AES-GCM), och signeras av den skickande enheten (Ed25519).",
-  "Servern håller bara krypterade meddelanden tills de levererats, högst 14 dagar. Ingen historik, inga kontaktlistor.",
-  "Ingen sökning: man når någon bara med exakt identifierare, och första meddelandet är en förfrågan.",
-  "En ny enhet godkänns på en enhet du redan har. Ett lösenord räcker inte.",
-  "Identiteten är en rootcard-identitet. Lösenordet lämnar aldrig webbläsaren.",
-];
+const FACTS = ["about.1", "about.2", "about.3", "about.4", "about.5"];
 
 /** The short version, for the empty conversation list and the settings. */
 function about() {
   return h(
     "div",
     { class: "about" },
-    h("ul", {}, FACTS.map((t) => h("li", { text: t }))),
-    h("button", { class: "link", type: "button", text: "Säkerhet och integritet i detalj", onclick: showHelp }),
+    h("ul", {}, FACTS.map((k) => h("li", { text: tr(k) }))),
+    h("button", { class: "link", type: "button", text: tr("about.more"), onclick: showHelp }),
   );
 }
 
+/** The sections of the help: a title key and how many points it has (`help.crypto.1`, `help.crypto.2`, …). */
 const HELP = [
-  ["Kryptering", [
-    "Varje meddelande krypteras på din enhet innan det skickas, en gång för varje enhet som ska läsa det: mottagarens enheter och dina egna andra enheter. Bara de enheterna har nycklarna. Servern, nätverket och den som driver tjänsten ser bara chiffertext.",
-    "Varje meddelande signeras med den skickande enhetens nyckel. Mottagaren kontrollerar att det kommer från en enhet som finns i avsändarens enhetslista och att det var avsett för just den konversationen.",
-    "Nycklarna som tar emot meddelanden byts varje vecka och raderas efter tre veckor. Den som senare stjäl en enhet kan alltså inte läsa äldre inspelad trafik, men meddelanden från de senaste veckorna kan läsas med en stulen, upplåst enhet.",
-  ]],
-  ["Identitet och enheter", [
-    "Du identifieras med en rootcard-identitet, till exempel Namn#TAGG. Lösenordet används bara i webbläsaren för att låsa upp dina nycklar; det skickas aldrig till servern.",
-    "Återställningskortet styr identiteten. Den som har det kan ta över den, så förvara det offline.",
-    "En ny enhet läggs bara till när en av dina befintliga enheter godkänner den, efter att ni jämfört en kod. Ett stulet lösenord räcker alltså inte för att läsa dina meddelanden.",
-    "En pappersnyckel kan godkänna en ny enhet när ingen annan finns kvar, men bara tillsammans med ditt lösenord: papperet ensamt ger ingen åtkomst. Den kan inte läsa några meddelanden, och historiken följer inte med.",
-    "Säkerhetskoden i en konversation beräknas från båda parters enhetslistor. Är den likadan hos er båda sitter ingen – inte heller servern – mellan er. Koden ändras när någon lägger till eller tar bort en enhet, och du ser då en varning.",
-  ]],
-  ["Vad servern ser och sparar", [
-    "Sparar: din identitet (för konton skapade här), varje kontos lista över enheter med publika nycklar, och krypterade meddelanden tills de hämtats, högst 14 dagar.",
-    "Sparar inte: meddelandehistorik, kontaktlistor, vem du har accepterat eller blockerat, IP-adresser i loggar.",
-    "Ser i stunden: vilken enhet som skickar till vilka enheter, när och hur mycket. Det är ett krav för att leverera, men det skrivs inte ner.",
-    "Den som känner till din identifierare kan se när dina enheter är anslutna (det behövs för att skicka filer direkt).",
-  ]],
-  ["Ångra och ta bort", [
-    "Med ”Ångra skickat” (på från början) väntar ett meddelande några sekunder innan det skickas. Ångrar du dig under tiden har ingen fått det – det är det enda sättet att vara helt säker.",
-    "”Ta bort för alla” går i 24 timmar och byter ut meddelandet mot en notering om att det togs bort, hos dig och mottagaren. Det kan inte nå det mottagaren redan sett eller sparat, och en enhet med en äldre eller ändrad version av Murmo kan behålla det. Bara den som skrev ett meddelande kan ta bort det för alla, och noteringen finns alltid kvar.",
-    "”Ta bort för mig” tar bort meddelandet på alla dina enheter. Den andra parten behåller sitt exemplar och får inte veta något.",
-  ]],
-  ["Filer", [
-    "Filer krypteras med en egen nyckel som bara finns i det krypterade meddelandet om filen.",
-    "Är mottagaren ansluten går filen direkt, via servern, utan att sparas. Är den inte ansluten kan servern hålla den krypterad tills mottagaren hämtat den, högst 14 dagar. Det går att stänga av under Konto och inställningar; då skickas filen i stället när ni båda är anslutna samtidigt. Servern ser filens ungefärliga storlek, aldrig namn eller innehåll.",
-    "Emoji är vanlig text som ritas av enhetens eget typsnitt, och reaktioner skickas krypterade som andra meddelanden. GIF:ar skickas som filer. Dina sparade GIF:ar finns krypterade på dina enheter och synkas mellan dem, krypterat.",
-    "Om servern har GIPHY-sökning påslagen hämtar din webbläsare sökresultat och GIF:ar direkt från GIPHY. GIPHY ser då din IP-adress och vad du söker, och den trafiken skyddas bara av HTTPS – inte av end-to-end-krypteringen. Inget hämtas från GIPHY förrän du själv söker.",
-  ]],
-  ["Notiser", [
-    "Notiser är på från början om du tillåter dem när webbläsaren frågar. Du kan stänga av dem under Konto och inställningar, och valet gäller bara den enhet du gör det på.",
-    "När Murmo är stängt skickar servern ett tomt meddelande via webbläsarens pushtjänst (Google, Mozilla eller Apple), som väcker webbläsaren. Pushtjänsten får veta att din webbläsare fick något från den här servern och när – inget om innehåll eller avsändare. Notisen säger bara ”Nytt meddelande”.",
-    "Att väckas gör inte att du visas som ansluten: webbläsaren ansluter inte till servern förrän du öppnar Murmo.",
-  ]],
-  ["På din enhet", [
-    "Historik, kontakter och nycklar sparas krypterat i webbläsaren och låses upp med ditt lösenord.",
-    "Med ”Kom ihåg den här enheten” sparar webbläsaren en upplåsningsnyckel, så att Murmo öppnas utan lösenord. Den som kommer åt webbläsaren kan då läsa dina meddelanden. Använd det inte på delade datorer.",
-    "Utan någon kvarvarande enhet är historiken borta, även med en pappersnyckel. Det finns ingen säkerhetskopia på servern; dina kontakter har kvar sina egna kopior av era konversationer.",
-  ]],
-  ["Begränsningar", [
-    "Sidan hämtas från servern. Den som kontrollerar servern kan i princip leverera ändrad kod, och det gäller alla webbappar.",
-    "Murmo och rootcard är tidiga versioner som inte har granskats av någon utomstående.",
-    "Krypteringen skyddar inte mot en enhet som redan är infekterad, eller mot någon som tittar på din skärm.",
-  ]],
+  ["help.crypto", 3],
+  ["help.identity", 5],
+  ["help.server", 4],
+  ["help.undo", 3],
+  ["help.files", 4],
+  ["help.notify", 3],
+  ["help.device", 3],
+  ["help.limits", 3],
 ];
 
 /** "Version 0.1.0 · commit 1a2b3c4d5e6f", linking to the source of that commit; null if the server does not say. */
@@ -375,7 +326,7 @@ function versionLine() {
   return h(
     "p",
     { class: "hint version" },
-    `Version ${info.version}`,
+    tr("help.version", { version: info.version }),
     commit ? " · commit " : null,
     commit && source ? h("a", { href: `${source}/commit/${commit}`, target: "_blank", rel: "noopener noreferrer", text: short }) : short,
   );
@@ -383,14 +334,14 @@ function versionLine() {
 
 function showHelp() {
   const d = dialog(
-    h("h2", { text: "Säkerhet och integritet" }),
+    h("h2", { text: tr("help.title") }),
     h(
       "div",
       { class: "help" },
-      HELP.map(([title, items]) => h("section", {}, h("h3", { text: title }), h("ul", {}, items.map((t) => h("li", { text: t }))))),
+      HELP.map(([title, n]) => h("section", {}, h("h3", { text: tr(title) }), h("ul", {}, Array.from({ length: n }, (_, i) => h("li", { text: tr(`${title}.${i + 1}`) }))))),
     ),
     versionLine(),
-    h("div", { class: "actions" }, h("button", { class: "btn", text: "Stäng", onclick: () => d.close() })),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
   );
   d.classList.add("wide");
   d.scrollTop = 0;
@@ -410,10 +361,11 @@ function inApp(on) {
 // ── start ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
 async function boot() {
+  i18n.translatePage();
   try {
     await rc.checkSupport(); // throws unsupported_browser
   } catch {
-    root.replaceChildren(h("div", { class: "center" }, h("div", { class: "auth card", text: MESSAGES.unsupported_browser })));
+    root.replaceChildren(h("div", { class: "center" }, h("div", { class: "auth card", text: tr("err.unsupported_browser") })));
     return;
   }
   info = await api.info();
@@ -422,8 +374,8 @@ async function boot() {
     // The server signs and checks everything for its configured origin (MURMO_ORIGIN): proofs to it and the
     // WebSocket would fail here in confusing ways, so say what is wrong instead.
     root.replaceChildren(h("div", { class: "center" }, h("div", { class: "auth card" },
-      h("p", { text: `Servern är inställd för ${info.origin}, men sidan öppnades på ${location.origin}. Inloggning och anslutning fungerar inte här.` }),
-      h("p", { class: "hint", text: "Öppna Murmo på rätt adress, eller (för den som driver servern) sätt MURMO_ORIGIN till den här adressen och starta om servern." }),
+      h("p", { text: tr("boot.wrongOrigin", { origin: info.origin, here: location.origin }) }),
+      h("p", { class: "hint", text: tr("boot.wrongOriginHint") }),
     )));
     return;
   }
@@ -452,8 +404,8 @@ function showAuth(tab = "login", prefill = "") {
   const tabs = h(
     "div",
     { class: "tabs", role: "tablist" },
-    h("button", { class: tab === "login" ? "on" : "", text: "Logga in", onclick: () => showAuth("login") }),
-    h("button", { class: tab === "register" ? "on" : "", text: "Skapa konto", onclick: () => showAuth("register") }),
+    h("button", { class: tab === "login" ? "on" : "", text: tr("auth.login"), onclick: () => showAuth("login") }),
+    h("button", { class: tab === "register" ? "on" : "", text: tr("auth.register"), onclick: () => showAuth("register") }),
   );
   inApp(false);
   root.replaceChildren(
@@ -464,8 +416,9 @@ function showAuth(tab = "login", prefill = "") {
       h(
         "div",
         { class: "auth-foot" },
-        h("button", { class: "link", type: "button", text: "Säkerhet och integritet i detalj", onclick: showHelp }),
+        h("button", { class: "link", type: "button", text: tr("about.more"), onclick: showHelp }),
         themePicker(),
+        languagePicker(() => showAuth(tab)),
       ),
     ),
   );
@@ -475,7 +428,7 @@ function showAuth(tab = "login", prefill = "") {
 
 function allowedHomes() {
   const homes = info?.homes ?? [];
-  if (homes.includes("*")) return "valfri rootcard-server";
+  if (homes.includes("*")) return tr("auth.anyHome");
   return homes.map((h) => homeLabel(h) || h).join(", ");
 }
 
@@ -483,22 +436,22 @@ async function loginForm(body, err, prefill) {
   const known = await accounts.all();
   const remote = h("input", { class: "input", placeholder: "rootcard.org", spellcheck: "false", autocomplete: "off" });
   let where = "local";
-  const remoteField = h("div", { class: "field hidden" }, h("label", { text: "Domän där din identitet finns" }), remote, h("div", { class: "hint", text: `Den här servern tar emot identiteter från: ${allowedHomes() || "ingen annan"}.` }));
+  const remoteField = h("div", { class: "field hidden" }, h("label", { text: tr("auth.remoteLabel") }), remote, h("div", { class: "hint", text: tr("auth.remoteHint", { homes: allowedHomes() || tr("auth.noOtherHome") }) }));
   const seg = h("div", { class: "seg" });
   const setWhere = (w) => {
     where = w;
     remoteField.classList.toggle("hidden", w !== "remote");
     put(
       seg,
-      h("button", { type: "button", class: w === "local" ? "on" : "", text: "Den här servern", onclick: () => setWhere("local") }),
-      (info?.homes ?? []).length ? h("button", { type: "button", class: w === "remote" ? "on" : "", text: "Annan rootcard-server", onclick: () => { setWhere("remote"); remote.focus(); } }) : null,
+      h("button", { type: "button", class: w === "local" ? "on" : "", text: tr("auth.thisServer"), onclick: () => setWhere("local") }),
+      (info?.homes ?? []).length ? h("button", { type: "button", class: w === "remote" ? "on" : "", text: tr("auth.otherServer"), onclick: () => { setWhere("remote"); remote.focus(); } }) : null,
     );
   };
   setWhere("local");
-  const handle = h("input", { class: "input", autocomplete: "username", placeholder: "Namn#TAGG", value: prefill, spellcheck: "false" });
+  const handle = h("input", { class: "input", autocomplete: "username", placeholder: tr("common.handlePlaceholder"), value: prefill, spellcheck: "false" });
   const pw = h("input", { class: "input", type: "password", autocomplete: "current-password" });
   const remember = h("input", { type: "checkbox" });
-  const btn = h("button", { class: "btn primary", type: "submit", text: "Logga in" });
+  const btn = h("button", { class: "btn primary", type: "submit", text: tr("auth.login") });
   const chips = known.length
     ? h(
         "div",
@@ -527,21 +480,21 @@ async function loginForm(body, err, prefill) {
         e.preventDefault();
         err.textContent = "";
         btn.disabled = true;
-        btn.replaceChildren(h("span", { class: "spinner" }), "Låser upp…");
+        btn.replaceChildren(h("span", { class: "spinner" }), tr("common.unlocking"));
         try {
           await loginAndEnter(where === "remote" ? remote.value : "", handle.value.trim(), pw.value, remember.checked);
         } catch (x) {
           err.textContent = say(x);
           btn.disabled = false;
-          btn.replaceChildren("Logga in");
+          btn.replaceChildren(tr("auth.login"));
         }
       },
     },
     chips,
-    h("div", { class: "field" }, h("label", { text: "Var finns din identitet?" }), seg),
+    h("div", { class: "field" }, h("label", { text: tr("auth.where") }), seg),
     remoteField,
-    h("div", { class: "field" }, h("label", { text: "Identifierare" }), handle),
-    h("div", { class: "field" }, h("label", { text: "Lösenord" }), pw),
+    h("div", { class: "field" }, h("label", { text: tr("common.handle") }), handle),
+    h("div", { class: "field" }, h("label", { text: tr("common.password") }), pw),
     h(
       "label",
       { class: "check" },
@@ -549,8 +502,8 @@ async function loginForm(body, err, prefill) {
       h(
         "span",
         {},
-        "Kom ihåg den här enheten",
-        h("span", { class: "hint", style: "display:block", text: "Sparar inte ditt lösenord. Webbläsaren behåller en låst nyckel så att Murmo öppnas direkt – den som kommer åt webbläsaren kan då läsa dina meddelanden. Lämna av på delade datorer." }),
+        tr("auth.remember"),
+        h("span", { class: "hint", style: "display:block", text: tr("auth.rememberHint") }),
       ),
     ),
     btn,
@@ -561,10 +514,10 @@ async function loginForm(body, err, prefill) {
 }
 
 function registerForm(body, err) {
-  const user = h("input", { class: "input", autocomplete: "username", placeholder: "till exempel Alice", spellcheck: "false" });
+  const user = h("input", { class: "input", autocomplete: "username", placeholder: tr("auth.userPlaceholder"), spellcheck: "false" });
   const pw = h("input", { class: "input", type: "password", autocomplete: "new-password" });
   const pw2 = h("input", { class: "input", type: "password", autocomplete: "new-password" });
-  const btn = h("button", { class: "btn primary", type: "submit", text: "Fortsätt" });
+  const btn = h("button", { class: "btn primary", type: "submit", text: tr("common.continue") });
   body.replaceChildren(
     h(
       "form",
@@ -572,24 +525,24 @@ function registerForm(body, err) {
         onsubmit: async (e) => {
           e.preventDefault();
           err.textContent = "";
-          if (pw.value !== pw2.value) return (err.textContent = "Lösenorden matchar inte.");
+          if (pw.value !== pw2.value) return (err.textContent = tr("auth.mismatch"));
           btn.disabled = true;
-          btn.replaceChildren(h("span", { class: "spinner" }), "Skapar nycklar…");
+          btn.replaceChildren(h("span", { class: "spinner" }), tr("auth.makingKeys"));
           try {
             const reg = await id.prepareRegistration(api, user.value.trim(), pw.value);
             showCard(reg, pw.value);
           } catch (x) {
             err.textContent = say(x);
             btn.disabled = false;
-            btn.replaceChildren("Fortsätt");
+            btn.replaceChildren(tr("common.continue"));
           }
         },
       },
-      h("div", { class: "field" }, h("label", { text: "Användarnamn" }), user),
-      h("div", { class: "field" }, h("label", { text: "Lösenord (minst 12 tecken)" }), pw),
-      h("div", { class: "field" }, h("label", { text: "Upprepa lösenordet" }), pw2),
-      h("p", { class: "hint", text: "Du får en identifierare som Namn#TAGG. Andra kan bara nå dig om de vet den exakt – det går inte att söka efter användare." }),
-      (info?.homes ?? []).length ? h("p", { class: "hint", text: `Har du redan en rootcard-identitet (${allowedHomes()})? Logga in med den i stället.` }) : null,
+      h("div", { class: "field" }, h("label", { text: tr("auth.username") }), user),
+      h("div", { class: "field" }, h("label", { text: tr("auth.passwordMin") }), pw),
+      h("div", { class: "field" }, h("label", { text: tr("auth.repeat") }), pw2),
+      h("p", { class: "hint", text: tr("auth.handleHint") }),
+      (info?.homes ?? []).length ? h("p", { class: "hint", text: tr("auth.haveIdentity", { homes: allowedHomes() }) }) : null,
       btn,
     ),
   );
@@ -608,19 +561,19 @@ function download(name, blob) {
 function showCard(reg, password) {
   const err = h("div", { class: "error" });
   const saved = h("input", { type: "checkbox" });
-  const go = h("button", { class: "btn primary", text: "Skapa konto", disabled: true });
+  const go = h("button", { class: "btn primary", text: tr("auth.register"), disabled: true });
   saved.addEventListener("change", () => (go.disabled = !saved.checked));
   const base = `${reg.card.username}-${reg.account.slice(0, 4)}`;
   go.addEventListener("click", async () => {
     go.disabled = true;
-    go.replaceChildren(h("span", { class: "spinner" }), "Skapar…");
+    go.replaceChildren(h("span", { class: "spinner" }), tr("card.creating"));
     try {
       const done = await reg.finish();
       await loginAndEnter("", done.handle, password, false);
     } catch (x) {
       err.textContent = say(x);
       go.disabled = false;
-      go.replaceChildren("Skapa konto");
+      go.replaceChildren(tr("auth.register"));
     }
   });
   inApp(true);
@@ -631,20 +584,20 @@ function showCard(reg, password) {
       h(
         "div",
         { class: "auth", style: "width:min(560px,100%)" },
-        h("h1", { class: "brand", text: "Ditt återställningskort" }),
+        h("h1", { class: "brand", text: tr("card.title") }),
         h(
           "div",
           { class: "card" },
-          h("p", { text: "Spara kortet innan kontot skapas. Det är det enda sättet att återställa ett glömt lösenord eller flytta identiteten. Den som har kortet kontrollerar identiteten – förvara det offline." }),
+          h("p", { text: tr("card.intro") }),
           h("pre", { class: "cardtext", text: reg.cardText }),
           h(
             "div",
             { style: "display:flex;gap:8px;flex-wrap:wrap" },
-            h("button", { class: "btn", text: "Ladda ner kortfil", onclick: () => download(`${base}.rootcard-card.json`, new Blob([rc.canonicalString(reg.card)], { type: "application/json" })) }),
-            h("button", { class: "btn", text: "Ladda ner som text", onclick: () => download(`${base}.rootcard-card.txt`, new Blob([reg.cardText], { type: "text/plain" })) }),
-            h("button", { class: "btn ghost", text: "Skriv ut", onclick: () => print() }),
+            h("button", { class: "btn", text: tr("card.downloadFile"), onclick: () => download(`${base}.rootcard-card.json`, new Blob([rc.canonicalString(reg.card)], { type: "application/json" })) }),
+            h("button", { class: "btn", text: tr("common.downloadText"), onclick: () => download(`${base}.rootcard-card.txt`, new Blob([reg.cardText], { type: "text/plain" })) }),
+            h("button", { class: "btn ghost", text: tr("common.print"), onclick: () => print() }),
           ),
-          h("label", { class: "check" }, saved, h("span", { text: "Jag har sparat mitt återställningskort på ett säkert ställe." })),
+          h("label", { class: "check" }, saved, h("span", { text: tr("card.saved") })),
           go,
           err,
         ),
@@ -729,31 +682,31 @@ function showLinkWait(setup, handle, home) {
     const toggle = h("button", {
       class: "link",
       type: "button",
-      text: "Jag har ingen annan enhet kvar",
+      text: tr("link.noOther"),
       onclick: () => { help.hidden = !help.hidden; },
     });
     const card = h(
       "div",
       { class: "card" },
-      h("p", { text: `${handle} används redan på en annan enhet. Öppna Murmo där och godkänn den här enheten. Kontrollera att koden är densamma på båda skärmarna.` }),
+      h("p", { text: tr("link.inUse", { handle }) }),
       h("div", { class: "code", text: setup.code }),
-      h("p", { class: "hint" }, h("span", { class: "spinner" }), " Väntar på godkännande… (giltigt i 10 minuter)"),
-      h("button", { class: "btn ghost", text: "Avbryt", onclick: () => done(false) }),
+      h("p", { class: "hint" }, h("span", { class: "spinner" }), tr("link.waiting")),
+      h("button", { class: "btn ghost", text: tr("common.cancel"), onclick: () => done(false) }),
       toggle,
       help,
     );
     inApp(true);
-    root.replaceChildren(h("div", { class: "center" }, h("div", { class: "auth" }, h("h1", { class: "brand", text: "Länka den här enheten" }), card)));
+    root.replaceChildren(h("div", { class: "center" }, h("div", { class: "auth" }, h("h1", { class: "brand", text: tr("link.title") }), card)));
     setup.waitForApproval(ctl.signal).then(
       (ok) => {
         if (ctl.signal.aborted) return;
         if (ok) return resolve("linked");
         // Nobody approved in time: most likely no other device is left. Say what can be done instead.
         card.replaceChildren(
-          h("p", { text: "Ingen enhet godkände den här i tid, och begäran har gått ut." }),
-          h("p", { class: "hint", text: "Har du en annan enhet där du är inloggad? Öppna Murmo på den och logga in här igen, så får du en ny kod." }),
+          h("p", { text: tr("link.expired") }),
+          h("p", { class: "hint", text: tr("link.expiredHint") }),
           h("div", { class: "recover" }, paperKeyForm(setup, done), ...recoveryHelp(home, handle)),
-          h("button", { class: "btn primary", text: "Tillbaka till inloggningen", onclick: () => done(false) }),
+          h("button", { class: "btn primary", text: tr("link.back"), onclick: () => done(false) }),
         );
       },
       () => resolve(false),
@@ -765,7 +718,7 @@ function showLinkWait(setup, handle, home) {
 function paperKeyForm(setup, done) {
   const input = h("input", { type: "text", autocomplete: "off", autocapitalize: "characters", spellcheck: false, placeholder: "MPK-XXXX-XXXX-…" });
   const err = h("div", { class: "error" });
-  const go = h("button", { class: "btn primary", type: "submit", text: "Använd pappersnyckeln" });
+  const go = h("button", { class: "btn primary", type: "submit", text: tr("paper.use") });
   const form = h(
     "form",
     {
@@ -774,7 +727,7 @@ function paperKeyForm(setup, done) {
         e.preventDefault();
         err.textContent = "";
         go.disabled = true;
-        go.replaceChildren(h("span", { class: "spinner" }), "Kontrollerar…");
+        go.replaceChildren(h("span", { class: "spinner" }), tr("paper.checking"));
         try {
           await setup.approveWithPaperKey(input.value);
           input.value = "";
@@ -782,15 +735,15 @@ function paperKeyForm(setup, done) {
         } catch (x) {
           err.textContent = say(x);
           go.disabled = false;
-          go.replaceChildren("Använd pappersnyckeln");
+          go.replaceChildren(tr("paper.use"));
         }
       },
     },
-    h("p", {}, h("strong", { text: "Har du en pappersnyckel?" }), " Då kan den godkänna den här enheten i stället för en annan enhet. Kontot, dina kontakters förtroende och identifieraren är kvar som förut."),
-    h("div", { class: "field" }, h("label", { text: "Pappersnyckel" }), input),
+    h("p", {}, h("strong", { text: tr("paper.have") }), tr("paper.haveText")),
+    h("div", { class: "field" }, h("label", { text: tr("paper.label") }), input),
     go,
     err,
-    h("p", { class: "hint", text: "Ingen pappersnyckel? Då återstår återställningskortet:" }),
+    h("p", { class: "hint", text: tr("paper.none") }),
   );
   return form;
 }
@@ -798,15 +751,15 @@ function paperKeyForm(setup, done) {
 /** After a paper key brought the account back: what is (and is not) on this device now. */
 function showAfterPaperKey() {
   const d = dialog(
-    h("h2", { text: "Välkommen tillbaka" }),
-    h("p", { text: "Pappersnyckeln har lagt till den här enheten. Kontot och identifieraren är desamma, och dina kontakter ser bara att du har fått en ny enhet." }),
-    h("p", { class: "hint", text: "Kontakter och meddelanden fanns bara på den enhet du förlorade och finns inte här. Skriv till dina kontakter igen med deras identifierare: de som redan har godkänt dig kopplas direkt, och deras egna kopior av era konversationer finns kvar hos dem." }),
-    h("p", { class: "hint", text: "Ta bort den förlorade enheten under Enheter, så att ingen kan använda den. Pappersnyckeln gäller fortfarande; skapa gärna en ny där om den gamla har legat framme." }),
+    h("h2", { text: tr("welcomeBack.title") }),
+    h("p", { text: tr("welcomeBack.1") }),
+    h("p", { class: "hint", text: tr("welcomeBack.2") }),
+    h("p", { class: "hint", text: tr("welcomeBack.3") }),
     h(
       "div",
       { class: "actions" },
-      h("button", { class: "btn", text: "Stäng", onclick: () => d.close() }),
-      h("button", { class: "btn primary", text: "Öppna Enheter", onclick: () => { d.close(); showDevices(); } }),
+      h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() }),
+      h("button", { class: "btn primary", text: tr("welcomeBack.devices"), onclick: () => { d.close(); showDevices(); } }),
     ),
   );
 }
@@ -831,13 +784,13 @@ function hostOf(home) {
 function recoveryHelp(home, handle) {
   const host = hostOf(home);
   const intro = [
-    h("p", { text: "Utan en annan enhet kan ingen godkänna den här – ett lösenord räcker inte, det är det som skyddar kontot. Vägen tillbaka är ditt återställningskort." }),
-    h("p", { class: "hint", text: "När du återställer identiteten med kortet börjar kontot om, och nästa enhet du loggar in på blir den första. Identifieraren är densamma, men meddelandehistoriken går inte att få tillbaka (den fanns bara på dina enheter), och dina kontakter ser att dina nycklar har ändrats." }),
+    h("p", { text: tr("recover.intro") }),
+    h("p", { class: "hint", text: tr("recover.hint") }),
   ];
   if (!homeIsHere(home)) {
     return [
       ...intro,
-      h("p", { text: `Din identitet finns hos ${host}. Gå dit och återställ den med ditt återställningskort (glömt lösenord). Logga sedan in här igen.` }),
+      h("p", { text: tr("recover.elsewhere", { host }) }),
     ];
   }
   return [
@@ -845,10 +798,10 @@ function recoveryHelp(home, handle) {
     h(
       "ol",
       {},
-      h("li", {}, "Ladda ner rootcards nyckelverktyg – en fristående sida – och öppna filen i webbläsaren på din dator. ", h("a", { href: "vendor/rootcard/keytool.html", download: "rootcard-keytool.html", text: "Ladda ner nyckelverktyget" })),
-      h("li", { text: `Öppna identiteten med ditt återställningskort – kortfilen, eller användarnamnet ${handle.split("#")[0]} och återställningsnyckeln – och ange ${host} som värdadress.` }),
-      h("li", { text: `Välj "Reset forgotten password" och ett nytt lösenord.` }),
-      h("li", { text: "Logga sedan in här igen med det nya lösenordet." }),
+      h("li", {}, tr("recover.step1"), h("a", { href: "vendor/rootcard/keytool.html", download: "rootcard-keytool.html", text: tr("recover.step1Link") })),
+      h("li", { text: tr("recover.step2", { user: handle.split("#")[0], host }) }),
+      h("li", { text: tr("recover.step3") }),
+      h("li", { text: tr("recover.step4") }),
     ),
   ];
 }
@@ -870,7 +823,7 @@ async function enter({ store, account, handle, home }) {
   messenger.addEventListener("link", (e) => showLinkRequest(e.detail));
   messenger.addEventListener("error", (e) => console.warn(e.detail.message));
   messenger.addEventListener("removed", async () => {
-    toast("Den här enheten har tagits bort från kontot.");
+    toast(tr("main.removed"));
     await logout(true);
   });
   await messenger.start();
@@ -901,8 +854,8 @@ function onIncoming({ conv, kind }) {
   unread.add(conv);
   renderSidebar();
   if (looking || !settings().notify) return;
-  const who = messenger.contacts.get(conv)?.handle ?? "någon";
-  const text = kind === "request" ? `Ny förfrågan från ${who}` : kind === "file" ? `Ny fil från ${who}` : `Nytt meddelande från ${who}`;
+  const who = messenger.contacts.get(conv)?.handle ?? tr("common.someone");
+  const text = tr(kind === "request" ? "notify.request" : kind === "file" ? "notify.file" : "notify.message", { who });
   notify.show(text).catch(() => {});
 }
 
@@ -951,9 +904,9 @@ async function checkVersion() {
   const bar = h(
     "div",
     { class: "update", role: "status" },
-    h("span", { text: "En ny version av Murmo finns." }),
-    h("button", { class: "btn small primary", text: "Ladda om", onclick: () => location.reload() }),
-    h("button", { class: "btn small ghost", text: "Senare", onclick: () => bar.remove() }),
+    h("span", { text: tr("update.available") }),
+    h("button", { class: "btn small primary", text: tr("update.reload"), onclick: () => location.reload() }),
+    h("button", { class: "btn small ghost", text: tr("update.later"), onclick: () => bar.remove() }),
   );
   document.body.append(bar);
 }
@@ -965,30 +918,30 @@ async function setNotifications(on) {
     setSetting("notify", false);
     await notify.unsubscribe().catch(() => {});
     await messenger.setPushEndpoint(null).catch(() => {});
-    return "Notiser är av.";
+    return tr("notify.off");
   }
   const s = notify.support();
-  if (s === "ios-install") return "På iPhone och iPad fungerar notiser när Murmo ligger på hemskärmen: välj Dela → Lägg till på hemskärmen och slå på notiser där.";
-  if (s !== "ok") return "Den här webbläsaren stöder inte notiser.";
+  if (s === "ios-install") return tr("notify.ios");
+  if (s !== "ok") return tr("notify.unsupported");
   const r = await notify.request();
-  if (r !== "granted") return r === "denied" ? "Notiser är blockerade för den här sidan. Tillåt dem i webbläsarens inställningar för sidan och försök igen." : "Notiser slogs inte på.";
+  if (r !== "granted") return tr(r === "denied" ? "notify.blocked" : "notify.notOn");
   setSetting("notify", true);
   setSetting("notifyPrompted", true);
   try {
     const endpoint = await notify.pushEndpoint(info.push_key);
-    if (!endpoint) return "Notiser är på medan Murmo är öppet i bakgrunden. Den här webbläsaren eller servern stöder inte push, så en stängd app väcks inte.";
+    if (!endpoint) return tr("notify.noPush");
     await messenger.setPushEndpoint(endpoint);
-    return "Notiser är på, även när Murmo är stängt.";
+    return tr("notify.on");
   } catch (x) {
     console.warn("push", x?.message ?? x);
-    return "Notiser är på medan Murmo är öppet i bakgrunden. Push gick inte att slå på just nu, så en stängd app väcks inte.";
+    return tr("notify.pushFailed");
   }
 }
 
 const ui = {};
 
 function renderShell() {
-  ui.sideList = h("nav", { class: "side-list", "aria-label": "Konversationer" });
+  ui.sideList = h("nav", { class: "side-list", "aria-label": tr("side.conversations") });
   ui.foot = h("div", { class: "side-foot" });
   ui.main = h("main", { class: "main" });
   ui.shell = h(
@@ -1001,7 +954,7 @@ function renderShell() {
         "div",
         { class: "side-top" },
         h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo"),
-        h("button", { class: "icon-btn", "aria-label": "Ny konversation", title: "Ny konversation", onclick: () => openConversation(null, true) }, icon("plus")),
+        h("button", { class: "icon-btn", "aria-label": tr("side.newConversation"), title: tr("side.newConversation"), onclick: () => openConversation(null, true) }, icon("plus")),
       ),
       ui.sideList,
       ui.foot,
@@ -1027,20 +980,20 @@ function renderSidebar() {
       { class: `conv${c.account === current ? " on" : ""}`, onclick: () => openConversation(c.account) },
       h("span", { class: "avatar small", text: name.slice(0, 1).toUpperCase() }),
       h("span", { class: "name" }, name, h("span", { class: "tag", text: tag })),
-      c.state === "incoming" ? h("span", { class: "badge", text: "ny" }) : null,
-      c.state === "outgoing" ? h("span", { class: "badge muted", text: "väntar" }) : null,
-      c.state === "accepted" && unread.has(c.account) ? h("span", { class: "unread", "aria-label": "Oläst" }) : null,
+      c.state === "incoming" ? h("span", { class: "badge", text: tr("side.badgeNew") }) : null,
+      c.state === "outgoing" ? h("span", { class: "badge muted", text: tr("side.badgeWaiting") }) : null,
+      c.state === "accepted" && unread.has(c.account) ? h("span", { class: "unread", "aria-label": tr("side.unread") }) : null,
       c.fork ? h("span", { class: "badge", text: "!" }) : null,
     );
   };
   put(ui.sideList,
-    incoming.length ? h("div", { class: "side-head", text: "Förfrågningar" }) : null,
+    incoming.length ? h("div", { class: "side-head", text: tr("side.requests") }) : null,
     ...incoming.map(item),
-    h("div", { class: "side-head", text: "Konversationer" }),
+    h("div", { class: "side-head", text: tr("side.conversations") }),
     ...(convs.length
       ? convs.map(item)
-      : [h("div", { class: "empty" }, h("p", { class: "hint", text: "Inga konversationer ännu." }), h("button", { class: "btn primary", text: "Ny konversation", onclick: () => openConversation(null, true) }), about())]),
-    blocked.length ? h("div", { class: "side-head", text: "Blockerade" }) : null,
+      : [h("div", { class: "empty" }, h("p", { class: "hint", text: tr("side.none") }), h("button", { class: "btn primary", text: tr("side.newConversation"), onclick: () => openConversation(null, true) }), about())]),
+    blocked.length ? h("div", { class: "side-head", text: tr("side.blocked") }) : null,
     ...blocked.map(item),
   );
   const [name] = splitHandle(messenger.handle);
@@ -1049,10 +1002,10 @@ function renderSidebar() {
     h(
       "div",
       { class: "me" },
-      h("div", { class: "h", text: messenger.handle, title: "Klicka för att kopiera", onclick: () => navigator.clipboard?.writeText(messenger.handle).then(() => toast("Identifieraren kopierad.")) }),
-      h("div", { class: "s" }, h("span", { class: `dot${messenger.status === "online" ? " on" : ""}` }), messenger.status === "online" ? "Ansluten" : "Ansluter…", homeLabel(messenger.home) ? ` · ${homeLabel(messenger.home)}` : ""),
+      h("div", { class: "h", text: messenger.handle, title: tr("side.copyHint"), onclick: () => navigator.clipboard?.writeText(messenger.handle).then(() => toast(tr("common.handleCopied"))) }),
+      h("div", { class: "s" }, h("span", { class: `dot${messenger.status === "online" ? " on" : ""}` }), tr(messenger.status === "online" ? "side.online" : "side.connecting"), homeLabel(messenger.home) ? ` · ${homeLabel(messenger.home)}` : ""),
     ),
-    h("button", { class: "icon-btn", "aria-label": "Konto och inställningar", title: "Konto och inställningar", onclick: showAccountMenu }, icon("more")),
+    h("button", { class: "icon-btn", "aria-label": tr("side.account"), title: tr("side.account"), onclick: showAccountMenu }, icon("more")),
   );
 }
 
@@ -1079,7 +1032,7 @@ function topbar(...children) {
   return h(
     "div",
     { class: "topbar" },
-    h("button", { class: "icon-btn back-btn", "aria-label": "Tillbaka till konversationerna", onclick: closeConversation }, icon("back")),
+    h("button", { class: "icon-btn back-btn", "aria-label": tr("side.back"), onclick: closeConversation }, icon("back")),
     ...children,
   );
 }
@@ -1125,19 +1078,19 @@ function openConversation(account, form = false) {
   ui.thread = h("div", { class: "thread" });
   ui.scroll = h("div", { class: "scroll" }, ui.thread);
   const head = topbar(
-    h("div", { class: "title" }, name, h("span", { class: "tag", text: tag }), homeLabel(c.home) ? h("span", { class: "home", text: ` · ${homeLabel(c.home)}` }) : null, c.retention ? h("span", { class: "home", title: "Meddelanden raderas från dina enheter efter den här tiden", text: ` · raderas efter ${retentionLabel(c.retention)}` }) : null),
-    c.state === "accepted" ? h("button", { class: "btn ghost small", onclick: () => showSafety(c) }, icon("shield"), h("span", { class: "wide", text: "Säkerhetskod" })) : null,
-    h("button", { class: "icon-btn", "aria-label": "Fler val", onclick: () => showContactMenu(c) }, icon("more")),
+    h("div", { class: "title" }, name, h("span", { class: "tag", text: tag }), homeLabel(c.home) ? h("span", { class: "home", text: ` · ${homeLabel(c.home)}` }) : null, c.retention ? h("span", { class: "home", title: tr("conv.retentionTitle"), text: tr("conv.retention", { time: retentionLabel(c.retention) }) }) : null),
+    c.state === "accepted" ? h("button", { class: "btn ghost small", onclick: () => showSafety(c) }, icon("shield"), h("span", { class: "wide", text: tr("conv.safety") })) : null,
+    h("button", { class: "icon-btn", "aria-label": tr("conv.more"), onclick: () => showContactMenu(c) }, icon("more")),
   );
   const parts = [head];
-  if (c.fork) parts.push(h("div", { class: "banner warn", text: MESSAGES.fork }));
+  if (c.fork) parts.push(h("div", { class: "banner warn", text: tr("err.fork") }));
   else if (c.devicesChanged && c.state === "accepted") {
-    parts.push(h("div", { class: "banner", text: `${c.handle} har ändrat sina enheter. Säkerhetskoden har ändrats.` }));
+    parts.push(h("div", { class: "banner", text: tr("conv.devicesChanged", { handle: c.handle }) }));
   }
   parts.push(ui.scroll);
   if (c.state === "incoming") parts.push(requestBox(c));
-  else if (c.state === "outgoing") parts.push(h("div", { class: "request-box", text: `Förfrågan skickad. Du kan skriva när ${c.handle} har accepterat.` }));
-  else if (c.state === "blocked") parts.push(h("div", { class: "request-box" }, h("span", { text: "Blockerad. " }), h("button", { class: "btn small", text: "Häv blockering", onclick: () => messenger.setState(c.account, "accepted").then(() => openConversation(c.account)) })));
+  else if (c.state === "outgoing") parts.push(h("div", { class: "request-box", text: tr("conv.requested", { handle: c.handle }) }));
+  else if (c.state === "blocked") parts.push(h("div", { class: "request-box" }, h("span", { text: tr("conv.blocked") }), h("button", { class: "btn small", text: tr("conv.unblock"), onclick: () => messenger.setState(c.account, "accepted").then(() => openConversation(c.account)) })));
   else parts.push(composer(c));
   put(ui.main,...parts);
   renderSeq = 0;
@@ -1149,14 +1102,14 @@ function requestBox(c) {
     "div",
     { class: "request-box" },
     h("strong", { text: c.handle }),
-    h("span", { text: " vill skicka meddelanden till dig." }),
-    h("p", { class: "hint", text: "Inget mer från avsändaren visas förrän du accepterar." }),
+    h("span", { text: tr("conv.wantsToWrite") }),
+    h("p", { class: "hint", text: tr("conv.untilAccepted") }),
     h(
       "div",
       { class: "actions" },
-      h("button", { class: "btn primary", text: "Acceptera", onclick: () => messenger.accept(c.account).then(() => openConversation(c.account), (x) => toast(say(x))) }),
-      h("button", { class: "btn", text: "Neka", onclick: () => messenger.setState(c.account, "declined").then(() => openConversation(null)) }),
-      h("button", { class: "btn danger", text: "Blockera", onclick: () => messenger.setState(c.account, "blocked").then(() => openConversation(null)) }),
+      h("button", { class: "btn primary", text: tr("conv.accept"), onclick: () => messenger.accept(c.account).then(() => openConversation(c.account), (x) => toast(say(x))) }),
+      h("button", { class: "btn", text: tr("conv.decline"), onclick: () => messenger.setState(c.account, "declined").then(() => openConversation(null)) }),
+      h("button", { class: "btn danger", text: tr("conv.block"), onclick: () => messenger.setState(c.account, "blocked").then(() => openConversation(null)) }),
     ),
   );
 }
@@ -1164,11 +1117,11 @@ function requestBox(c) {
 /** The start of the main pane: add a conversation by exact identifier. */
 function renderWelcome() {
   ui.thread = null;
-  const input = h("input", { class: "input", id: "new-handle", placeholder: "Namn#TAGG", spellcheck: "false", autocomplete: "off", autocapitalize: "off", enterkeyhint: "next" });
-  const note = h("input", { class: "input", id: "new-note", placeholder: "Hej, det är jag!", maxlength: 500, enterkeyhint: "send" });
+  const input = h("input", { class: "input", id: "new-handle", placeholder: tr("common.handlePlaceholder"), spellcheck: "false", autocomplete: "off", autocapitalize: "off", enterkeyhint: "next" });
+  const note = h("input", { class: "input", id: "new-note", placeholder: tr("new.notePlaceholder"), maxlength: 500, enterkeyhint: "send" });
   const err = h("div", { class: "error" });
-  const send = h("button", { class: "btn primary", type: "submit", text: "Skicka förfrågan" });
-  const copy = () => navigator.clipboard?.writeText(messenger.handle).then(() => toast("Identifieraren kopierad."));
+  const send = h("button", { class: "btn primary", type: "submit", text: tr("new.send") });
+  const copy = () => navigator.clipboard?.writeText(messenger.handle).then(() => toast(tr("common.handleCopied")));
   const form = h(
     "form",
     {
@@ -1187,10 +1140,10 @@ function renderWelcome() {
         }
       },
     },
-    h("h1", { text: "Ny konversation" }),
-    h("p", { class: "hint", text: "Skriv personens identifierare exakt. Det går inte att söka, och mottagaren måste acceptera innan ni kan skriva till varandra." }),
-    h("div", { class: "field" }, h("label", { for: "new-handle", text: "Identifierare" }), input),
-    h("div", { class: "field" }, h("label", { for: "new-note", text: "Hälsning (valfri, skickas med förfrågan)" }), note),
+    h("h1", { text: tr("side.newConversation") }),
+    h("p", { class: "hint", text: tr("new.hint") }),
+    h("div", { class: "field" }, h("label", { for: "new-handle", text: tr("common.handle") }), input),
+    h("div", { class: "field" }, h("label", { for: "new-note", text: tr("new.note") }), note),
     err,
     send,
   );
@@ -1201,12 +1154,12 @@ function renderWelcome() {
     : h(
         "div",
         { class: "card offer" },
-        h("div", {}, h("strong", { text: "Notiser" }), h("div", { class: "hint", text: "Få veta när någon skriver, även när Murmo är stängt." })),
-        h("button", { class: "btn small", text: "Inte nu", onclick: () => { setSetting("notify", false); offer.remove(); } }),
-        h("button", { class: "btn small primary", text: "Slå på", onclick: async () => { offer.remove(); toast(await setNotifications(true)); } }),
+        h("div", {}, h("strong", { text: tr("new.notifyTitle") }), h("div", { class: "hint", text: tr("new.notifyText") })),
+        h("button", { class: "btn small", text: tr("common.notNow"), onclick: () => { setSetting("notify", false); offer.remove(); } }),
+        h("button", { class: "btn small primary", text: tr("new.notifyOn"), onclick: async () => { offer.remove(); toast(await setNotifications(true)); } }),
       );
   put(ui.main,
-    topbar(h("div", { class: "title", text: "Ny konversation" })),
+    topbar(h("div", { class: "title", text: tr("side.newConversation") })),
     h(
       "div",
       { class: "welcome" },
@@ -1214,7 +1167,7 @@ function renderWelcome() {
         "div",
         { class: "welcome-inner" },
         form,
-        h("div", { class: "card mine" }, h("div", {}, h("div", { class: "hint", text: "Din identifierare – dela den med dem du vill höra av" }), h("strong", { text: messenger.handle })), h("button", { class: "btn small", text: "Kopiera", onclick: copy })),
+        h("div", { class: "card mine" }, h("div", {}, h("div", { class: "hint", text: tr("new.mine") }), h("strong", { text: messenger.handle })), h("button", { class: "btn small", text: tr("common.copy"), onclick: copy })),
         offer,
         singleDeviceReminder(),
         about(),
@@ -1243,14 +1196,14 @@ function singleDeviceReminder() {
           h(
             "div",
             {},
-            h("strong", { text: "Du har bara den här enheten" }),
-            h("div", { class: "hint", text: "Om webbläsarens data rensas kan ingen enhet godkänna en ny. Då behövs återställningskortet, och kontot börjar om. Länka en enhet till, eller skapa en pappersnyckel som kan godkänna en ny enhet." }),
+            h("strong", { text: tr("lone.title") }),
+            h("div", { class: "hint", text: tr("lone.text") }),
           ),
           h(
             "div",
             { class: "btns" },
-            h("button", { class: "btn small primary", text: "Skapa pappersnyckel", onclick: () => showPaperKey(() => slot.remove()) }),
-            h("button", { class: "btn small", text: "Inte nu", onclick: () => { setSetting("singleDeviceSeen", true); slot.remove(); } }),
+            h("button", { class: "btn small primary", text: tr("lone.make"), onclick: () => showPaperKey(() => slot.remove()) }),
+            h("button", { class: "btn small", text: tr("common.notNow"), onclick: () => { setSetting("singleDeviceSeen", true); slot.remove(); } }),
           ),
         ),
       );
@@ -1261,9 +1214,9 @@ function singleDeviceReminder() {
 }
 
 function composer(c) {
-  const ta = h("textarea", { rows: 1, placeholder: `Skriv till ${splitHandle(c.handle)[0]}…` });
+  const ta = h("textarea", { rows: 1, placeholder: tr("compose.placeholder", { name: splitHandle(c.handle)[0] }) });
   const file = h("input", { type: "file", class: "hidden", multiple: true });
-  const send = h("button", { class: "send", "aria-label": "Skicka", disabled: true }, icon("send"));
+  const send = h("button", { class: "send", "aria-label": tr("compose.send"), disabled: true }, icon("send"));
   const grow = () => {
     ta.style.height = "auto";
     ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`;
@@ -1291,7 +1244,7 @@ function composer(c) {
         ta.value = back;
         grow();
         ta.focus();
-      } else toast("Meddelandet skickades inte.");
+      } else toast(tr("compose.notSent"));
     });
     else await sendNow(text);
   };
@@ -1300,7 +1253,7 @@ function composer(c) {
   // "Ångra": a text waits a few seconds above the composer before it is encrypted and sent (DESIGN.md §6.6).
   const holdForUndo = (text, go, undo) => {
     let left = Math.round(UNDO_SEND / 1000);
-    const state = h("span", { class: "state", text: `Skickas om ${left} s` });
+    const state = h("span", { class: "state", text: tr("compose.sendsIn", { n: left }) });
     const fire = () => {
       clearInterval(tick);
       held.delete(fire);
@@ -1308,7 +1261,7 @@ function composer(c) {
       go(text);
     };
     const back = h("button", {
-      type: "button", class: "btn small", text: "Ångra",
+      type: "button", class: "btn small", text: tr("compose.undo"),
       onclick: () => {
         clearInterval(tick);
         held.delete(fire);
@@ -1320,20 +1273,20 @@ function composer(c) {
     const tick = setInterval(() => {
       left -= 1;
       if (left <= 0) fire();
-      else state.textContent = `Skickas om ${left} s`;
+      else state.textContent = tr("compose.sendsIn", { n: left });
     }, 1000);
     held.add(fire);
     uploads.append(row);
   };
   const upload = async (name, run) => {
     const bar = h("progress", { max: 1, value: 0 });
-    const state = h("span", { class: "state", text: "Förbereder…" });
+    const state = h("span", { class: "state", text: tr("compose.preparing") });
     const label = h("span", { class: "name", dir: "auto", text: name });
     const row = h("div", { class: "upload" }, h("span", { class: "spinner" }), label, state, bar);
     uploads.append(row);
     let id = null;
     const finish = (kind, text, ms) => {
-      const close = h("button", { type: "button", class: "close-up", "aria-label": "Stäng", title: "Stäng", onclick: () => row.remove() }, icon("close"));
+      const close = h("button", { type: "button", class: "close-up", "aria-label": tr("common.close"), title: tr("common.close"), onclick: () => row.remove() }, icon("close"));
       row.className = `upload ${kind}`;
       put(row, h("span", { class: "mark", "aria-hidden": "true", text: kind === "fail" ? "!" : kind === "ok" ? "✓" : "…" }), label, h("span", { class: "state", text }), close);
       setTimeout(() => row.remove(), ms);
@@ -1342,7 +1295,7 @@ function composer(c) {
       const r = await run(({ phase, done, total, id: mid }) => {
         const share = total ? done / total : 1;
         if (phase === "read") {
-          state.textContent = "Förbereder…";
+          state.textContent = tr("compose.preparing");
           bar.value = 0.15 * share;
           return;
         }
@@ -1352,13 +1305,13 @@ function composer(c) {
           if (current === c.account) renderThread();
         }
         sending.set(id, share);
-        state.textContent = `Skickar… ${Math.round(share * 100)} %`;
+        state.textContent = tr("compose.sending", { pct: percent(share) });
         bar.value = 0.15 + 0.85 * share;
         showSending(id);
       });
-      if (r.live) finish("ok", "Skickad", 2500);
-      else if (r.queued) finish("wait", "Väntar krypterad på servern tills mottagaren ansluter", 7000);
-      else finish("wait", "Inte skickad än – skickas när ni båda är anslutna", 7000);
+      if (r.live) finish("ok", tr("compose.sent"), 2500);
+      else if (r.queued) finish("wait", tr("compose.queued"), 7000);
+      else finish("wait", tr("compose.later"), 7000);
     } catch (x) {
       finish("fail", say(x), 12000);
     } finally {
@@ -1389,12 +1342,12 @@ function composer(c) {
   file.addEventListener("change", () => { sendFiles([...file.files]); file.value = ""; });
 
   // One panel above the composer at a time: the emoji or the user's GIFs.
-  const panel = h("div", { class: "picker hidden", role: "region", "aria-label": "Emoji och GIF" });
+  const panel = h("div", { class: "picker hidden", role: "region", "aria-label": tr("compose.panel") });
   let open = null;
   let seq = 0;
   let urls = []; // object URLs of the GIFs shown, revoked when the panel closes
-  const emojiBtn = h("button", { class: "icon-btn", type: "button", "aria-label": "Emoji", title: "Emoji", "aria-expanded": "false" }, icon("smile"));
-  const gifBtn = h("button", { class: "icon-btn gif-btn", type: "button", "aria-label": "GIF", title: "Dina GIF:ar", "aria-expanded": "false", text: "GIF" });
+  const emojiBtn = h("button", { class: "icon-btn", type: "button", "aria-label": tr("compose.emoji"), title: tr("compose.emoji"), "aria-expanded": "false" }, icon("smile"));
+  const gifBtn = h("button", { class: "icon-btn gif-btn", type: "button", "aria-label": "GIF", title: tr("compose.yourGifs"), "aria-expanded": "false", text: "GIF" });
   const closePanel = () => {
     open = null;
     panel.classList.add("hidden");
@@ -1427,7 +1380,7 @@ function composer(c) {
     h(
       "div",
       { class: "row" },
-      h("button", { class: "icon-btn", "aria-label": "Bifoga fil", title: "Skicka fil", onclick: () => file.click() }, icon("clip")),
+      h("button", { class: "icon-btn", "aria-label": tr("compose.attach"), title: tr("compose.sendFile"), onclick: () => file.click() }, icon("clip")),
       emojiBtn,
       gifBtn,
       h("span", { class: "grow" }),
@@ -1435,7 +1388,7 @@ function composer(c) {
     ),
     file,
   );
-  const wrap = h("div", { class: "composer-wrap" }, panel, uploads, box, h("div", { class: "foot-note", text: "Krypterat från enhet till enhet. Servern sparar inget efter leverans." }));
+  const wrap = h("div", { class: "composer-wrap" }, panel, uploads, box, h("div", { class: "foot-note", text: tr("compose.foot") }));
   // A click outside the panel and its buttons closes it.
   const outside = (e) => {
     if (!wrap.isConnected) return document.removeEventListener("pointerdown", outside);
@@ -1459,8 +1412,8 @@ async function emojiPanel(panel, pick, alive) {
     // the list is a convenience; without it the picker starts at the first category
   }
   if (!alive()) return;
-  const cats = [...(recent.length ? [{ label: "Senast använda", icon: null, emoji: recent }] : []), ...emoji.CATEGORIES];
-  const grid = h("div", { class: "emoji-grid", role: "listbox", "aria-label": "Emoji" });
+  const cats = [...(recent.length ? [{ label: tr("emoji.recent"), icon: null, emoji: recent }] : []), ...emoji.CATEGORIES.map((c) => ({ ...c, label: tr(`emoji.${c.id}`) }))];
+  const grid = h("div", { class: "emoji-grid", role: "listbox", "aria-label": tr("compose.emoji") });
   const tabs = h("div", { class: "picker-tabs", role: "tablist" });
   const show = (i) => {
     put(tabs, cats.map((cat, j) =>
@@ -1481,7 +1434,7 @@ async function emojiPanel(panel, pick, alive) {
     ));
     grid.scrollTop = 0;
   };
-  put(panel, tabs, h("div", { class: "picker-title", text: "Emoji" }), grid);
+  put(panel, tabs, h("div", { class: "picker-title", text: tr("compose.emoji") }), grid);
   show(0);
 }
 
@@ -1496,8 +1449,8 @@ async function gifPanel(panel, c, { upload, close, alive, track }) {
   const tabs = h("div", { class: "seg gif-tabs", role: "tablist" });
   const show = (which) => {
     put(tabs,
-      h("button", { type: "button", role: "tab", class: which === "mine" ? "on" : "", "aria-selected": String(which === "mine"), text: "Mina GIF:ar", onclick: () => show("mine") }),
-      search ? h("button", { type: "button", role: "tab", class: which === "search" ? "on" : "", "aria-selected": String(which === "search"), text: "Sök på GIPHY", onclick: () => show("search") }) : null,
+      h("button", { type: "button", role: "tab", class: which === "mine" ? "on" : "", "aria-selected": String(which === "mine"), text: tr("gif.mine"), onclick: () => show("mine") }),
+      search ? h("button", { type: "button", role: "tab", class: which === "search" ? "on" : "", "aria-selected": String(which === "search"), text: tr("gif.searchTab"), onclick: () => show("search") }) : null,
     );
     const still = () => alive() && tabs.dataset.on === which;
     tabs.dataset.on = which;
@@ -1518,8 +1471,8 @@ async function gifMine(box, c, { upload, close, alive, track }) {
     if (!alive()) return;
     if (!list.length) {
       put(grid, h("p", { class: "hint", text: info?.giphy?.key
-        ? "Inga sparade GIF:ar än. Sök på GIPHY, välj en fil, eller tryck ”Spara GIF” under en GIF i en konversation."
-        : "Inga sparade GIF:ar än. Välj en fil, eller tryck ”Spara GIF” under en GIF i en konversation." }));
+        ? tr("gif.emptyGiphy")
+        : tr("gif.empty") }));
       return;
     }
     const items = [];
@@ -1529,13 +1482,13 @@ async function gifMine(box, c, { upload, close, alive, track }) {
       const remove = h("button", {
         type: "button",
         class: "gif-remove",
-        "aria-label": "Ta bort från mina GIF:ar",
-        title: "Ta bort från mina GIF:ar",
+        "aria-label": tr("gif.remove"),
+        title: tr("gif.remove"),
         onclick: () => messenger.removeGif(g.id).catch((x) => toast(say(x))),
       }, icon("close"));
       if (!blob) {
         // Saved on another device; the bytes are on their way (or come when that device is connected).
-        items.push(h("div", { class: "gif" }, h("div", { class: "gif-send wait", text: "Hämtas…", title: "Sparad på en annan enhet, hämtas därifrån" }), remove));
+        items.push(h("div", { class: "gif" }, h("div", { class: "gif-send wait", text: tr("gif.fetching"), title: tr("gif.elsewhere") }), remove));
         continue;
       }
       const url = URL.createObjectURL(blob);
@@ -1546,12 +1499,12 @@ async function gifMine(box, c, { upload, close, alive, track }) {
         h("button", {
           type: "button",
           class: "gif-send",
-          title: "Skicka",
+          title: tr("compose.send"),
           onclick: async () => {
             close();
             await upload("GIF", (progress) => messenger.sendGif(c.account, g.id, progress));
           },
-        }, h("img", { src: url, alt: "Sparad GIF", width: String(g.width), height: String(g.height) })),
+        }, h("img", { src: url, alt: tr("gif.saved"), width: String(g.width), height: String(g.height) })),
         remove,
       ));
     }
@@ -1585,8 +1538,8 @@ async function gifMine(box, c, { upload, close, alive, track }) {
     h(
       "div",
       { class: "picker-head" },
-      h("span", { class: "hint", text: "Tryck för att skicka. Krypterad, på alla dina enheter." }),
-      h("button", { type: "button", class: "btn small", text: "Från fil…", title: "Välj GIF-fil", onclick: () => pickFile.click() }),
+      h("span", { class: "hint", text: tr("gif.tapToSend") }),
+      h("button", { type: "button", class: "btn small", text: tr("gif.fromFile"), title: tr("gif.pickFile"), onclick: () => pickFile.click() }),
     ),
     grid,
     pickFile,
@@ -1599,9 +1552,9 @@ async function gifMine(box, c, { upload, close, alive, track }) {
  * collection. The warning says what GIPHY gets to see.
  */
 async function gifSearch(box, config, { alive, track }) {
-  const input = h("input", { class: "input", type: "search", placeholder: "Sök GIF:ar, tryck för att spara", enterkeyhint: "search", spellcheck: "false", autocomplete: "off", "aria-label": "Sök GIF:ar på GIPHY" });
+  const input = h("input", { class: "input", type: "search", placeholder: tr("gif.searchPlaceholder"), enterkeyhint: "search", spellcheck: "false", autocomplete: "off", "aria-label": tr("gif.searchLabel") });
   const grid = h("div", { class: "gif-grid" });
-  const status = h("span", { class: "hint", text: "Skriv minst två tecken." });
+  const status = h("span", { class: "hint", text: tr("gif.minChars") });
   let ctl = null;
   let timer = 0;
   let shown = [];
@@ -1609,32 +1562,32 @@ async function gifSearch(box, config, { alive, track }) {
     ctl?.abort();
     ctl = new AbortController();
     const signal = ctl.signal;
-    status.textContent = "Söker…";
+    status.textContent = tr("gif.searching");
     let results;
     try {
-      results = await giphy.search(config, q, { maxBytes: GIF_MAX_BYTES, signal });
+      results = await giphy.search(config, q, { maxBytes: GIF_MAX_BYTES, signal, lang: i18n.language() });
     } catch (x) {
       if (x?.name === "AbortError" || !alive()) return;
       status.textContent = say(x);
       return;
     }
     if (!alive() || signal.aborted) return;
-    status.textContent = results.length ? "Tryck för att spara i Mina GIF:ar." : "Inga träffar.";
+    status.textContent = tr(results.length ? "gif.tapToSave" : "gif.noHits");
     for (const u of shown) URL.revokeObjectURL(u);
     shown = [];
     put(grid, results.map((r) => {
-      const img = h("img", { alt: r.title || "GIF från GIPHY" });
+      const img = h("img", { alt: r.title || tr("gif.fromGiphy") });
       const tile = h("button", {
         type: "button",
         class: "gif-send",
-        title: r.title ? `Spara: ${r.title}` : "Spara bland mina GIF:ar",
+        title: r.title ? tr("gif.saveNamed", { title: r.title }) : tr("gif.saveMine"),
         onclick: async () => {
           if (tile.classList.contains("busy") || tile.classList.contains("saved")) return;
           tile.classList.add("busy");
           try {
             const res = await messenger.saveGif(await giphy.fetchGif(r.full, GIF_MAX_BYTES));
             tile.classList.add("saved");
-            toast(res === "exists" ? "Den finns redan bland dina GIF:ar." : "Sparad bland dina GIF:ar.");
+            toast(tr(res === "exists" ? "gif.exists" : "gif.savedToast"));
           } catch (x) {
             toast(say(x));
           } finally {
@@ -1658,7 +1611,7 @@ async function gifSearch(box, config, { alive, track }) {
     const q = input.value.trim();
     if (q.length < 2) {
       ctl?.abort();
-      status.textContent = "Skriv minst två tecken.";
+      status.textContent = tr("gif.minChars");
       put(grid);
       return;
     }
@@ -1678,8 +1631,8 @@ async function gifSearch(box, config, { alive, track }) {
     h(
       "details",
       { class: "warn-note", role: "note" },
-      h("summary", {}, h("strong", { text: "Direkt från GIPHY: " }), "de ser din IP-adress och sökning. Bara HTTPS, inte E2E."),
-      h("p", { text: "Sökningen och GIF:arna hämtas av din webbläsare direkt från GIPHY, som ser din IP-adress och vad du söker. Den trafiken skyddas bara av HTTPS, inte av Murmos end-to-end-kryptering. Inget hämtas innan du skriver, och det du sedan skickar är krypterat som vanligt." }),
+      h("summary", {}, h("strong", { text: tr("gif.warnTitle") }), tr("gif.warnShort")),
+      h("p", { text: tr("gif.warnLong") }),
     ),
     input,
     h("div", { class: "gif-status" }, status, h("span", { class: "giphy-mark", text: "Powered by GIPHY" })),
@@ -1700,10 +1653,12 @@ async function renderThread() {
   const seen = new Set();
   let lastDay = "";
   for (const m of msgs) {
-    const d = dayLabel(m.time);
+    // Grouped by the local calendar day; the label is made when the group first shows ("Today" stays so until the
+    // conversation is opened again).
+    const d = i18n.dayKey(m.time);
     if (d !== lastDay) {
       let day = msgNodes.get(`day:${d}`)?.node;
-      if (!day) msgNodes.set(`day:${d}`, { node: (day = h("div", { class: "day", text: d })) });
+      if (!day) msgNodes.set(`day:${d}`, { node: (day = h("div", { class: "day", text: dayLabel(m.time) })) });
       seen.add(`day:${d}`);
       out.push(day);
       lastDay = d;
@@ -1715,7 +1670,7 @@ async function renderThread() {
     out.push(entry.node);
   }
   for (const id of msgNodes.keys()) if (!seen.has(id)) msgNodes.delete(id);
-  if (!msgs.length) out.push(h("div", { class: "day", text: "Inga meddelanden ännu." }));
+  if (!msgs.length) out.push(h("div", { class: "day", text: tr("conv.empty") }));
   reconcile(ui.thread, out);
   if (nearBottom || seq === 1) ui.scroll.scrollTop = ui.scroll.scrollHeight;
 }
@@ -1733,18 +1688,18 @@ function messageSig(m) {
 /** "Skickar … %" under an outgoing file on its way, updated in place (no new render for each part). */
 function sendingNote(id) {
   const share = sending.get(id);
-  return h("span", { class: "pending sending", "data-id": id, text: ` · Skickar… ${Math.round((share ?? 0) * 100)} %` });
+  return h("span", { class: "pending sending", "data-id": id, text: tr("msg.sending", { pct: percent(share ?? 0) }) });
 }
 
 function showSending(id) {
   for (const el of ui.thread?.querySelectorAll(".sending") ?? []) {
-    if (el.dataset.id === id) el.textContent = ` · Skickar… ${Math.round((sending.get(id) ?? 0) * 100)} %`;
+    if (el.dataset.id === id) el.textContent = tr("msg.sending", { pct: percent(sending.get(id) ?? 0) });
   }
 }
 
 /** "Ta bort" under a message: for everyone (own, recent) or for me. */
 function moreButton(m) {
-  const btn = h("button", { type: "button", class: "react-btn more-btn", "aria-label": "Ta bort meddelandet", title: "Ta bort…", "aria-haspopup": "dialog" }, icon("more"));
+  const btn = h("button", { type: "button", class: "react-btn more-btn", "aria-label": tr("msg.deleteLabel"), title: tr("msg.deleteTitle"), "aria-haspopup": "dialog" }, icon("more"));
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
     messageMenu(m);
@@ -1764,23 +1719,23 @@ function messageMenu(m) {
     }
   };
   const d = dialog(
-    h("h2", { text: m.kind === "retracted" ? "Ta bort platshållaren?" : "Ta bort meddelandet?" }),
-    forAll ? h("p", { class: "hint", text: `”Ta bort för alla” byter ut meddelandet mot ”Du tog bort det här meddelandet” på ${personName(m.conv)}s och dina enheter när de tar emot det. Har ${personName(m.conv)} redan sett det, sparat det eller använder en äldre version av Murmo kan det finnas kvar – det går inte att ta tillbaka det som redan visats.` }) : null,
-    !forAll && m.dir === "out" && m.kind !== "retracted" ? h("p", { class: "hint", text: "Det går att ta bort ett meddelande för alla i 24 timmar efter att det skickats. Det här kan bara tas bort för dig." }) : null,
-    h("p", { class: "hint", text: `”Ta bort för mig” tar bort det på alla dina enheter. ${personName(m.conv)} behåller sitt exemplar.` }),
+    h("h2", { text: tr(m.kind === "retracted" ? "msg.deleteTombstone" : "msg.deleteQuestion") }),
+    forAll ? h("p", { class: "hint", text: tr("msg.forAllHint", { name: personName(m.conv) }) }) : null,
+    !forAll && m.dir === "out" && m.kind !== "retracted" ? h("p", { class: "hint", text: tr("msg.tooLateHint") }) : null,
+    h("p", { class: "hint", text: tr("msg.forMeHint", { name: personName(m.conv) }) }),
     h(
       "div",
       { class: "actions" },
-      h("button", { class: "btn", text: "Avbryt", onclick: () => d.close() }),
-      h("button", { class: "btn danger", text: "Ta bort för mig", onclick: () => run(() => messenger.deleteForMe(m.conv, m.id), "Borttaget för dig.") }),
-      forAll ? h("button", { class: "btn danger", text: "Ta bort för alla", onclick: () => run(() => messenger.retract(m.conv, m.id), "Borttaget för alla.") }) : null,
+      h("button", { class: "btn", text: tr("common.cancel"), onclick: () => d.close() }),
+      h("button", { class: "btn danger", text: tr("msg.forMe"), onclick: () => run(() => messenger.deleteForMe(m.conv, m.id), tr("msg.removedForMe")) }),
+      forAll ? h("button", { class: "btn danger", text: tr("msg.forAll"), onclick: () => run(() => messenger.retract(m.conv, m.id), tr("msg.removedForAll")) }) : null,
     ),
   );
 }
 
 function retractedView(m) {
-  const text = m.dir === "out" ? "Du tog bort det här meddelandet" : `${personName(m.conv)} tog bort ett meddelande`;
-  const meta = h("div", { class: "meta", text: clock(m.time) }, moreButton(m));
+  const text = m.dir === "out" ? tr("msg.youRemoved") : tr("msg.theyRemoved", { name: personName(m.conv) });
+  const meta = h("div", { class: "meta" }, timeView(m.time), moreButton(m));
   return h("div", { class: `msg ${m.dir} retracted` }, h("div", { class: "body", text }), meta);
 }
 
@@ -1788,17 +1743,17 @@ function message(m) {
   if (m.kind === "retracted") return retractedView(m);
   const body = m.kind === "file" ? fileView(m) : h("div", { class: emoji.emojiOnly(m.text) ? "body jumbo" : "body", dir: "auto", text: m.text ?? "" });
   const media = m.kind === "file" ? " media" : "";
-  const meta = h("div", { class: "meta", text: clock(m.time) });
+  const meta = h("div", { class: "meta" }, timeView(m.time));
   if (sending.has(m.id)) meta.append(sendingNote(m.id));
   else if (Messenger.undelivered(m)) {
     meta.append(
-      h("span", { class: "pending", text: " · Inte skickad än – skickas när mottagaren är ansluten " }),
+      h("span", { class: "pending", text: tr("msg.notYet") }),
       h("button", {
         class: "link",
-        text: "Försök nu",
+        text: tr("msg.tryNow"),
         onclick: async () => {
           try {
-            toast((await messenger.flushFiles()) ? "Skickad." : "Mottagaren är inte ansluten just nu.");
+            toast(tr((await messenger.flushFiles()) ? "msg.sentToast" : "msg.peerAway"));
           } catch (x) {
             toast(say(x));
           }
@@ -1828,15 +1783,15 @@ function saveGifButton(m) {
   return h("button", {
     type: "button",
     class: saved ? "save-gif-inline saved" : "save-gif-inline",
-    text: saved ? "✓ Sparad" : "Spara GIF",
-    title: saved ? "Finns bland dina GIF:ar" : "Spara bland dina GIF:ar",
+    text: tr(saved ? "gif.savedMark" : "gif.saveButton"),
+    title: tr(saved ? "gif.inMine" : "gif.saveMine"),
     disabled: saved,
     onclick: async (e) => {
       const btn = e.currentTarget;
       btn.disabled = true;
       try {
         const r = await messenger.saveGif(await messenger.fileBlob(m.file.f, "image/gif"));
-        toast(r === "exists" ? "Den finns redan bland dina GIF:ar." : "Sparad bland dina GIF:ar.");
+        toast(tr(r === "exists" ? "gif.exists" : "gif.savedToast"));
       } catch (x) {
         btn.disabled = false;
         toast(say(x));
@@ -1859,8 +1814,8 @@ async function react(m, e) {
 }
 
 function personName(account) {
-  if (account === messenger.me.account) return "Du";
-  return splitHandle(messenger.contacts.get(account)?.handle ?? "")[0] || "Någon";
+  if (account === messenger.me.account) return tr("common.you");
+  return splitHandle(messenger.contacts.get(account)?.handle ?? "")[0] || tr("common.someoneName");
 }
 
 /** The reactions under a message: one chip per emoji; tapping one's own takes it back, another's adds the same. */
@@ -1878,8 +1833,8 @@ function reactionsView(m, canReact) {
     return h("button", {
       type: "button",
       class: mine ? "reaction mine" : "reaction",
-      title: mine ? `${names} · tryck för att ta bort din` : names,
-      "aria-label": `${e} från ${names}`,
+      title: mine ? tr("react.tapToRemove", { names }) : names,
+      "aria-label": tr("react.from", { e, names }),
       disabled: !canReact,
       onclick: () => react(m, mine ? "" : e),
     }, h("span", { text: e }), who.length > 1 ? h("span", { class: "n", text: String(who.length) }) : null);
@@ -1887,7 +1842,7 @@ function reactionsView(m, canReact) {
 }
 
 function reactButton(m) {
-  const btn = h("button", { type: "button", class: "react-btn", "aria-label": "Reagera", title: "Reagera", "aria-haspopup": "menu" }, icon("smile"));
+  const btn = h("button", { type: "button", class: "react-btn", "aria-label": tr("react.label"), title: tr("react.label"), "aria-haspopup": "menu" }, icon("smile"));
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
     reactMenu(btn, m);
@@ -1910,16 +1865,16 @@ function reactMenu(anchor, m) {
   const esc = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); anchor.focus(); } };
   const menu = h(
     "div",
-    { class: "react-menu", role: "menu", "aria-label": "Reagera" },
+    { class: "react-menu", role: "menu", "aria-label": tr("react.label") },
     QUICK_REACTIONS.map((e) => h("button", {
       type: "button",
       role: "menuitem",
       class: e === mine ? "on" : "",
       text: e,
-      title: e === mine ? "Ta bort din reaktion" : `Reagera med ${e}`,
+      title: e === mine ? tr("react.removeMine") : tr("react.with", { e }),
       onclick: () => { close(); react(m, e === mine ? "" : e); },
     })),
-    h("button", { type: "button", role: "menuitem", class: "more", "aria-label": "Fler emoji", title: "Fler emoji", onclick: () => { close(); reactDialog(m); } }, icon("plus")),
+    h("button", { type: "button", role: "menuitem", class: "more", "aria-label": tr("react.more"), title: tr("react.more"), onclick: () => { close(); reactDialog(m); } }, icon("plus")),
   );
   menu.dataset.id = m.id;
   anchor.closest(".msg").append(menu);
@@ -1931,9 +1886,9 @@ function reactMenu(anchor, m) {
 function reactDialog(m) {
   const panel = h("div", { class: "picker in-dialog" });
   const d = dialog(
-    h("h2", { text: "Reagera" }),
+    h("h2", { text: tr("react.label") }),
     panel,
-    h("div", { class: "actions" }, h("button", { class: "btn", text: "Avbryt", onclick: () => d.close() })),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.cancel"), onclick: () => d.close() })),
   );
   emojiPanel(panel, (e) => { d.close(); react(m, e); }, () => d.open).catch(() => {});
 }
@@ -1941,7 +1896,7 @@ function reactDialog(m) {
 /** A ring while the server holds the message for the recipient, a ring with a check once a device of theirs has it. */
 function deliveryMark(m) {
   const done = !!m.delivered;
-  const label = done ? "Levererat till mottagaren" : "Köat på servern – inte levererat än";
+  const label = tr(done ? "msg.delivered" : "msg.queued");
   const s = icon(done ? "ringCheck" : "ring");
   s.setAttribute("width", "14");
   s.setAttribute("height", "14");
@@ -1954,12 +1909,12 @@ function showImage(url, name, gif = null) {
   const save = gif
     ? h("button", {
         class: "btn small save-gif",
-        text: "Spara i mina GIF:ar",
+        text: tr("gif.saveInMine"),
         onclick: async (e) => {
           e.stopPropagation(); // a click anywhere else closes the viewer
           try {
             const r = await messenger.saveGif(await gif());
-            toast(r === "exists" ? "Den finns redan bland dina GIF:ar." : "Sparad bland dina GIF:ar.");
+            toast(tr(r === "exists" ? "gif.exists" : "gif.savedToast"));
             d.close();
           } catch (x) {
             toast(say(x));
@@ -1968,7 +1923,7 @@ function showImage(url, name, gif = null) {
       })
     : null;
   const d = dialog(
-    h("button", { class: "close", "aria-label": "Stäng", title: "Stäng", onclick: () => d.close() }, icon("close")),
+    h("button", { class: "close", "aria-label": tr("common.close"), title: tr("common.close"), onclick: () => d.close() }, icon("close")),
     h("img", { src: url, alt: name }),
     save,
   );
@@ -1996,7 +1951,7 @@ function fileView(m) {
     if (known) placeImage(img, known);
     messenger.imageSize(f.f).then(async (size) => {
       if (!p.imageFits(size)) {
-        const why = size ? `${size.width} × ${size.height} bildpunkter, för stor för att visas` : "kan inte visas här";
+        const why = size ? tr("msg.tooBig", { w: i18n.num(size.width), h: i18n.num(size.height) }) : tr("msg.cannotShow");
         const card = fileCard(m, why);
         imgNodes.set(f.f, card);
         img.replaceWith(card);
@@ -2028,15 +1983,15 @@ function fileView(m) {
 function fileCard(m, note) {
   const f = m.file;
   const action = f.have
-    ? h("button", { class: "btn small", text: "Spara", onclick: async () => download(f.name, await messenger.fileBlob(f.f, "application/octet-stream")) })
+    ? h("button", { class: "btn small", text: tr("common.save"), onclick: async () => download(f.name, await messenger.fileBlob(f.f, "application/octet-stream")) })
     : h("button", {
         class: "btn small",
-        text: "Hämta från mina enheter",
-        title: "Filen har inte kommit till den här enheten. Den här frågar dina andra anslutna enheter.",
+        text: tr("msg.fetchOwn"),
+        title: tr("msg.fetchOwnTitle"),
         onclick: async () => {
           try {
             const n = await messenger.fetchFromOwnDevices(current, f.f);
-            toast(n ? "Frågar dina anslutna enheter…" : "Ingen av dina andra enheter är ansluten just nu.");
+            toast(tr(n ? "msg.asking" : "msg.noOwn"));
           } catch (x) {
             toast(say(x));
           }
@@ -2045,8 +2000,8 @@ function fileCard(m, note) {
   return h(
     "div",
     { class: "filecard" },
-    h("div", { class: "ico", text: (f.name.split(".").pop() || "fil").slice(0, 4).toUpperCase() }),
-    h("div", { class: "fi" }, h("div", { class: "fn", dir: "auto", text: f.name }), h("div", { class: "fs", text: f.have ? (note ? `${bytes(f.size)} · ${note}` : bytes(f.size)) : `${bytes(f.size)} · ${m.dir === "in" ? "inte mottagen än" : "inte mottagen på den här enheten"}` })),
+    h("div", { class: "ico", text: (f.name.split(".").pop() || tr("msg.file")).slice(0, 4).toUpperCase() }),
+    h("div", { class: "fi" }, h("div", { class: "fn", dir: "auto", text: f.name }), h("div", { class: "fs", text: f.have ? (note ? `${bytes(f.size)} · ${note}` : bytes(f.size)) : `${bytes(f.size)} · ${tr(m.dir === "in" ? "msg.notReceived" : "msg.notHere")}` })),
     action,
   );
 }
@@ -2056,11 +2011,11 @@ function fileCard(m, note) {
 async function showSafety(c) {
   const code = h("div", { class: "code", text: "…" });
   const d = dialog(
-    h("h2", { text: "Säkerhetskod" }),
-    h("p", { text: `Jämför koden med ${c.handle}, helst i person. Är den likadan på båda sidor sitter ingen – inte heller servern – mellan er.` }),
+    h("h2", { text: tr("conv.safety") }),
+    h("p", { text: tr("safety.compare", { handle: c.handle }) }),
     code,
-    h("p", { class: "hint", text: "Koden ändras när någon av er lägger till eller tar bort en enhet." }),
-    h("div", { class: "actions" }, h("button", { class: "btn", text: "Stäng", onclick: () => d.close() })),
+    h("p", { class: "hint", text: tr("safety.changes") }),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
   );
   try {
     code.textContent = await messenger.safetyCode(c.account);
@@ -2075,19 +2030,19 @@ function showContactMenu(c) {
     h(
       "div",
       { style: "display:flex;flex-direction:column;gap:8px" },
-      c.state === "accepted" ? h("button", { class: "btn", text: "Visa säkerhetskod", onclick: () => { d.close(); showSafety(c); } }) : null,
+      c.state === "accepted" ? h("button", { class: "btn", text: tr("contact.showSafety"), onclick: () => { d.close(); showSafety(c); } }) : null,
       retentionPicker(c),
-      c.state !== "blocked" ? h("button", { class: "btn danger", text: "Blockera", onclick: () => messenger.setState(c.account, "blocked").then(() => { d.close(); openConversation(null); }) }) : null,
-      h("button", { class: "btn danger", text: "Ta bort konversationen", onclick: () => messenger.setState(c.account, "declined").then(() => { d.close(); openConversation(null); }) }),
+      c.state !== "blocked" ? h("button", { class: "btn danger", text: tr("conv.block"), onclick: () => messenger.setState(c.account, "blocked").then(() => { d.close(); openConversation(null); }) }) : null,
+      h("button", { class: "btn danger", text: tr("contact.delete"), onclick: () => messenger.setState(c.account, "declined").then(() => { d.close(); openConversation(null); }) }),
     ),
-    h("div", { class: "actions" }, h("button", { class: "btn", text: "Stäng", onclick: () => d.close() })),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
   );
 }
 
 /** How long the messages of a conversation are kept on this account's devices. */
 function retentionPicker(c) {
   const current = validRetention(c.retention) ? c.retention : 0;
-  const choices = RETENTIONS.some(([s]) => s === current) ? RETENTIONS : [...RETENTIONS, [current, retentionLabel(current)]];
+  const choices = RETENTIONS.some(([s]) => s === current) ? RETENTIONS : [...RETENTIONS, [current]];
   const select = h(
     "select",
     {
@@ -2096,40 +2051,40 @@ function retentionPicker(c) {
       onchange: () => {
         const r = Number(select.value);
         messenger.setRetention(c.account, r).then(
-          () => toast(r ? `Meddelanden äldre än ${retentionLabel(r)} raderas nu från dina enheter.` : "Meddelandena sparas tills vidare."),
+          () => toast(r ? tr("contact.retentionSet", { time: retentionLabel(r) }) : tr("contact.retentionOff")),
           (x) => toast(say(x)),
         );
       },
     },
-    ...choices.map(([s, label]) => h("option", { value: String(s), text: label, selected: s === current })),
+    ...choices.map(([s]) => h("option", { value: String(s), text: retentionLabel(s), selected: s === current })),
   );
   return h(
     "label",
     { class: "field" },
-    h("span", { text: "Spara meddelanden" }),
+    h("span", { text: tr("contact.keep") }),
     select,
-    h("span", { class: "hint", text: "Gäller dina egna enheter, också texter och filer du redan har. Motparten bestämmer själv över sina kopior." }),
+    h("span", { class: "hint", text: tr("contact.keepHint") }),
   );
 }
 
 function showLinkRequest({ request, code }) {
   const d = dialog(
-    h("h2", { text: "Ny enhet vill länkas" }),
-    h("p", {}, h("strong", { text: request.device.label || "Okänd enhet" }), " vill bli en enhet för ditt konto. Godkänn bara om du själv just loggade in där."),
-    h("p", { class: "hint", text: "Kontrollera att koden är exakt densamma som på den nya enheten:" }),
+    h("h2", { text: tr("linkReq.title") }),
+    h("p", {}, h("strong", { text: request.device.label || tr("linkReq.unknown") }), tr("linkReq.text")),
+    h("p", { class: "hint", text: tr("linkReq.compare") }),
     h("div", { class: "code", text: code }),
     h(
       "div",
       { class: "actions" },
-      h("button", { class: "btn", text: "Neka", onclick: () => { messenger.declineLink(request); d.close(); } }),
+      h("button", { class: "btn", text: tr("conv.decline"), onclick: () => { messenger.declineLink(request); d.close(); } }),
       h("button", {
         class: "btn primary",
-        text: "Godkänn",
+        text: tr("linkReq.approve"),
         onclick: async (e) => {
           e.target.disabled = true;
           try {
             await messenger.approveLink(request);
-            toast("Enheten är länkad. Historiken skickas till den.");
+            toast(tr("linkReq.done"));
             d.close();
           } catch (x) {
             toast(say(x));
@@ -2144,7 +2099,7 @@ function showLinkRequest({ request, code }) {
 function showAccountMenu() {
   const s = settings();
   const notice = h("input", { type: "checkbox", checked: s.notify && notify.permission() === "granted" });
-  const noticeHint = h("span", { class: "hint", style: "display:block", text: "Visar bara att något har kommit och från vem – aldrig innehållet. När Murmo är stängt väcker servern webbläsaren via dess pushtjänst (Google, Mozilla eller Apple) med ett tomt meddelande: tjänsten får veta att den här webbläsaren fick något från den här servern och när, inget mer." });
+  const noticeHint = h("span", { class: "hint", style: "display:block", text: tr("acct.notifyHint") });
   notice.addEventListener("change", async () => {
     notice.disabled = true;
     const text = await setNotifications(notice.checked).catch((x) => say(x));
@@ -2158,14 +2113,14 @@ function showAccountMenu() {
   undo.addEventListener("change", () => setSetting("undoSend", undo.checked));
   const d = dialog(
     h("h2", { text: messenger.handle }),
-    h("p", { class: "hint", text: `Din identifierare${homeLabel(messenger.home) ? ` (från ${homeLabel(messenger.home)})` : ""}. Den som vill nå dig behöver den exakt – det går inte att söka efter användare.` }),
+    h("p", { class: "hint", text: homeLabel(messenger.home) ? tr("acct.yourHandleFrom", { home: homeLabel(messenger.home) }) : tr("acct.yourHandle") }),
     h(
       "div",
       { style: "display:flex;flex-direction:column;gap:8px" },
-      h("button", { class: "btn", text: "Kopiera identifierare", onclick: () => navigator.clipboard?.writeText(messenger.handle).then(() => { toast("Identifieraren kopierad."); d.close(); }) }),
-      h("button", { class: "btn", text: "Enheter", onclick: () => { d.close(); showDevices(); } }),
-      h("button", { class: "btn", text: "Säkerhet och integritet", onclick: () => { d.close(); showHelp(); } }),
-      h("label", { class: "check" }, notice, h("span", {}, "Notiser på den här enheten", noticeHint)),
+      h("button", { class: "btn", text: tr("acct.copy"), onclick: () => navigator.clipboard?.writeText(messenger.handle).then(() => { toast(tr("common.handleCopied")); d.close(); }) }),
+      h("button", { class: "btn", text: tr("acct.devices"), onclick: () => { d.close(); showDevices(); } }),
+      h("button", { class: "btn", text: tr("help.title"), onclick: () => { d.close(); showHelp(); } }),
+      h("label", { class: "check" }, notice, h("span", {}, tr("acct.notify"), noticeHint)),
       h(
         "label",
         { class: "check" },
@@ -2173,20 +2128,21 @@ function showAccountMenu() {
         h(
           "span",
           {},
-          "Låt servern hålla filer åt mottagare som inte är anslutna",
-          h("span", { class: "hint", style: "display:block", text: info.file_queue ? "Filen ligger krypterad på servern tills mottagarens enhet hämtat den, högst 14 dagar. Servern ser storlek och tidpunkt men inte innehåll eller namn. Av: filer går bara direkt mellan anslutna enheter och skickas annars när ni båda är anslutna." : "Avstängt på den här servern: filer går bara direkt mellan anslutna enheter." }),
+          tr("acct.queue"),
+          h("span", { class: "hint", style: "display:block", text: tr(info.file_queue ? "acct.queueHint" : "acct.queueOff") }),
         ),
       ),
       h(
         "label",
         { class: "check" },
         undo,
-        h("span", {}, "Ångra skickat", h("span", { class: "hint", style: "display:block", text: `Ett meddelande väntar ${UNDO_SEND / 1000} sekunder innan det skickas och kan ångras under tiden. Det är det enda sättet att vara säker på att ingen fått det: ett skickat meddelande kan tas bort för alla, men den som redan sett det har sett det.` })),
+        h("span", {}, tr("acct.undo"), h("span", { class: "hint", style: "display:block", text: tn("acct.undoHint", UNDO_SEND / 1000) })),
       ),
-      h("div", { class: "field", style: "margin:6px 0 0" }, h("label", { text: "Tema" }), themePicker()),
-      h("button", { class: "btn danger", text: "Logga ut", onclick: () => { d.close(); logout(false); } }),
+      h("div", { class: "field", style: "margin:6px 0 0" }, h("label", { text: tr("theme.label") }), themePicker()),
+      h("div", { class: "field", style: "margin:6px 0 0" }, h("label", { text: tr("common.language") }), languagePicker(() => { d.close(); renderShell(); showAccountMenu(); })),
+      h("button", { class: "btn danger", text: tr("acct.logout"), onclick: () => { d.close(); logout(false); } }),
     ),
-    h("div", { class: "actions" }, h("button", { class: "btn", text: "Stäng", onclick: () => d.close() })),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
   );
 }
 
@@ -2194,11 +2150,11 @@ async function showDevices() {
   const list = h("div", {}, h("span", { class: "spinner" }));
   const paper = h("div", { class: "paperbox" });
   const d = dialog(
-    h("h2", { text: "Dina enheter" }),
-    h("p", { class: "hint", text: "Nya enheter läggs till genom att logga in på dem och godkänna här. Ett lösenord räcker inte för att lägga till en enhet." }),
+    h("h2", { text: tr("dev.title") }),
+    h("p", { class: "hint", text: tr("dev.hint") }),
     list,
     paper,
-    h("div", { class: "actions" }, h("button", { class: "btn", text: "Stäng", onclick: () => d.close() })),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
   );
   const render = async () => {
     const [own, seen] = await Promise.all([messenger.ownList(true), messenger.ownSeen()]);
@@ -2207,7 +2163,7 @@ async function showDevices() {
     put(
       list,
       browsers.length === 1 && !keys.length
-        ? h("p", { class: "lone", text: "Det här är din enda enhet. Om webbläsarens data rensas kan ingen godkänna en ny enhet: då behövs återställningskortet, kontot börjar om och historiken går förlorad. Länka en enhet till, eller skapa en pappersnyckel." })
+        ? h("p", { class: "lone", text: tr("dev.lone") })
         : null,
       ...own.present.map((dev) =>
         h(
@@ -2216,9 +2172,9 @@ async function showDevices() {
           h(
             "div",
             { class: "l" },
-            h("div", { text: p.isPaper(dev) ? "Pappersnyckel" : dev.label + (dev.id === messenger.me.device ? " (den här)" : "") }),
+            h("div", { text: p.isPaper(dev) ? tr("paper.label") : dev.id === messenger.me.device ? tr("dev.this", { label: dev.label }) : dev.label }),
             p.isPaper(dev)
-              ? h("div", { class: "hint", text: "Kan godkänna en ny enhet tillsammans med ditt lösenord. Tar du bort den slutar den gamla nyckeln att fungera." })
+              ? h("div", { class: "hint", text: tr("dev.paperHint") })
               : [
                   h("div", { class: "seen", text: lastSeen(dev.id === messenger.me.device ? 0 : seen[dev.id]) }),
                   h("div", { class: "id", text: dev.id }),
@@ -2228,10 +2184,10 @@ async function showDevices() {
             ? null
             : h("button", {
                 class: "btn small danger",
-                text: "Ta bort",
+                text: tr("common.remove"),
                 onclick: async () => {
                   try {
-                    if (p.isPaper(dev) && !confirm("Ta bort pappersnyckeln? Den kan då inte längre godkänna en ny enhet.")) return;
+                    if (p.isPaper(dev) && !confirm(tr("dev.removePaper"))) return;
                     await messenger.removeDevice(dev.id);
                     await render();
                   } catch (x) {
@@ -2244,11 +2200,9 @@ async function showDevices() {
     );
     put(
       paper,
-      h("h3", { text: "Pappersnyckel" }),
-      h("p", { class: "hint", text: keys.length
-        ? "Du har en pappersnyckel. En ny ersätter den gamla, som då slutar fungera."
-        : "En pappersnyckel kan godkänna en ny enhet om du inte har någon enhet kvar. Den fungerar bara tillsammans med ditt lösenord, så papperet ensamt ger ingen åtkomst. Historiken följer inte med: den finns bara på dina enheter." }),
-      h("button", { class: "btn", text: keys.length ? "Skapa ny pappersnyckel" : "Skapa pappersnyckel", onclick: () => { d.close(); showPaperKey(); } }),
+      h("h3", { text: tr("paper.label") }),
+      h("p", { class: "hint", text: tr(keys.length ? "dev.haveKey" : "dev.keyIntro") }),
+      h("button", { class: "btn", text: tr(keys.length ? "dev.newKey" : "lone.make"), onclick: () => { d.close(); showPaperKey(); } }),
     );
   };
   render().catch((x) => list.replaceChildren(h("div", { class: "error", text: say(x) })));
@@ -2261,7 +2215,7 @@ async function showDevices() {
 function showPaperKey(onDone = () => {}) {
   const err = h("div", { class: "error" });
   const pw = h("input", { type: "password", autocomplete: "current-password" });
-  const go = h("button", { class: "btn primary", type: "submit", text: "Fortsätt" });
+  const go = h("button", { class: "btn primary", type: "submit", text: tr("common.continue") });
   const body = h(
     "form",
     {
@@ -2269,7 +2223,7 @@ function showPaperKey(onDone = () => {}) {
         e.preventDefault();
         err.textContent = "";
         go.disabled = true;
-        go.replaceChildren(h("span", { class: "spinner" }), "Låser upp…");
+        go.replaceChildren(h("span", { class: "spinner" }), tr("common.unlocking"));
         let secret;
         try {
           secret = await id.unlockLocalSecret(api, messenger.home, messenger.me.account, pw.value);
@@ -2278,56 +2232,56 @@ function showPaperKey(onDone = () => {}) {
         } catch (x) {
           err.textContent = say(x);
           go.disabled = false;
-          go.replaceChildren("Fortsätt");
+          go.replaceChildren(tr("common.continue"));
         } finally {
           secret?.fill(0);
         }
       },
     },
-    h("p", { text: "En pappersnyckel kan godkänna en ny enhet när du inte har någon annan enhet kvar – tillsammans med ditt lösenord. Kontot och dina kontakters förtroende är då kvar; bara historiken på den förlorade enheten går inte att få tillbaka." }),
-    h("div", { class: "field" }, h("label", { text: "Ditt lösenord" }), pw),
-    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", text: "Avbryt", onclick: () => d.close() }), go),
+    h("p", { text: tr("pk.intro") }),
+    h("div", { class: "field" }, h("label", { text: tr("pk.yourPassword") }), pw),
+    h("div", { class: "actions" }, h("button", { class: "btn", type: "button", text: tr("common.cancel"), onclick: () => d.close() }), go),
     err,
   );
-  const d = dialog(h("h2", { text: "Skapa pappersnyckel" }), body);
+  const d = dialog(h("h2", { text: tr("lone.make") }), body);
   pw.focus();
 }
 
 function showPaperKeyText(d, prepared, onDone) {
   const err = h("div", { class: "error" });
   const saved = h("input", { type: "checkbox" });
-  const go = h("button", { class: "btn primary", text: "Aktivera pappersnyckeln", disabled: true });
+  const go = h("button", { class: "btn primary", text: tr("pk.activate"), disabled: true });
   saved.addEventListener("change", () => (go.disabled = !saved.checked));
-  const name = `murmo-pappersnyckel-${splitHandle(messenger.handle)[0]}.txt`;
-  const text = `Murmo – pappersnyckel för ${messenger.handle}\n\n${prepared.text}\n\nGodkänner en ny enhet tillsammans med lösenordet när ingen annan enhet finns kvar.\nLogga in, välj "Jag har ingen annan enhet kvar" och ange nyckeln.\n`;
+  const name = tr("pk.fileName", { name: splitHandle(messenger.handle)[0] });
+  const text = tr("pk.fileText", { handle: messenger.handle, key: prepared.text, noOther: tr("link.noOther") });
   go.addEventListener("click", async () => {
     go.disabled = true;
-    go.replaceChildren(h("span", { class: "spinner" }), "Aktiverar…");
+    go.replaceChildren(h("span", { class: "spinner" }), tr("pk.activating"));
     try {
       await prepared.commit();
-      toast("Pappersnyckeln är aktiverad.");
+      toast(tr("pk.activated"));
       setSetting("singleDeviceSeen", true);
       d.close();
       onDone();
     } catch (x) {
       err.textContent = say(x);
       go.disabled = false;
-      go.replaceChildren("Aktivera pappersnyckeln");
+      go.replaceChildren(tr("pk.activate"));
     }
   });
   d.classList.add("printable");
   d.replaceChildren(
-    h("h2", { text: "Din pappersnyckel" }),
-    h("p", { text: "Skriv ner nyckeln eller skriv ut den, och förvara den på ett annat ställe än dina enheter. Den visas bara nu." }),
+    h("h2", { text: tr("pk.title") }),
+    h("p", { text: tr("pk.writeDown") }),
     h("pre", { class: "cardtext paperkey", text: prepared.text }),
     h(
       "div",
       { style: "display:flex;gap:8px;flex-wrap:wrap" },
-      h("button", { class: "btn", text: "Ladda ner som text", onclick: () => download(name, new Blob([text], { type: "text/plain" })) }),
-      h("button", { class: "btn ghost", text: "Skriv ut", onclick: () => print() }),
+      h("button", { class: "btn", text: tr("common.downloadText"), onclick: () => download(name, new Blob([text], { type: "text/plain" })) }),
+      h("button", { class: "btn ghost", text: tr("common.print"), onclick: () => print() }),
     ),
-    h("label", { class: "check" }, saved, h("span", { text: "Jag har sparat pappersnyckeln på ett säkert ställe." })),
-    h("div", { class: "actions" }, h("button", { class: "btn", text: "Avbryt", onclick: () => d.close() }), go),
+    h("label", { class: "check" }, saved, h("span", { text: tr("pk.saved") })),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.cancel"), onclick: () => d.close() }), go),
     err,
   );
 }

@@ -47,6 +47,9 @@ that log rather than in trust in the server. The server is one Rust binary that 
 - **Encrypted local storage** unlocked by the rootcard password: a secret in the rootcard vault unlocks each device's
   local data, but the E2E private keys never enter the vault (docs/DESIGN.md §8).
 - **Calm interface** with light, dark and automatic themes; works on phones.
+- **In your language**: German, English, Spanish and Swedish, chosen from the browser's languages (or picked in the
+  app), with English for any other. Times are Unix seconds (UTC) on the wire, on the server and on the device, and are
+  only turned into local time, in the browser's time zone, when shown (`client/js/i18n.js`, texts in `client/js/lang/`).
 
 ## What the server stores
 
