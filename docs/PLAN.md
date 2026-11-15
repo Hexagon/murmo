@@ -38,8 +38,8 @@
 Open, in order of priority:
 
 - [ ] **Separate limits for live transfer and the file queue.** Today one client constant (100 MiB) governs both.
-      Advertise the queue's per-file and per-device limits in `/api/v1/info`, show before sending whether a file can be
-      queued, and let live transfer go further once it no longer needs the whole file in memory (Phase 2).
+      ~~Advertise the queue's per-file and per-device limits in `/api/v1/info`~~ (done: `file_queue_limits`, `DESIGN.md` §9);
+      show before sending whether a file can be queued, and let live transfer go further once it no longer needs the whole file in memory (Phase 2).
 - [ ] Signed, reproducible client release with published hashes; installable copy not served by the server
 - [ ] History from contacts after every device is lost: a contact sends its copy of a conversation on request,
       shown as the contact's copy (`DESIGN.md` §7.1, option 3)

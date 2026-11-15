@@ -813,6 +813,18 @@ pub struct QueueLimits {
     pub total: i64,
 }
 
+impl QueueLimits {
+    /// The most bytes of one file the queue can ever keep for one device: for a device of another account (the
+    /// stricter case), with nothing else queued. What fits right now is less when other files are queued.
+    pub fn largest_file(&self) -> i64 {
+        self.device
+            .min(self.pair)
+            .min(self.account)
+            .min(self.total)
+            .max(0)
+    }
+}
+
 /// Bytes queued, as seen from one sender account and one receiving device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueUsage {
@@ -886,6 +898,21 @@ mod tests {
         account: 70,
         total: 150,
     };
+
+    #[test]
+    fn largest_file_is_the_smallest_limit() {
+        assert_eq!(LIMITS.largest_file(), 40);
+        let l = QueueLimits {
+            device: 10,
+            ..LIMITS
+        };
+        assert_eq!(l.largest_file(), 10);
+        let off = QueueLimits {
+            device: 0,
+            ..LIMITS
+        };
+        assert_eq!(off.largest_file(), 0);
+    }
 
     fn db() -> Db {
         let db = Db::open(":memory:").expect("database");
