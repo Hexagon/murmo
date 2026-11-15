@@ -446,7 +446,6 @@ export default {
   "page.check2": "Identität mit rootcard, das Passwort verlässt nie den Browser",
   "page.check3": "Keine Suche, keine Kontaktlisten auf dem Server",
   "page.check4": "Open Source – prüfe den Code oder betreibe einen eigenen Server",
-  "page.noscript": "Murmo läuft im Browser und braucht JavaScript.",
   "page.step1Title": "Identität erstellen",
   "page.step1": "Wähle einen Namen und ein Passwort. Du bekommst eine Wiederherstellungskarte, die du offline aufbewahrst – sie ist der Schlüssel zu deiner Identität und das Einzige, womit sie sich wiederherstellen lässt.",
   "page.step2Title": "Kennung teilen",

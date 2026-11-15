@@ -275,7 +275,7 @@ export class Store {
     if (!r) return undefined;
     if (r.v) {
       const whole = await p.decryptLocal(this.key, r.v, `file:${r.k}`);
-      return Object.assign((i) => whole.subarray(i * p.CHUNK, (i + 1) * p.CHUNK), { n: Math.max(1, Math.ceil(whole.length / p.CHUNK)), size: whole.length });
+      return Object.assign((i) => whole.subarray(i * p.CHUNK, (i + 1) * p.CHUNK), { n: p.chunkCount(whole.length), size: whole.length });
     }
     return Object.assign((i) => this.partByTag(r.k, i), { n: r.n, size: r.size });
   }
@@ -329,7 +329,7 @@ export class Store {
   }
   /** Store a whole file (in parts). */
   async putFile(f, bytes) {
-    const n = Math.max(1, Math.ceil(bytes.length / p.CHUNK));
+    const n = p.chunkCount(bytes.length);
     for (let i = 0; i < n; i++) await this.putPart(f, i, bytes.subarray(i * p.CHUNK, (i + 1) * p.CHUNK));
     await this.finishFile(f, n, bytes.length);
   }
