@@ -1387,7 +1387,14 @@ function openConversation(account, form = false) {
   const parts = [head];
   if (c.fork) parts.push(h("div", { class: "banner warn", text: tr("err.fork") }));
   else if (c.devicesChanged && c.state === "accepted") {
-    parts.push(h("div", { class: "banner", text: tr("conv.devicesChanged", { handle: c.handle }) }));
+    parts.push(
+      h(
+        "div",
+        { class: "banner dismissible" },
+        h("span", { text: tr("conv.devicesChanged", { handle: c.handle }) }),
+        h("button", { class: "icon-btn", "aria-label": tr("conv.dismiss"), title: tr("conv.dismiss"), onclick: () => messenger.acknowledgeDevices(c.account) }, icon("close")),
+      ),
+    );
   }
   parts.push(ui.scroll);
   if (c.state === "incoming") parts.push(requestBox(c));
@@ -2617,6 +2624,8 @@ async function showSafety(c) {
     h("p", { class: "hint", text: tr("safety.changes") }),
     h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
   );
+  // Looking at the new code is the acknowledgement the banner asks for.
+  messenger.acknowledgeDevices(c.account).catch(() => {});
   try {
     code.textContent = await messenger.safetyCode(c.account);
   } catch (x) {

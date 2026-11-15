@@ -261,6 +261,7 @@ export default {
   "conv.safety": "Sicherheitscode",
   "conv.more": "Weitere Optionen",
   "conv.devicesChanged": "{handle} hat die eigenen Geräte geändert. Der Sicherheitscode hat sich geändert.",
+  "conv.dismiss": "Ausblenden",
   "conv.requested": "Anfrage gesendet. Du kannst schreiben, sobald {handle} angenommen hat.",
   "conv.blocked": "Blockiert. ",
   "conv.unblock": "Blockierung aufheben",

@@ -395,6 +395,14 @@ export class Messenger extends EventTarget {
     this.emit("contacts");
   }
 
+  /** The user has seen that a contact's devices (and so the safety code) changed: stop showing the notice. */
+  async acknowledgeDevices(account) {
+    const c = this.contacts.get(account);
+    if (!c?.devicesChanged) return;
+    delete c.devicesChanged;
+    await this.saveContact(c);
+  }
+
   /** Throw `not_accepted` unless the conversation with `account` has been accepted. */
   requireAccepted(account) {
     if (this.contacts.get(account)?.state !== "accepted") throw new ApiError(409, "not_accepted");

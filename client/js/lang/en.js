@@ -261,6 +261,7 @@ export default {
   "conv.safety": "Safety code",
   "conv.more": "More options",
   "conv.devicesChanged": "{handle} has changed their devices. The safety code has changed.",
+  "conv.dismiss": "Dismiss",
   "conv.requested": "Request sent. You can write once {handle} has accepted.",
   "conv.blocked": "Blocked. ",
   "conv.unblock": "Unblock",
