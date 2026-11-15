@@ -580,6 +580,50 @@ test("chunks are stored as they come: before the file message, out of order, wit
   assert.deepEqual(await read(1), old.subarray(p.CHUNK));
 });
 
+test("a file id already here or under way cannot be taken over from another conversation", async () => {
+  const conv = alice.me.account;
+  const other = "someone-else"; // a contact who learned the id (the server sees it in relayed chunks)
+  const data = noise(5000);
+  const sha256 = p.b64(await p.sha256(data));
+  const f = p.b64(p.random(16));
+  await bob.store.putFile(f, data);
+  const forged = (id, body) => ({ id, time: Date.now(), from: { account: other, device: "d" }, body: { f, name: "evil.png", mime: "image/png", size: data.length, n: 1, key: p.b64(p.random(32)), ...body } });
+
+  // Another hash for the same id: refused, nothing recorded.
+  await bob.onFileMeta(forged("forged-1", { sha256: p.b64(p.random(32)) }), other, "in");
+  assert.equal(await bob.store.message("forged-1"), undefined);
+  // Without a hash at all: refused.
+  await bob.onFileMeta(forged("forged-2", {}), other, "in");
+  assert.equal(await bob.store.message("forged-2"), undefined);
+  // The same content: harmless, the sender has it anyway.
+  await bob.onFileMeta(forged("same-1", { sha256 }), other, "in");
+  assert.equal((await bob.store.message("same-1"))?.file?.have, true);
+
+  // A file stored before the hash was kept is hashed once, and the hash is saved.
+  const old = noise(70_000);
+  const k = await bob.store.tag("file", "old-file-2");
+  const v = await p.encryptLocal(bob.store.key, old, `file:${k}`);
+  const tx = bob.store.db.transaction("files", "readwrite");
+  tx.objectStore("files").put({ k, v });
+  await new Promise((r) => (tx.oncomplete = r));
+  assert.deepEqual(await bob.store.fileDigest("old-file-2"), { size: old.length, sha256: p.b64(await p.sha256(old)) });
+  assert.equal((await bob.store.fileHeader("old-file-2")).sha256, p.b64(await p.sha256(old)));
+  assert.deepEqual(await bob.store.file("old-file-2"), old);
+
+  // A transfer under way keeps its file message when another conversation names the same id.
+  const f2 = p.b64(p.random(16));
+  const meta = { f: f2, name: "x.bin", mime: "application/octet-stream", size: 10, n: 1, sha256: p.b64(p.random(32)), key: p.b64(p.random(32)) };
+  await bob.serial(() => bob.expectFile(meta, { id: "first", conv }));
+  await bob.serial(() => bob.expectFile({ ...meta, key: p.b64(p.random(32)) }, { id: "takeover", conv: other }));
+  assert.equal(bob.files.get(f2).message.id, "first");
+  assert.equal(bob.files.get(f2).meta.key, meta.key);
+  // In the same conversation a newer file message still starts it again.
+  const newer = { ...meta, key: p.b64(p.random(32)) };
+  await bob.serial(() => bob.expectFile(newer, { id: "again", conv }));
+  assert.equal(bob.files.get(f2).meta.key, newer.key);
+  await bob.dropTransfer(f2, bob.files.get(f2), true);
+});
+
 test("a message to a device that is away wakes it with an empty push", async () => {
   assert.ok(info.push_key, "the server offers push");
   await bob.setPushEndpoint(`http://127.0.0.1:${PUSH_PORT}/sub/bob`);
