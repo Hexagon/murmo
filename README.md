@@ -24,6 +24,8 @@ that log rather than in trust in the server. The server is one Rust binary that 
 - **Queued or delivered.** A sent message shows a ring while the server holds it for the recipient and a ring with a
   check once one of their devices has it. The receipt comes end-to-end encrypted from the recipient's device, only
   between accepted contacts; the server reports nothing.
+- **Paper key** for when no device is left: written down, it approves a new device together with the password, so the
+  account and contacts' trust survive losing the only browser (the history does not: it was only on that device).
 - **Safety codes** to compare in person; device-list changes are gossiped inside messages and forks are refused.
 - **Several devices.** Messages go to all your devices; a newly linked device receives the history from the device
   that approved it.

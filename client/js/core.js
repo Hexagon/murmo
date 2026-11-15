@@ -45,11 +45,13 @@ export function validRetention(r) {
 
 /**
  * Prepare this browser as a device of the account after a login (docs/DESIGN.md §4.2, §4.3).
- * Returns `{ ready: true }`, or `{ ready: false, code, expires, waitForApproval() }` while another device must approve.
- * `waitForApproval` resolves to true once approved, false when cancelled or when the request has expired (`expires`,
- * ms since the epoch: the server keeps link requests for 10 minutes).
+ * Returns `{ ready: true }`, or `{ ready: false, code, expires, waitForApproval(), approveWithPaperKey() }` while
+ * another device must approve. `waitForApproval` resolves to true once approved, false when cancelled or when the
+ * request has expired (`expires`, ms since the epoch: the server keeps link requests for 10 minutes).
+ * `approveWithPaperKey(text)` adds this device with the account's paper key instead (§4.5); it needs `secret`, the
+ * local secret from the vault, and throws `bad_paper_key` or `wrong_paper_key`.
  */
-export async function setupDevice({ api, store, state, login, label }) {
+export async function setupDevice({ api, store, state, login, label, secret }) {
   const account = state.account;
   const accountKey = state.instance.account_key;
   let device = await loadDevice(store);
@@ -91,6 +93,32 @@ export async function setupDevice({ api, store, state, login, label }) {
     ready: false,
     code,
     expires,
+    async approveWithPaperKey(text) {
+      if (!secret) throw new ApiError(400, "wrong_paper_key");
+      let paper;
+      try {
+        paper = await p.parsePaperKey(text);
+      } catch {
+        throw new ApiError(400, "bad_paper_key");
+      }
+      const seed = await p.paperSeed(paper, secret, account);
+      paper.fill(0);
+      try {
+        const paperDev = await p.paperDevice(seed);
+        const r = await api.devices(account);
+        const l = r.entries.length ? await p.verifyDevices(account, accountKey, r.entries) : null;
+        if (l?.present.some((d) => d.id === device.id)) return true; // approved meanwhile
+        if (!l?.present.some((d) => d.id === paperDev.id)) throw new ApiError(400, "wrong_paper_key");
+        const e = await p.newEntry({
+          account, accountKey, entries: l.entries, op: "add", device: deviceValue,
+          signer: { id: paperDev.id, key: seed },
+        });
+        await api.appendDevices(account, [e], [pk.value]);
+        return true;
+      } finally {
+        seed.fill(0);
+      }
+    },
     async waitForApproval(signal) {
       while (!signal?.aborted && Date.now() < expires) {
         await new Promise((r) => setTimeout(r, 3000));
@@ -422,8 +450,9 @@ export class Messenger extends EventTarget {
 
   async ownTargets() {
     const own = await this.list(this.me.account);
+    // Devices without a prekey (a paper key, §4.5) cannot receive anything.
     return own.list.present
-      .filter((d) => d.id !== this.me.device)
+      .filter((d) => d.id !== this.me.device && own.prekeys.has(d.id))
       .map((d) => ({ account: this.me.account, device: d.id, prekey: own.prekeys.get(d.id) }));
   }
 
@@ -431,7 +460,7 @@ export class Messenger extends EventTarget {
     const c = this.contacts.get(account);
     if (c?.fork) throw new ApiError(409, "fork");
     const l = await this.list(account);
-    return l.list.present.map((d) => ({ account, device: d.id, prekey: l.prekeys.get(d.id) }));
+    return l.list.present.filter((d) => l.prekeys.has(d.id)).map((d) => ({ account, device: d.id, prekey: l.prekeys.get(d.id) }));
   }
 
   /** A message to the other party and to our own other devices. */
@@ -560,8 +589,10 @@ export class Messenger extends EventTarget {
     if (c?.state === "blocked") return;
     switch (m.kind) {
       case "request": {
-        // One pending request per sender; nothing changes for accepted or pending contacts.
-        if (c?.state === "accepted" || c?.state === "incoming") return;
+        // One pending request per sender; nothing changes for accepted or pending contacts. An accepted contact that
+        // asks again has lost its data (a new device after a paper key or a reset): it is told that it is accepted.
+        if (c?.state === "accepted") return void (await this.send(peer, "accept", {}));
+        if (c?.state === "incoming") return;
         const state = (await this.list(peer, true)).state;
         const note = String(m.body?.note ?? "").slice(0, NOTE_MAX);
         if (c?.state === "outgoing") {
@@ -698,6 +729,49 @@ export class Messenger extends EventTarget {
     });
     await this.api.appendDevices(this.me.account, [e]);
     await this.ownList(true);
+  }
+
+  /** The account's paper keys (normally at most one) in its verified device list (§4.5). */
+  async paperKeys(fresh = false) {
+    return (await this.ownList(fresh)).present.filter(p.isPaper);
+  }
+
+  /**
+   * Prepare a new paper key (§4.5) with the account's local secret from the vault (the caller unlocks it with the
+   * password and erases it afterwards). Returns `{ text, commit() }`: the user must save `text` first; `commit` then
+   * adds the key to the device list and removes earlier paper keys in the same change.
+   */
+  async preparePaperKey(secret) {
+    const { paper, seed } = await p.newPaperKey(secret, this.me.account);
+    const text = await p.formatPaperKey(paper);
+    const dev = await p.paperDevice(seed);
+    paper.fill(0);
+    seed.fill(0);
+    return {
+      text,
+      commit: async () => {
+        const own = await this.ownList(true);
+        const accountKey = (await this.list(this.me.account)).state.instance.account_key;
+        const entries = [...own.entries];
+        const added = [];
+        // Old keys go first, so that a list with the most devices still has room for the new one.
+        for (const d of own.present.filter(p.isPaper)) {
+          const e = await p.newEntry({
+            account: this.me.account, accountKey, entries, op: "remove", device: { id: d.id, key: d.key, label: d.label },
+            signer: { id: this.me.device, key: this.device.privateKey },
+          });
+          entries.push(e);
+          added.push(e);
+        }
+        const e = await p.newEntry({
+          account: this.me.account, accountKey, entries, op: "add", device: dev,
+          signer: { id: this.me.device, key: this.device.privateKey },
+        });
+        added.push(e);
+        await this.api.appendDevices(this.me.account, added);
+        await this.ownList(true);
+      },
+    };
   }
 
   /** Send contacts and messages to a newly linked device, in chunks. File contents follow on request. */

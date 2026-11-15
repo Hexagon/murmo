@@ -148,6 +148,32 @@ try {
   await a.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await sleep(500);
   await a.waitForFunction(() => document.querySelector(".me .s")?.textContent.includes("Ansluten"), { timeout: 10000 });
+  // Alice makes a paper key, loses her only browser, and comes back with it on a new one.
+  await a.click('[aria-label="Konto och inställningar"]');
+  await clickText(a, "Enheter");
+  await a.waitForFunction(() => [...document.querySelectorAll("dialog button")].some((x) => x.textContent === "Skapa pappersnyckel"), { timeout: 10000 });
+  await a.screenshot({ path: `${shots}/a-8-devices.png` });
+  await clickText(a, "Skapa pappersnyckel");
+  await a.waitForSelector("dialog input[type=password]", { timeout: 5000 });
+  await a.type("dialog input[type=password]", "correct horse battery staple");
+  await clickText(a, "Fortsätt");
+  await a.waitForSelector("dialog pre.paperkey", { timeout: 60000 });
+  await a.screenshot({ path: `${shots}/a-9-paperkey.png` });
+  const paperKey = await a.$eval("dialog pre.paperkey", (e) => e.textContent);
+  await a.click("dialog .check input");
+  await clickText(a, "Aktivera pappersnyckeln");
+  await a.waitForFunction(() => !document.querySelector("dialog"), { timeout: 10000 });
+  const a2 = await page("alice2");
+  await a2.type("form input[autocomplete=username]", aliceHandle);
+  await a2.type("form input[type=password]", "correct horse battery staple");
+  await a2.click("form button[type=submit]");
+  await a2.waitForSelector(".code", { timeout: 60000 });
+  await clickText(a2, "Jag har ingen annan enhet kvar");
+  await a2.type("form.paper input", paperKey.toLowerCase());
+  await a2.screenshot({ path: `${shots}/a2-1-link-paper.png`, fullPage: true });
+  await clickText(a2, "Använd pappersnyckeln");
+  await a2.waitForFunction(() => document.querySelector("dialog h2")?.textContent === "Välkommen tillbaka", { timeout: 30000 });
+  await a2.screenshot({ path: `${shots}/a2-2-welcome-back.png` });
   if (codeA !== codeB) throw new Error("safety codes differ");
 } catch (e) {
   console.log("FAILED", e.message);

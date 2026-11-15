@@ -429,6 +429,74 @@ test("an identity from another rootcard home (like rootcard.org) logs in and tal
   await until(async () => (await carol2.messages(alice.me.account)).some((m) => m.text === "Hej från en annan home"));
 });
 
+test("a paper key brings back an account whose only device is lost", async () => {
+  const doraHandle = await register("Dora", PW);
+  const dora1 = await device(doraHandle, PW, "dora1");
+  const account = dora1.me.account;
+  bob.lists.clear();
+  await dora1.request(bobHandle, "Hej Bob");
+  await until(async () => bob.contacts.get(account)?.state === "incoming");
+  await bob.accept(account);
+  await until(async () => dora1.contacts.get(bob.me.account)?.state === "accepted");
+
+  // The paper key needs the password again: a wrong one unlocks nothing.
+  await assert.rejects(id.unlockLocalSecret(api, api.base, account, "wrong password here"), ApiError);
+  const secret = await id.unlockLocalSecret(api, api.base, account, PW);
+  const prepared = await dora1.preparePaperKey(secret);
+  assert.match(prepared.text, /^MPK(-[0-9A-HJKMNP-TV-Z]{4}){9}$/);
+  assert.equal((await dora1.paperKeys(true)).length, 0); // nothing changes before the user saved it
+  await prepared.commit();
+  const [paperDev] = await dora1.paperKeys(true);
+  assert.ok(paperDev);
+  // A new key replaces the old one in the same change.
+  const second = await dora1.preparePaperKey(secret);
+  await second.commit();
+  const keys = await dora1.paperKeys(true);
+  assert.equal(keys.length, 1);
+  assert.notEqual(keys[0].id, paperDev.id);
+  // A paper key has no prekey: nobody encrypts to it, so the server keeps nothing for it.
+  bob.lists.clear();
+  assert.deepEqual((await bob.peerTargets(account)).map((t) => t.device), [dora1.me.device]);
+
+  // The only browser is lost. A new one logs in: nobody is left to approve the link request.
+  dora1.stop();
+  const login = await id.login(api, api.base, doraHandle, PW);
+  const secret2 = await id.localSecret(api, login);
+  const store = await Store.open(account, "dora2");
+  await store.unlock(secret2);
+  const setup = await setupDevice({ api, store, state: login.state, login, label: "dora2", secret: secret2 });
+  assert.equal(setup.ready, false);
+  login.unlocked.contents.accountSeed.fill(0);
+  await assert.rejects(setup.approveWithPaperKey("MPK-not-a-key"), (e) => e.code === "bad_paper_key");
+  await assert.rejects(setup.approveWithPaperKey(prepared.text), (e) => e.code === "wrong_paper_key"); // replaced
+  // The paper alone is not enough: without the vault's local secret it is another key.
+  const guess = await p.paperDevice(await p.paperSeed(await p.parsePaperKey(second.text), p.random(32), account));
+  assert.ok(!(await dora1.paperKeys(true)).some((d) => d.id === guess.id));
+  assert.equal(await setup.approveWithPaperKey(second.text), true);
+  assert.equal(await setup.waitForApproval(), true);
+  secret.fill(0);
+  secret2.fill(0);
+  const dora2 = new Messenger({ api, store, account, handle: doraHandle, home: api.base, realms: info.realms });
+  running.push(dora2);
+  const online = waitFor(dora2, "status", (s) => s === "online");
+  await dora2.start();
+  await online;
+
+  // Same account, same list: Bob sees a new device, not a reset, and no fork.
+  bob.lists.clear();
+  assert.equal((await bob.list(account, true)).list.present.length, 3);
+  assert.ok(!bob.contacts.get(account).fork);
+  // The contacts were only on the lost device. Asking Bob again connects at once, since Bob accepted Dora before.
+  await dora2.request(bobHandle);
+  await until(async () => dora2.contacts.get(bob.me.account)?.state === "accepted");
+  await bob.sendText(account, "Välkommen tillbaka");
+  await until(async () => (await dora2.messages(bob.me.account)).some((m) => m.text === "Välkommen tillbaka"));
+  // The lost device is removed; the server forgets what waited for it.
+  await dora2.removeDevice(dora1.me.device);
+  assert.equal((await dora2.ownList(true)).present.length, 2);
+  assert.equal(db2count("mailbox"), 0);
+});
+
 test("homes that are not allowed are refused", async () => {
   await assert.rejects(api.connect("0".repeat(52), "https://evil.example/id"), (e) => e.status === 403 || e.status === 404);
 });

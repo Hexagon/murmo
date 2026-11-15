@@ -10,7 +10,7 @@ What Murmo protects, against whom, and what it accepts. It builds on rootcard's 
 |---|---|
 | G1 | **Confidential messages.** Only the devices of the two parties can read a message. |
 | G2 | **Authentic messages.** A message shown as from Alice was written on one of Alice's current devices. |
-| G3 | **Controlled devices.** Only the owner's existing devices (or, after a reset, the recovery key) can add a device. |
+| G3 | **Controlled devices.** Only the owner's existing devices (a paper key with the password counts as one), or after a reset the recovery key, can add a device. |
 | G4 | **Detectable key changes.** A change of the other party's devices is visible, and a fork is refused. |
 | G5 | **Minimal server data.** The server holds no plaintext, no history, no contact list and no social graph. |
 | G6 | **Consent.** Nobody can make a message appear in a conversation without the recipient accepting a request. |
@@ -66,6 +66,7 @@ service.
 | T27 | Push reveals activity | X3, push service | Pushes carry no payload; only messages to the other party are marked; at most one push per device per 10 s; needs the browser's notification permission and can be turned off per device | The push service (Google, Mozilla, Apple) learns when a browser is woken by this server; the server learns that a device asked for push |
 | T28 | Push endpoints used to make the server send requests (SSRF) | X2 | Endpoints accepted only on configured push-service hosts (exact host or `*.` suffix, https), no redirects, 10 s | – |
 | T29 | File queue used to fill the server's disk | X2 | Only devices in a verified list; quotas per device, per sender account and device, per sender account and in total; asked before sending; 14 days | Three accounts can fill one device's quota (150 MiB) and seven the server's, until the chunks are read or expire |
+| T30 | Paper key stolen or guessed | X4, X3, X2 | The paper key's device key is derived from the paper (160 bits) *and* the local secret in the vault, which only the password unlocks: the paper alone or the vault alone adds nothing; it never has a prekey, so it reads nothing; replacing or removing it is one device-list change on any device | Paper and password together can add a device, like an existing device can (visible to the owner and to contacts as a new device) |
 | T18 | Quantum adversary records traffic | future | – (X25519 and Ed25519 only) | Hybrid ML-KEM prekeys in a later phase |
 
 ## 4. Accepted risks
@@ -76,4 +77,5 @@ service.
 - **AR2: TOFU without comparison.** Users who never compare safety codes get protection only against later changes.
 - **AR3: Metadata at send time.** The server sees which device sends to which devices when it happens. It does not
   store it.
-- **AR4: Lost devices, lost history.** Without any device left, history is gone by design.
+- **AR4: Lost devices, lost history.** Without any device left, history is gone by design. A paper key (DESIGN.md §4.5)
+  keeps the account and its device list, not the history (DESIGN.md §7.1).

@@ -142,15 +142,44 @@ A password alone is not enough to add a device:
 A password thief can create link requests, which the owner sees and can decline; the thief cannot complete one.
 
 If no device is left (the only browser's data was cleared), nobody can approve. The client says so on the link screen
-and when a request expires unanswered: the way back is a new instance with the recovery card (§4.1), which starts a new
-list and loses the history (§7). Murmo does not do this itself (§3): for identities of this home it offers rootcard's
+and when a request expires unanswered. With a **paper key** (§4.5) the user adds the new device on the spot; without
+one, the way back is a new instance with the recovery card (§4.1), which starts a new list and loses the history (§7). Murmo does not do this itself (§3): for identities of this home it offers rootcard's
 `keytool.html` (vendored, unmodified) as a download to open from disk; for identities of other homes it names the home.
-While an account has a single device, the start page and the device list say what losing it would mean.
+While an account has a single device and no paper key, the start page and the device list say what losing it would
+mean and offer to make a paper key.
 
 ### 4.4 Removing a device
 
 Any present device can sign a `remove` entry for any device, including itself ("log out everywhere else" removes the
 others). Contacts stop encrypting to removed devices as soon as they see the new head (§6.3).
+
+### 4.5 Paper key
+
+A paper key is a device that lives on paper: an entry in the device list like any other, whose private key is written
+down instead of kept in a browser. It can approve one new device when no other device is left, without a new instance,
+so the account, its device list and the trust contacts have pinned stay as they are.
+
+- **Written form:** `MPK-` and nine groups of four Crockford base32 characters: 20 random bytes (160 bits) and a
+  4-character checksum `base32(SHA-256(frame("murmo/paper-key/check/v1", paper)))[0..4]`. Typing is forgiven as for
+  rootcard recovery keys (case, spaces, dashes, I/L/O).
+- **Key:** `seed = HKDF-SHA256(ikm = paper, salt = local secret, info = frame("murmo/paper-key/v1", canonical({account})))`,
+  an Ed25519 seed. The local secret is the one in the rootcard vault (§8), which only the password unlocks. **The paper
+  alone is therefore worth nothing, and so is the password alone**: both are needed, and a server that holds the
+  encrypted vault still needs the password. Seeds whose first byte is zero are drawn again ([CRY-9]).
+- **In the list:** `add` of `{ id, key, label: "Pappersnyckel" }`, signed by the device that made it. The label is only
+  for showing; a paper key never publishes a prekey, so nobody encrypts to it (senders skip devices without a prekey)
+  and the server never queues anything for it. It counts as one of the 8 devices and is visible to contacts as a
+  device, so the safety code changes when it is made or replaced.
+- **Making one** (device list, or the single-device reminder): the user types the password, the client unlocks the
+  vault again (no new login) to get the local secret, shows the key, and only after the user confirms it is saved
+  appends `remove` of any earlier paper key and `add` of the new one in one change.
+- **Using one** (link screen, "Jag har ingen annan enhet kvar"): after the password login the new browser has its
+  device key, its prekey and the local secret. It derives the paper key's seed, checks that that device is present in
+  the verified list, and signs the `add` of itself with it (`signer` = the paper key's device id). The server checks it
+  as any entry (§4.1). The paper key stays valid; the client suggests removing the lost device and making a new key.
+- What the paper key does **not** bring back: history and contacts (§7.1). Contacts who had accepted the user answer a
+  new request from them with `accept` at once (§6.2), so conversations resume without a new acceptance.
+- A paper key belongs to an instance: after a reset with the recovery card it is gone with the old list.
 
 ## 5. Encryption
 
@@ -222,7 +251,9 @@ head, and sends a `request` message with an optional short note (at most 500 cha
 
 - A `request` from an unknown account goes to **Requests**, at most one per sender. Nothing else from that account is
   shown or stored until the user accepts.
-- **Accept** sends `accept` and opens the conversation on both sides. **Decline** deletes it locally; **Block**
+- **Accept** sends `accept` and opens the conversation on both sides. A `request` from a contact that is already
+  accepted means the sender has lost its data (a new device after a paper key, §4.5): it is answered with `accept` and
+  changes nothing else. **Decline** deletes it locally; **Block**
   remembers the account id and drops everything from it.
 - Acceptance is a client-side decision. The server cannot tell requests from other messages, which is deliberate: it
   learns no social graph. Spam is limited by per-sender rate limits on the authenticated connection and by the
@@ -260,6 +291,34 @@ once one of the recipient's devices has it.
   chunks of at most 48 KiB of plaintext.
 - There is no server-side backup. If every device is lost, the history is gone; that is the price of keeping nothing
   on the server.
+
+### 7.1 Can old messages be rescued when every device is lost?
+
+Mostly not, by design. Where each copy of a message is, and why it cannot be read by a new device:
+
+| Copy | Readable later? |
+|---|---|
+| Local history on the lost device | No: encrypted with that device's local key; the browser profile is gone. |
+| Envelopes still in the mailbox for the lost device | No: sealed to that device's prekeys, whose private keys were only on it. They expire after 14 days, or go when the device is removed from the list. |
+| Messages sent while no device was there | No: sealed to the devices in the list then; nothing is sealed to a paper key. |
+| **The other party's devices** | **Yes, there**: each contact keeps the whole conversation, both directions. |
+
+Options considered:
+
+1. **Paper key that also receives** (a prekey derived from the paper key, so senders seal a copy to it and the server
+   keeps it up to 14 days): would rescue at most the last 14 days, needs a prekey that is never rotated (breaking the
+   three-week forward-secrecy window of §5.2 for everyone who writes to the user), doubles the mailbox and makes the
+   server hold ciphertext that is never fetched. **Rejected.**
+2. **Encrypted history backup on the server or in the vault**, under a key from the paper key or the password: the
+   server would keep history, against principle 5 and G5, and a password plus the vault (or the paper) would read
+   everything. **Rejected.**
+3. **History from contacts** (a contact's device sends its copy of the conversation to the user's new device, on the
+   contact's explicit choice): feasible, and the only source that exists. The copies would be the contact's account of
+   the conversation, not signed by the user's old devices, so they must be shown as "återställt från X:s kopia".
+   **A possible later feature**; not built.
+
+The paper key therefore saves the account and its trust, not the history. The recommendation stays: link a second
+device.
 
 ## 8. Keys at rest: what rootcard holds and what it does not
 
