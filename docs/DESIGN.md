@@ -742,3 +742,126 @@ What clients from before emoji, reactions and the shared GIF collection get from
 | `gifs` to an own older device | dropped; that device has no collection until it is updated, and then gets only GIFs saved after that. The bytes are pulled with `file-req` (§9.2), so no chunks are pushed to it; a `file-req` for `gif:…` sent to an older device finds no file message and is ignored |
 
 An older device sends nothing new, so a newer device has nothing to handle from it.
+
+## 13. Ideas, not decided
+
+Ideas kept here so they are not forgotten. None of them is built or promised, and none is part of the protocol above
+until it is moved into its section (and into [PLAN.md](PLAN.md)). Each says why it could matter, how it could fit what
+exists, and what has to be decided first. They must keep §1: the server stays blind, learns no social graph and
+stores no more than it does now, unless an idea says otherwise and that is accepted.
+
+### 13.1 Recovery and identity
+
+**Remote wipe.** Partly there: a removed device that starts and connects finds itself missing from the list
+(`unknown_device`), deletes its local store and forgets the account on the login screen (`logout(true)` in `app.js`),
+and contacts stop encrypting to it (§4.4). What is missing:
+- The owner learns nothing. The device could, before deleting, send a last message signed with its device key to the
+  own devices ("wiped at …"); the server would have to let a just-removed device send this one message, or the
+  device signs it and the server keeps it with the removal. Shown in the device list.
+- A device that is never started again is never wiped. "Remember me" (T12) stores the derived key, so such a profile
+  is readable offline. Nothing helps against that except not remembering; the removal dialog should say so.
+- A device can be removed only by a device; the paper key could also remove one (today it can only add).
+- Decide: is a "wipe" different from a removal (for example: remove and say "stolen", which also suggests a new paper
+  key and rotating the password), or is removal enough with better wording?
+
+**Proofs of linked accounts.** rootcard already has proofs (SPEC §14, `prove`, `verifyProof` and
+`statementChallenge` in the vendored core): the account key (or recovery key) signs a challenge for a named
+recipient, checked against the newest log. Murmo uses this only to ask for a link (§4.3). It could also let users:
+- show statements such as "I am @alice on example.social" or "I control example.com", signed by the account key and
+  published where the other account lives (a post, a `/.well-known` file), so someone who trusts that account can
+  reach `Alice#3F9C` without any search (§1.3 holds: the user hands out the link, Murmo looks nothing up);
+- answer a contact's or a website's challenge ("prove you are Alice#3F9C") from the app.
+- Decide: are statements shown inside Murmo (on a contact's card, re-checked against their log), and how is a statement
+  taken back? Does a proof made with the account key survive a reset with the recovery card (a new instance)?
+
+**Social recovery of the paper key.** The paper key (§4.5) split k-of-n (Shamir, for example 3 of 5) among chosen
+contacts, each share sent end to end and kept by their devices. With every device lost, the user logs in with the
+password, asks the guardians (by identifier, a message request they already accept), and k shares rebuild the paper.
+The paper alone is worth nothing without the password (§4.5), so guardians who join forces still cannot add a device.
+- Decide: how does a guardian know the request really comes from the user and not from someone with the password?
+  (A call or meeting, a safety code read out, a delay with notice to the old devices.) What happens to shares when a
+  guardian loses their devices or the paper key is replaced (new shares to all)?
+
+**Verify in person with a QR code.** Each screen shows a QR with the identifier, the device-list head and the safety
+code (§6.3); scanning each other's codes accepts the request in both directions and marks the contact "verified in
+person". Breaks if the head changes later, as the safety code does today.
+- Decide: camera access in the browser (a permission, and a QR decoder in the client: a dependency or own code).
+
+**Identity timeline.** The rootcard log and the device list drawn as a history: instance created, devices added and by
+which device, paper key made or used, devices removed. A device nobody recognises stands out as an event. Only
+showing what is already verified.
+
+### 13.2 Fewer unwanted messages
+
+**Aliases you can throw away.** Hand out `Alice-bike#81C2` instead of the real identifier, for a sale, a conference
+badge, a dating profile. Requests to the alias land in their own list; turning it off stops them, and the real
+identifier was never shown.
+- Could be a separate rootcard identity per alias, owned by the same devices (heavy: logs, vaults), or a name the
+  server maps to the account (the server then learns which aliases belong together: weaker than §1 today).
+- Decide: which of the two, how a contact who later should know the real identity is moved over, and the limits.
+
+### 13.3 Calm messaging
+
+Murmo already has no typing indicator, no read receipts and no "online" status. The idea is to make calm the point:
+- **Intent when sending:** *no rush* (never notifies), normal, *urgent* (notifies even in quiet hours). Inside the
+  encryption; the server sees only `notify` as today (§2). Urgent limited per contact so it is not abused.
+- **Delivery windows / quiet hours:** notifications batched on the user's own devices ("at 08:00 and 17:00"). The
+  push is still empty; only when the device shows a notification changes.
+- **Shared availability:** "usually answers in the evening", sent end to end to accepted contacts, instead of presence.
+- **Waiting for my reply:** a list of conversations where the last message is from the other side and asked for an
+  answer, instead of unread counters.
+- **Letters / time capsules:** a message that opens on a date. Up to the queue's 14 days the content could be sent
+  at once and its key later from a sender's device; beyond that it waits on the sender's devices.
+- Decide: whether intents are a new kind (§12: lost on older devices) or a field older devices ignore.
+
+### 13.4 Privacy
+
+**What the server knows about me.** A page that shows, for the logged-in account, what the server holds right now
+(§11): device list and prekeys, number and size of queued envelopes and file chunks per device, push endpoints,
+rootcard data, with a delete button where deleting is safe (push endpoints, queued chunks this account sent).
+Needs an authenticated `/api/v1/me` that reports counts and sizes, never more than the server already has.
+
+**Duress password.** A second password, set on a device, that opens an empty profile, or deletes that device's local
+data, instead of the real one. Local only: the vault and rootcard know nothing of it.
+- Decide: an empty decoy is easy to tell apart from a used account; deleting is irreversible. Also what the duress
+  login does with the server session (a real login would show on the user's other devices).
+
+**Sealed sender and padding.** The server knows which device sends to which devices and when (AR3). The sender
+could be hidden inside the envelope (the server only checks a delivery token per conversation instead of the sending
+device), and envelopes padded to a few size buckets.
+- Decide: rate limits and quotas today are per sending account (§9); they need another anchor (tokens issued per
+  accepted contact, anonymous credentials).
+
+**One-time secrets.** A text (a password, a door code) that can be opened once, is not kept in history, not handed to
+new devices and not forwarded; the sender sees when it was opened. Built on `ephemeral` (§6.8) with "open once"
+instead of a timer.
+
+### 13.5 Inside a conversation
+
+- **Shared objects:** a list (shopping, packing), a poll, a shared note, live location with a hard end. Kept as
+  small CRDTs whose updates are messages, so the server sees ordinary envelopes. Becomes much more useful with groups.
+- **Voice messages, transcribed on the device** (Web Speech, or a speech model in WASM/WebGPU, never a cloud service).
+- **Translation and "catch me up" summaries on the device** with the browser's built-in translation and summary APIs
+  where they exist, off where they do not. Nothing leaves the device; the app must say what the browser does with it.
+- **Calls** over WebRTC, signalling inside envelopes, the DTLS fingerprint bound to the device keys and shown next to
+  the safety code. Decide: a TURN server reveals both parties' addresses to its operator; is it offered, and by whom?
+
+### 13.6 Murmo outside the app
+
+**"Contact me securely" widget.** A few lines of HTML a journalist, lawyer or project puts on their site: the visitor
+writes, the message is encrypted in their browser with a key made on the spot to the owner's devices, and arrives as a
+message request (§6), with a one-time link for the visitor to read the answer. Like a small SecureDrop.
+- Decide: abuse (anonymous senders, so rate limits and maybe a proof of work), whether senders without an account fit
+  the device-list model, and that the widget's script must be served by Murmo, not copied (AR1).
+
+**Alerts and bots.** `protocol.js` already runs in Node: a small CLI or HTTP sidecar (`murmo-send "backup failed"`)
+for self-hosters who want encrypted alerts on their phone, and bots that are rootcard identities asking to be
+contacts like anyone else. Decide: where a bot keeps its device key, and whether bots are marked as bots.
+
+### 13.7 Trusting the client
+
+**Check the served client.** Extend the "signed, reproducible client" item in [PLAN.md](PLAN.md): the installed app
+compares the served files' hashes with a list signed by a release key (for example published in a rootcard log)
+before running them, and warns otherwise. It answers AR1, the objection to every web messenger that the server can
+serve other code. Decide: how a service worker can reliably hold back a page it does not trust, and how the release
+key is replaced.
