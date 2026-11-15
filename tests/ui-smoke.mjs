@@ -135,6 +135,27 @@ try {
   await a.keyboard.press("Enter");
   await b.waitForSelector(".msg .body.jumbo", { timeout: 20000 });
   if (await a.$(".picker:not(.hidden)")) await a.keyboard.press("Escape");
+  // Disappearing messages: the timer stays on, files wait; the countdown starts on screen, the message fades away.
+  await a.click(".composer .timer-btn");
+  await a.waitForSelector(".timer-menu", { visible: true, timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-6d-timer-menu.png` });
+  await clickText(a, "15 s", ".timer-menu button");
+  await a.waitForSelector(".composer.ephemeral .timer-btn.on", { timeout: 5000 });
+  if (!(await a.$eval(".composer textarea", (t) => t.placeholder)).startsWith("Försvinnande meddelande")) throw new Error("the placeholder does not say the message disappears");
+  if (!(await a.$eval(".composer .gif-btn", (x) => x.disabled))) throw new Error("GIFs can be sent with a timer on");
+  await a.type(".composer textarea", "Den här försvinner.");
+  await a.keyboard.press("Enter");
+  await b.waitForSelector(".msg.ephemeral.in .fuse[data-end]", { timeout: 20000 }); // seen: the countdown runs
+  await a.waitForSelector(".msg.ephemeral.out .fuse[data-end]", { timeout: 20000 }); // delivered: the sender's too
+  await b.screenshot({ path: `${shots}/b-6e-ephemeral.png` });
+  if (!(await a.$(".composer .timer-btn.on"))) throw new Error("the timer did not stay on after sending");
+  await b.waitForSelector(".msg.ephemeral.dissolve", { timeout: 20000 });
+  await b.screenshot({ path: `${shots}/b-6f-dissolve.png` });
+  await b.waitForFunction(() => !document.querySelector(".msg.ephemeral"), { timeout: 10000 });
+  await a.waitForFunction(() => !document.querySelector(".msg.ephemeral"), { timeout: 20000 });
+  await a.click(".composer .timer-btn");
+  await clickText(a, "Av", ".timer-menu button");
+  await a.waitForFunction(() => !document.querySelector(".composer.ephemeral"), { timeout: 5000 });
   // GIFs: picked from a file (and kept in the collection), then saved by the recipient from the viewer and resent.
   fs.writeFileSync(`${shots}/tiny.gif`, Buffer.from("R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==", "base64"));
   await a.click(".composer .gif-btn");
