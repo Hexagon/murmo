@@ -10,6 +10,11 @@ const HEARTBEAT = 25_000;
 const PONG_WAIT = 8_000;
 const CONNECT_WAIT = 15_000;
 const SEND_WAIT = 12_000;
+// The server's relay budgets in bytes of chunk text per minute (sent again in "ready"): per sending device, counted
+// once per recipient device, and per recipient device for the sending account (server/src/ws.rs).
+const RELAY_DEFAULT = { bytes: 384 * 1024 * 1024, peer: 96 * 1024 * 1024, window: 60 };
+// Stay this far under them, so that a paced transfer does not run into a limit.
+const RELAY_MARGIN = 0.9;
 
 export class Socket extends EventTarget {
   /** `auth(nonce)` returns `{ account, device, sig }`. */
@@ -26,6 +31,9 @@ export class Socket extends EventTarget {
     this.retry = null;
     this.beat = null;
     this.lastFrame = 0;
+    this.relayLimits = RELAY_DEFAULT;
+    this.relayLog = []; // { at, len, to } of relay frames sent within the window
+    this.relayPause = 0; // no relay before this time (ms) after a "rate_limited"
   }
 
   connect() {
@@ -161,6 +169,7 @@ export class Socket extends EventTarget {
       }
       case "ready":
         this.ready = true;
+        this.relayLimits = relayLimits(f.relay);
         this.backoff = 1000;
         clearTimeout(this.ws.connectTimer);
         clearInterval(this.beat);
@@ -179,6 +188,12 @@ export class Socket extends EventTarget {
         this.settle(f.id ?? f.ref, f);
         return;
       case "error":
+        if (f.error === "rate_limited" && Number.isSafeInteger(f.retry) && f.retry > 0) {
+          this.relayPause = Math.max(this.relayPause, Date.now() + Math.min(f.retry, 3600) * 1000);
+        }
+        if (f.id && !this.waiting.has(f.id)) {
+          this.dispatchEvent(new CustomEvent("frame-error", { detail: { id: f.id, error: f.error, retry: f.retry } }));
+        }
         if (f.id && this.waiting.has(f.id)) {
           const w = this.waiting.get(f.id);
           this.waiting.delete(f.id);
@@ -273,6 +288,38 @@ export class Socket extends EventTarget {
     if (store) frame.store = true;
     if (ref) frame.ref = ref;
     this.send(frame);
+    const now = Date.now();
+    while (this.relayLog.length && this.relayLog[0].at <= now - this.relayLimits.window * 1000) this.relayLog.shift();
+    this.relayLog.push({ at: now, len: data.length, to: [...new Set(to)] });
+  }
+
+  /**
+   * Wait until `len` bytes of relay text to `to` fit in the server's budgets: what was sent in the last window
+   * (sliding, so the server's fixed windows are never exceeded either), with a margin, and no earlier than a
+   * "rate_limited" said.
+   */
+  async pace(to, len) {
+    to = [...new Set(to)];
+    const { bytes, peer, window } = this.relayLimits;
+    for (;;) {
+      const now = Date.now();
+      const since = now - window * 1000;
+      while (this.relayLog.length && this.relayLog[0].at <= since) this.relayLog.shift();
+      let wait = this.relayPause - now;
+      if (wait <= 0) {
+        let total = len * to.length;
+        const per = new Map(to.map((d) => [d, len]));
+        for (const e of this.relayLog) {
+          total += e.len * e.to.length;
+          for (const d of e.to) if (per.has(d)) per.set(d, per.get(d) + e.len);
+        }
+        const over = total > bytes * RELAY_MARGIN || [...per.values()].some((n) => n > peer * RELAY_MARGIN);
+        // Nothing left to wait for: one frame larger than the whole budget is sent anyway (and refused).
+        if (!over || !this.relayLog.length) return;
+        wait = this.relayLog[0].at - since;
+      }
+      await new Promise((r) => setTimeout(r, Math.max(wait, 20)));
+    }
   }
 
   ack(ids) {
@@ -287,4 +334,11 @@ export class Socket extends EventTarget {
   async drain(limit = 2 * 1024 * 1024) {
     while (this.ws && this.ws.bufferedAmount > limit) await new Promise((r) => setTimeout(r, 20));
   }
+}
+
+/** The relay budgets from "ready", or the defaults for a server that does not send them. */
+function relayLimits(r) {
+  const ok = (n) => Number.isSafeInteger(n) && n > 0;
+  if (!r || !ok(r.bytes) || !ok(r.peer) || !ok(r.window) || r.window > 3600) return RELAY_DEFAULT;
+  return { bytes: r.bytes, peer: r.peer, window: r.window };
 }

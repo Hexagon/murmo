@@ -320,6 +320,52 @@ impl Limiter {
         Ok(())
     }
 
+    /// What a limit of `max` allows here (multiplied by the scale).
+    pub fn budget(&self, max: u32) -> u32 {
+        max.saturating_mul(self.scale)
+    }
+
+    /// Count `n` units (bytes, say) against each `(key, n, max)` in one `window`. All or nothing: when any of them
+    /// would go over its `max`, none is counted and the longest wait is returned.
+    pub fn charge(&self, items: &[(String, u32, u32)], window: i64) -> Result<(), ApiError> {
+        let keys: Vec<[u8; 16]> = items.iter().map(|(k, _, _)| self.hash(k)).collect();
+        let t = now();
+        let mut g = self.counters.lock().map_err(ApiError::internal)?;
+        let mut wait = 0i64;
+        for (k, (_, n, max)) in keys.iter().zip(items) {
+            let used = match g.get(k) {
+                Some(c) if t - c.start < window && c.start <= t => Some((c.count, c.start)),
+                _ => None,
+            };
+            let count = used.map_or(0, |(c, _)| c);
+            if u64::from(count) + u64::from(*n) > u64::from(self.budget(*max)) {
+                wait = wait.max(used.map_or(window, |(_, s)| window - (t - s)));
+            }
+        }
+        if wait > 0 {
+            return Err(ApiError::rate_limited(
+                u64::try_from(wait).unwrap_or(1).max(1),
+            ));
+        }
+        for (k, (_, n, _)) in keys.into_iter().zip(items) {
+            let e = g.entry(k).or_insert(Counter {
+                count: 0,
+                start: t,
+                window,
+            });
+            if t - e.start >= window || e.start > t {
+                *e = Counter {
+                    count: 0,
+                    start: t,
+                    window,
+                };
+            }
+            e.window = e.window.max(window);
+            e.count = e.count.saturating_add(*n);
+        }
+        Ok(())
+    }
+
     /// Forget windows that have ended (and anything older than an hour).
     pub fn sweep(&self) {
         let t = now();
@@ -825,6 +871,29 @@ mod limit_tests {
         }
         assert!(l.by_addr("x", ip("2001:db8:1:2::ff"), 3, 60).is_err());
         assert!(l.by_addr("x", ip("2001:db8:1:3::1"), 3, 60).is_ok());
+    }
+
+    #[test]
+    fn charge_all_or_nothing() {
+        let l = Limiter::default();
+        let a = || ("a".to_string(), 40, 100);
+        let b = |n| ("b".to_string(), n, 50);
+        assert!(l.charge(&[a(), b(40)], 60).is_ok());
+        // `b` would go over: nothing is counted, not even `a`.
+        let e = l.charge(&[a(), b(20)], 60).expect_err("over");
+        assert_eq!(e.code, "rate_limited");
+        assert!(e.retry_after.is_some_and(|s| (1..=60).contains(&s)));
+        assert!(l.charge(&[a(), b(10)], 60).is_ok());
+        assert!(l.charge(&[a()], 60).is_err());
+        assert!(l.charge(&[("a".into(), 20, 100)], 60).is_ok());
+        // One item larger than the whole budget never passes.
+        assert!(l.charge(&[("c".into(), 101, 100)], 60).is_err());
+        // The scale multiplies the budget.
+        assert!(
+            Limiter::scaled(2)
+                .charge(&[("c".into(), 101, 100)], 60)
+                .is_ok()
+        );
     }
 
     #[test]

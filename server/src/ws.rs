@@ -24,6 +24,11 @@ pub const MAX_QUEUE: i64 = 2000;
 pub const MAILBOX_TTL: i64 = 14 * 24 * 3600;
 /// Largest relay payload (base64url text): one file chunk.
 pub const MAX_RELAY: usize = 96 * 1024;
+/// Relay budget per sending device and minute, in bytes of chunk text counted once per recipient device.
+pub const RELAY_BYTES: u32 = 384 << 20;
+/// Relay budget per sending account and recipient device and minute, in bytes of chunk text: what one account can
+/// push into one device, whichever of its devices sends.
+pub const RELAY_PEER_BYTES: u32 = 96 << 20;
 /// Most devices per presence query.
 pub const MAX_PRESENCE: usize = 32;
 /// Largest frame accepted from a client.
@@ -153,7 +158,18 @@ async fn session(
     socket: &mut WebSocket,
     rx: &mut mpsc::Receiver<Push>,
 ) -> Result<(), axum::Error> {
-    socket.send(frame(Map::new().with("t", "ready"))).await?;
+    // The relay budgets, so that the client can pace a file transfer instead of running into them.
+    socket
+        .send(frame(
+            Map::new().with("t", "ready").with(
+                "relay",
+                Map::new()
+                    .with("bytes", i64::from(app.limits.budget(RELAY_BYTES)))
+                    .with("peer", i64::from(app.limits.budget(RELAY_PEER_BYTES)))
+                    .with("window", 60i64),
+            ),
+        ))
+        .await?;
     // Queued envelopes, then pending link requests.
     let mut after = 0i64;
     loop {
@@ -271,6 +287,9 @@ fn handle(app: &Arc<App>, me: &Authed, m: &Map) -> Option<Message> {
         Ok(msg) => msg,
         Err(e) => {
             let mut f = Map::new().with("t", "error").with("error", e.code);
+            if let Some(s) = e.retry_after {
+                f.insert("retry", i64::try_from(s).unwrap_or(i64::MAX).into());
+            }
             if let Some(id) = m.get("id").and_then(Value::as_str) {
                 f.insert("id", id.into());
             } else if let Some(r) = m.get("ref").and_then(Value::as_str)
@@ -400,6 +419,29 @@ fn relay(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
     if to.is_empty() || to.len() > MAX_RECIPIENTS {
         return Err(ApiError::new(400, "bad_field"));
     }
+    // Bytes, not only frames: once per recipient device for the sender, and per recipient for the sending account.
+    let mut targets: Vec<&str> = Vec::with_capacity(to.len());
+    for d in to {
+        let d = d.as_str().ok_or(ApiError::new(400, "bad_field"))?;
+        if d != me.device && !targets.contains(&d) {
+            targets.push(d);
+        }
+    }
+    let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    let mut budget: Vec<(String, u32, u32)> = Vec::with_capacity(targets.len() + 1);
+    budget.push((
+        format!("relay-bytes:{}", me.device),
+        len.saturating_mul(u32::try_from(targets.len()).unwrap_or(u32::MAX)),
+        RELAY_BYTES,
+    ));
+    for d in &targets {
+        budget.push((
+            format!("relay-to:{}>{d}", me.account),
+            len,
+            RELAY_PEER_BYTES,
+        ));
+    }
+    app.limits.charge(&budget, 60)?;
     let push = text(
         &Map::new()
             .with("t", "relay")
@@ -586,4 +628,121 @@ fn presence(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError
         f.insert("ref", r.into());
     }
     Ok(Some(frame(f)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Config;
+
+    fn app() -> Arc<App> {
+        let cfg = Config {
+            origin: "http://127.0.0.1:8080".into(),
+            old_origins: Vec::new(),
+            bind: String::new(),
+            db: ":memory:".into(),
+            key_file: String::new(),
+            client_dir: String::new(),
+            realm: "global".into(),
+            realms: vec!["global".into()],
+            remote_homes: Vec::new(),
+            any_home: false,
+            trust_proxy: Vec::new(),
+            limit_scale: 1,
+            file_queue: 0,
+            file_queue_total: 0,
+            file_queue_sender: 0,
+            file_queue_account: 0,
+            push_hosts: Vec::new(),
+            giphy_key: String::new(),
+            giphy_rating: "pg-13".into(),
+            push_contact: String::new(),
+        };
+        let db = crate::db::Db::open(":memory:").expect("database");
+        crate::build(&cfg, db, [3; 32]).expect("app")
+    }
+
+    fn me(account: &str, device: &str) -> Authed {
+        Authed {
+            account: account.into(),
+            device: device.into(),
+        }
+    }
+
+    fn relay_to(app: &Arc<App>, me: &Authed, to: &[&str], len: usize) -> Map {
+        let f = Map::new()
+            .with("t", "relay")
+            .with(
+                "to",
+                Value::Array(to.iter().map(|d| Value::from(*d)).collect()),
+            )
+            .with("data", "a".repeat(len).as_str())
+            .with("ref", "r");
+        match handle(app, me, &f) {
+            Some(Message::Text(t)) => match parse_limited(t.as_bytes(), MAX_FRAME) {
+                Ok(Value::Object(m)) => m,
+                _ => panic!("not an object"),
+            },
+            _ => panic!("no reply"),
+        }
+    }
+
+    fn is_limited(m: &Map) -> bool {
+        m.get("error").and_then(Value::as_str) == Some("rate_limited")
+            && m.get("id").and_then(Value::as_str) == Some("r")
+            && m.get("retry")
+                .and_then(Value::as_int)
+                .is_some_and(|s| (1..=60).contains(&s))
+    }
+
+    #[test]
+    fn relay_bytes_per_recipient() {
+        let app = app();
+        let a = me("A", "a1");
+        // Full chunks into one device: the per-recipient budget ends it long before the frame limit.
+        let per = RELAY_PEER_BYTES as usize / MAX_RELAY;
+        for _ in 0..per {
+            assert_eq!(
+                relay_to(&app, &a, &["b1"], MAX_RELAY)
+                    .get("t")
+                    .and_then(Value::as_str),
+                Some("relay-missed")
+            );
+        }
+        assert!(is_limited(&relay_to(&app, &a, &["b1"], MAX_RELAY)));
+        // Another device of the same account shares that budget; another recipient has its own.
+        assert!(is_limited(&relay_to(
+            &app,
+            &me("A", "a2"),
+            &["b1"],
+            MAX_RELAY
+        )));
+        assert!(!is_limited(&relay_to(&app, &a, &["b2"], MAX_RELAY)));
+        // A refused frame counts nothing: b2 got only what passed.
+        assert!(is_limited(&relay_to(&app, &a, &["b1", "b3"], MAX_RELAY)));
+        assert!(!is_limited(&relay_to(&app, &a, &["b3"], MAX_RELAY)));
+        // Other accounts are not affected.
+        assert!(!is_limited(&relay_to(
+            &app,
+            &me("C", "c1"),
+            &["b1"],
+            MAX_RELAY
+        )));
+    }
+
+    #[test]
+    fn relay_bytes_per_sender() {
+        let app = app();
+        let a = me("A", "a1");
+        let to: Vec<String> = (0..MAX_RECIPIENTS).map(|i| format!("d{i}")).collect();
+        let to: Vec<&str> = to.iter().map(String::as_str).collect();
+        // Fan-out counts once per recipient (duplicates and the sender itself not at all).
+        let per = RELAY_BYTES as usize / (MAX_RELAY * to.len());
+        for _ in 0..per {
+            assert!(!is_limited(&relay_to(&app, &a, &to, MAX_RELAY)));
+        }
+        assert!(is_limited(&relay_to(&app, &a, &to, MAX_RELAY)));
+        // Small frames still fit in what is left.
+        assert!(!is_limited(&relay_to(&app, &a, &["x", "x", "a1"], 1000)));
+    }
 }

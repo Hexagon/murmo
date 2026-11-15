@@ -6,6 +6,7 @@ import * as p from "../client/js/protocol.js";
 import * as emoji from "../client/js/emoji.js";
 import * as giphy from "../client/js/giphy.js";
 import { validReaction } from "../client/js/core.js";
+import { Socket } from "../client/js/net.js";
 
 async function device(label) {
   const kp = await p.newKeyPair("Ed25519");
@@ -222,4 +223,42 @@ test("GIPHY: only its media hosts, without tracking parameters, within the size 
   assert.equal(r.length, 1);
   assert.deepEqual(r[0], { id: "a", title: "Katt", preview: "https://media1.giphy.com/media/x/a.gif", full: "https://media1.giphy.com/media/x/a.gif" });
   assert.deepEqual(giphy.parseResults(null, 1), []);
+});
+
+test("relay pacing: stays under the server's byte budgets and waits out a refusal", async () => {
+  const s = new Socket("ws://unused", async () => ({}));
+  const sent = [];
+  s.ready = true;
+  s.ws = { send: (t) => sent.push(JSON.parse(t)) };
+  // As the server announces them in "ready" (bad values fall back to the defaults).
+  await s.onFrame(JSON.stringify({ t: "ready", relay: { bytes: 1000, peer: 500, window: 1 } }));
+  clearInterval(s.beat);
+  assert.deepEqual(s.relayLimits, { bytes: 1000, peer: 500, window: 1 });
+  s.relay(["b", "b"], "x".repeat(400));
+  // Another recipient fits at once; the same one waits until the first frame leaves the window.
+  let t = Date.now();
+  await s.pace(["c"], 400);
+  assert.ok(Date.now() - t < 100);
+  t = Date.now();
+  await s.pace(["b"], 100);
+  assert.ok(Date.now() - t >= 900);
+  // The total over all recipients counts each recipient.
+  s.relayLog = [];
+  s.relay(["a", "b"], "x".repeat(300));
+  t = Date.now();
+  await s.pace(["c", "d"], 200); // 600 + 400 > 900
+  assert.ok(Date.now() - t >= 900);
+  // A "rate_limited" for a transfer pauses relays and is told to whoever owns the reference.
+  s.relayLog = [];
+  const errors = [];
+  s.addEventListener("frame-error", (e) => errors.push(e.detail));
+  await s.onFrame(JSON.stringify({ t: "error", error: "rate_limited", id: "f.r", retry: 1 }));
+  assert.deepEqual(errors, [{ id: "f.r", error: "rate_limited", retry: 1 }]);
+  t = Date.now();
+  await s.pace(["c"], 1);
+  assert.ok(Date.now() - t >= 900);
+  await s.onFrame(JSON.stringify({ t: "ready", relay: { bytes: -1 } }));
+  clearInterval(s.beat);
+  assert.equal(s.relayLimits.peer, 96 * 1024 * 1024);
+  assert.equal(sent.length, 2);
 });

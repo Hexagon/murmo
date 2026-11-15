@@ -171,6 +171,7 @@ export class Messenger extends EventTarget {
     this.fileQueue = fileQueue;
     this.pendingFiles = []; // [{ conv, id, time }] files some device has not been given yet
     this.missed = new Map(); // f → Set(device): "relay-missed" during a transfer
+    this.refused = new Set(); // refs of transfers of which the server refused a chunk
     this.api = api;
     this.store = store;
     this.me = { account, device: null };
@@ -236,6 +237,10 @@ export class Messenger extends EventTarget {
     this.ws.addEventListener("devices", (e) => {
       this.lists.delete(e.detail.account);
       this.emit("devices", e.detail);
+    });
+    // A relay frame of a transfer was refused (a rate limit): the transfer stops and is offered again later.
+    this.ws.addEventListener("frame-error", (e) => {
+      if (this.missed.has(e.detail.id)) this.refused.add(e.detail.id);
     });
     this.ws.addEventListener("server-error", (e) => {
       if (e.detail === "unknown_device") this.emit("removed");
@@ -921,14 +926,18 @@ export class Messenger extends EventTarget {
         const part = await read?.(i);
         if (!part) throw new Error("no_file");
         const data = await p.encryptChunk(key, meta.f, i, meta.n, part);
+        await this.ws.pace(devices, data.length);
         await this.ws.drain();
+        if (this.refused.has(ref)) return devices;
         this.ws.relay(devices, data, { store, ref });
       }
       await this.ws.presence([this.me.device]); // answered after every chunk before it was handled
+      if (this.refused.has(ref)) return devices; // a chunk was refused: nobody got all of it
     } catch {
       return devices; // the connection broke: nobody got all of it for certain
     } finally {
       this.missed.delete(ref);
+      this.refused.delete(ref);
     }
     return [...missed];
   }

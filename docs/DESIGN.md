@@ -506,7 +506,7 @@ WebSocket frames (JSON):
 |---|---|
 | server → client | `{ t: "challenge", nonce }` |
 | client → server | `{ t: "auth", account, device, sig }` with `sig` over `frame("mesg/ws-auth/v1", canonical({account, device, nonce, origin}))` |
-| server → client | `{ t: "ready" }` then queued `{ t: "msg", id, env }` frames |
+| server → client | `{ t: "ready", relay: { bytes, peer, window } }` (the relay budgets below) then queued `{ t: "msg", id, env }` frames |
 | client → server | `{ t: "send", id, to: [{ device, env }] }` → `{ t: "sent", id }` |
 | client → server | `{ t: "ack", ids: [...] }` (deletes) |
 | client → server | `{ t: "prekey", prekey }` |
@@ -523,6 +523,14 @@ WebSocket frames (JSON):
 
 Limits (v0): envelope ≤ 64 KiB, ≤ 24 recipients per send, ≤ 2 000 queued envelopes per device, mailbox TTL 14 days,
 60 sends per minute per device, 20 lookups per minute and 5 link requests per hour per network address.
+
+Relay (live file chunks and the file queue): at most 3 000 frames per minute per device, and bytes of chunk text per
+minute: 384 MiB per sending device, counted once for each recipient device (a chunk to five devices counts five
+times), and 96 MiB per sending account into any one recipient device, whichever of the account's devices sends. A
+frame that would go over either budget is refused whole, with `{ t: "error", error: "rate_limited", id: ref, retry }`
+(`retry`: seconds), and counts nothing. The budgets are announced in `ready`; the client paces a transfer to stay
+under 90 % of them over any sliding minute, and a transfer whose chunk is refused anyway stops and is offered again
+later, like one whose connection broke.
 
 Rate limits count per IPv4 address and per IPv6 /64. Counters are keyed by a hash of the address under a random
 secret in the database (HKDF-SHA-256, 128 bits), never by the address itself. Windows of ten minutes or more
