@@ -5,17 +5,213 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
   <meta name="color-scheme" content="light dark">
   <meta name="referrer" content="no-referrer">
-  <title>Murmo Secure Messenger</title>
-  <meta name="description" content="Murmo Secure Messenger: end-to-end-krypterade meddelanden med identitet från rootcard.">
+  <title>Murmo Secure Messenger – krypterade meddelanden utan telefonnummer</title>
+  <meta name="description" content="Murmo är en krypterad messenger i webbläsaren. End-to-end-kryptering per enhet, identitet med rootcard i stället för telefonnummer, och en server som sparar så lite som möjligt. Öppen källkod.">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Murmo Secure Messenger">
+  <meta property="og:title" content="Murmo Secure Messenger – krypterade meddelanden utan telefonnummer">
+  <meta property="og:description" content="End-to-end-krypterade meddelanden i webbläsaren, med identitet från rootcard. Ingen sökning, inga kontaktlistor på servern, öppen källkod.">
+  <meta property="og:image" content="icon-512.png">
+  <meta name="twitter:card" content="summary">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
   <link rel="manifest" href="manifest.webmanifest">
-  <meta name="theme-color" content="#c96442">
+  <meta name="theme-color" content="#1d5c6e">
   <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "Murmo Secure Messenger",
+    "alternateName": "Murmo",
+    "applicationCategory": "CommunicationApplication",
+    "operatingSystem": "Webbläsare (Chrome, Firefox, Safari, Edge)",
+    "description": "Krypterad messenger i webbläsaren med end-to-end-kryptering per enhet och identitet från rootcard.",
+    "inLanguage": "sv",
+    "license": "https://opensource.org/license/mit"
+  }
+  </script>
   <script type="module" src="js/app.js"></script>
 </head>
-<body>
-  <div id="app" aria-live="polite"></div>
-  <noscript>Murmo behöver JavaScript.</noscript>
+<body class="landing">
+  <header class="site-head">
+    <a class="logo" href="#top"><img src="icon.svg" alt="" width="28" height="28">Murmo</a>
+    <nav aria-label="Sidan">
+      <a href="#sa-fungerar-det">Så fungerar det</a>
+      <a href="#sakerhet">Säkerhet</a>
+      <a href="#rootcard">rootcard</a>
+      <a href="#fragor">Frågor</a>
+    </nav>
+    <a class="btn small" href="#konto">Logga in</a>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="hero-text">
+        <p class="eyebrow">Murmo Secure Messenger</p>
+        <h1>Krypterade meddelanden utan telefonnummer</h1>
+        <p class="lead">Murmo är en liten messenger i webbläsaren. Meddelanden krypteras på din enhet och kan bara läsas
+          av mottagarens enheter. Din identitet är en <a href="#rootcard">rootcard-identitet</a> – inte ett
+          telefonnummer eller en e-postadress – och servern sparar så lite som möjligt.</p>
+        <ul class="checks">
+          <li>End-to-end-krypterat, separat till varje enhet</li>
+          <li>Identitet med rootcard, lösenordet lämnar aldrig webbläsaren</li>
+          <li>Ingen sökning, inga kontaktlistor på servern</li>
+          <li>Öppen källkod – granska koden eller kör en egen server</li>
+        </ul>
+      </div>
+      <div class="hero-app" id="konto">
+        <div id="app" aria-live="polite"></div>
+        <noscript><div class="card">Murmo körs i webbläsaren och behöver JavaScript.</div></noscript>
+      </div>
+    </section>
+
+    <section class="band" id="sa-fungerar-det" aria-labelledby="h-steg">
+      <h2 id="h-steg">Så fungerar det</h2>
+      <ol class="steps">
+        <li>
+          <h3>Skapa en identitet</h3>
+          <p>Välj ett namn och ett lösenord. Du får ett återställningskort att spara offline – det är nyckeln till din
+            identitet, och det enda som kan återställa den.</p>
+        </li>
+        <li>
+          <h3>Dela din identifierare</h3>
+          <p>Du får en identifierare som <code>Namn#3F9C</code>. Det går inte att söka fram någon i Murmo; den du vill
+            prata med behöver din exakta identifierare.</p>
+        </li>
+        <li>
+          <h3>Skriv</h3>
+          <p>Det första meddelandet blir en förfrågan. Inget mer från avsändaren syns förrän mottagaren har tackat ja.
+            Jämför säkerhetskoden när ni ses, så vet ni att ingen sitter emellan.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section id="sakerhet" aria-labelledby="h-sakerhet">
+      <h2 id="h-sakerhet">Säkerhet som inte hänger på servern</h2>
+      <p class="section-lead">Murmo är byggt så att servern, nätverket och den som driver tjänsten bara ser chiffertext.
+        Så här går det till:</p>
+      <div class="grid">
+        <article>
+          <h3>End-to-end per enhet</h3>
+          <p>Varje meddelande krypteras i webbläsaren, en gång för varje enhet som ska läsa det (X25519 och AES-GCM), och
+            signeras av den skickande enheten (Ed25519).</p>
+        </article>
+        <article>
+          <h3>Nya enheter godkänns</h3>
+          <p>En ny enhet läggs bara till när en enhet du redan har godkänner den, efter att ni jämfört en kod. Ett stulet
+            lösenord räcker inte för att läsa dina meddelanden.</p>
+        </article>
+        <article>
+          <h3>Säkerhetskoder</h3>
+          <p>Koden i varje konversation beräknas från båda parters enhetslistor. Ändras en lista ser du en varning, och
+            förfalskade listor avvisas.</p>
+        </article>
+        <article>
+          <h3>Nycklar som byts</h3>
+          <p>Nycklarna som tar emot meddelanden byts varje vecka och raderas efter tre. Inspelad trafik kan inte läsas i
+            efterhand med en senare stulen enhet.</p>
+        </article>
+        <article>
+          <h3>Krypterat på enheten</h3>
+          <p>Historik, kontakter och nycklar sparas krypterat i webbläsaren och låses upp med ditt lösenord.</p>
+        </article>
+        <article>
+          <h3>Filer och bilder</h3>
+          <p>Filer krypteras med en egen nyckel och skickas till anslutna enheter utan att sparas. Servern ser
+            ungefärlig storlek, aldrig namn eller innehåll.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="band" id="rootcard" aria-labelledby="h-rootcard">
+      <h2 id="h-rootcard">Identitet med rootcard</h2>
+      <div class="split">
+        <div>
+          <p>Murmo har inget eget kontosystem. Du loggar in med en <a href="https://rootcard.org" rel="noopener">rootcard</a>-identitet:
+            en öppen, självcertifierande identitet som består av en verifierbar logg över nycklar, ett krypterat valv och
+            ett återställningskort.</p>
+          <p>Murmo förankrar dina enheter – och därmed krypteringen – i den loggen, inte i förtroende för servern. Du kan
+            skapa identiteten direkt här, eller logga in med en du redan har hos en annan rootcard-server, till exempel
+            rootcard.org.</p>
+        </div>
+        <ul class="facts">
+          <li><strong>Inget telefonnummer</strong> eller e-postadress behövs.</li>
+          <li><strong>Lösenordet</strong> används bara i webbläsaren och skickas aldrig till servern.</li>
+          <li><strong>Återställningskortet</strong> styr identiteten. Förvara det offline.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="servern" aria-labelledby="h-servern">
+      <h2 id="h-servern">Vad servern vet – och inte vet</h2>
+      <div class="split">
+        <div>
+          <h3>Sparar</h3>
+          <ul>
+            <li>Din rootcard-identitet, om du skapat den här</li>
+            <li>Listor över enheter med publika nycklar</li>
+            <li>Krypterade meddelanden tills de levererats, högst 14 dagar</li>
+            <li>Krypterade filer till enheter som inte är anslutna, högst 14 dagar (går att stänga av)</li>
+          </ul>
+        </div>
+        <div>
+          <h3>Sparar inte</h3>
+          <ul>
+            <li>Meddelandehistorik eller filer efter leverans</li>
+            <li>Kontaktlistor, eller vem du accepterat och blockerat</li>
+            <li>IP-adresser i loggar</li>
+            <li>Innehållet i notiser – de säger bara ”Nytt meddelande”</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="band" id="fragor" aria-labelledby="h-fragor">
+      <h2 id="h-fragor">Vanliga frågor</h2>
+      <div class="faq">
+        <details>
+          <summary>Kan den som driver servern läsa mina meddelanden?</summary>
+          <p>Nej. Meddelanden krypteras på din enhet till mottagarens enheter, och servern har inte nycklarna. Den ser i
+            stunden vilken enhet som skickar till vilka, när och hur mycket – det behövs för att leverera – men skriver
+            inte ner det.</p>
+        </details>
+        <details>
+          <summary>Behöver jag installera en app?</summary>
+          <p>Nej, Murmo körs i webbläsaren. På mobilen kan du lägga den på hemskärmen, så fungerar den som en app med
+            notiser.</p>
+        </details>
+        <details>
+          <summary>Vad är rootcard?</summary>
+          <p>Ett öppet system för identiteter som inte är knutna till ett telefonnummer, en e-postadress eller en enskild
+            tjänst. Samma identitet kan användas mot flera servrar. Läs mer på <a href="https://rootcard.org" rel="noopener">rootcard.org</a>.</p>
+        </details>
+        <details>
+          <summary>Vad händer om jag glömmer lösenordet?</summary>
+          <p>Med återställningskortet kan du ta tillbaka identiteten. Meddelandehistoriken finns bara på dina enheter, så
+            utan någon kvarvarande enhet är den borta – det finns ingen kopia på servern.</p>
+        </details>
+        <details>
+          <summary>Är Murmo öppen källkod?</summary>
+          <p>Ja, under MIT- eller Apache-2.0-licens. Koden finns på
+            <a href="https://github.com/Hexagon/mesg" rel="noopener">GitHub</a>, och vem som helst kan köra en egen server.</p>
+        </details>
+        <details>
+          <summary>Är Murmo granskat?</summary>
+          <p>Inte än. Murmo och rootcard är tidiga versioner som ingen utomstående har granskat. Läs
+            <a href="https://github.com/Hexagon/mesg/blob/main/docs/THREAT_MODEL.md" rel="noopener">hotmodellen</a> innan
+            du använder det för något känsligt, och rapportera gärna brister enligt
+            <a href="https://github.com/Hexagon/mesg/blob/main/SECURITY.md" rel="noopener">säkerhetspolicyn</a>.</p>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-foot">
+    <p><strong>Murmo Secure Messenger</strong> · identitet med <a href="https://rootcard.org" rel="noopener">rootcard</a></p>
+    <p>Öppen källkod under MIT eller Apache-2.0 ·
+      <a href="https://github.com/Hexagon/mesg" rel="noopener">Källkod</a> ·
+      <a href="https://github.com/Hexagon/mesg/blob/main/SECURITY.md" rel="noopener">Rapportera en säkerhetsbrist</a></p>
+  </footer>
 </body>
 </html>

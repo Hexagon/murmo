@@ -240,7 +240,7 @@ const FACTS = [
   "Identiteten är en rootcard-identitet. Lösenordet lämnar aldrig webbläsaren.",
 ];
 
-/** The short version, for the start page. */
+/** The short version, for the empty conversation list and the settings. */
 function about() {
   return h(
     "div",
@@ -319,6 +319,17 @@ function showHelp() {
   d.scrollTop = 0;
 }
 
+/**
+ * The page is a product page with the login card in it (index.html); once the user is past the login, the app takes
+ * the whole window and the page around it is hidden.
+ */
+function inApp(on) {
+  if (document.body.classList.contains("in-app") === on) return;
+  document.body.classList.toggle("in-app", on);
+  document.body.classList.toggle("landing", !on);
+  window.scrollTo(0, 0);
+}
+
 // ── start ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
 async function boot() {
@@ -357,18 +368,17 @@ function showAuth(tab = "login", prefill = "") {
     h("button", { class: tab === "login" ? "on" : "", text: "Logga in", onclick: () => showAuth("login") }),
     h("button", { class: tab === "register" ? "on" : "", text: "Skapa konto", onclick: () => showAuth("register") }),
   );
+  inApp(false);
   root.replaceChildren(
     h(
       "div",
-      { class: "center" },
+      { class: "auth" },
+      h("div", { class: "card" }, tabs, body, err),
       h(
         "div",
-        { class: "auth" },
-        h("h1", { class: "brand" }, h("img", { src: "icon.svg", alt: "" }), "Murmo"),
-        h("p", { class: "tagline", text: "Secure Messenger – krypterat hela vägen mellan dina enheter och dina kontakter, med din identitet i rootcard." }),
-        h("div", { class: "card" }, tabs, body, err),
-        about(),
-        h("div", { class: "auth-foot" }, themePicker()),
+        { class: "auth-foot" },
+        h("button", { class: "link", type: "button", text: "Säkerhet och integritet i detalj", onclick: showHelp }),
+        themePicker(),
       ),
     ),
   );
@@ -459,7 +469,8 @@ async function loginForm(body, err, prefill) {
     btn,
   );
   body.replaceChildren(form);
-  (prefill ? pw : handle).focus();
+  // Not on touch (it would open the keyboard), and without scrolling the start page down to the form.
+  if (matchMedia("(hover: hover)").matches) (prefill ? pw : handle).focus({ preventScroll: true });
 }
 
 function registerForm(body, err) {
@@ -495,7 +506,7 @@ function registerForm(body, err) {
       btn,
     ),
   );
-  user.focus();
+  if (matchMedia("(hover: hover)").matches) user.focus({ preventScroll: true });
 }
 
 function download(name, blob) {
@@ -525,6 +536,7 @@ function showCard(reg, password) {
       go.replaceChildren("Skapa konto");
     }
   });
+  inApp(true);
   root.replaceChildren(
     h(
       "div",
@@ -586,6 +598,7 @@ async function loginAndEnter(homeInput, handle, password, remember) {
 function showLinkWait(setup, handle) {
   return new Promise((resolve) => {
     const ctl = new AbortController();
+    inApp(true);
     root.replaceChildren(
       h(
         "div",
@@ -762,6 +775,7 @@ function renderShell() {
     ),
     ui.main,
   );
+  inApp(true);
   root.replaceChildren(ui.shell);
   renderSidebar();
   openConversation(current);

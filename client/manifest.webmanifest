@@ -4,8 +4,8 @@
   "description": "Krypterade meddelanden med identitet från rootcard",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#faf9f5",
-  "theme_color": "#c96442",
+  "background_color": "#f5f7f8",
+  "theme_color": "#1d5c6e",
   "icons": [
     { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" },
     { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" },

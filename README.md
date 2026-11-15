@@ -10,6 +10,7 @@ that log rather than in trust in the server. The server is one Rust binary that 
 
 > **Status: early.** Murmo 0.1 is a working first version built on rootcard 0.3.4 (pre-1.0, not externally reviewed).
 > Neither has had a security review. Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) before trusting it with anything.
+> Report security problems privately, as described in [SECURITY.md](SECURITY.md).
 
 ## What it does
 
