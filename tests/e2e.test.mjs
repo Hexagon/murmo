@@ -332,6 +332,43 @@ test("taking a message back: only the author's own, within the window, everywher
   assert.ok(!(await bob.store.hasFile(f)));
 });
 
+test("editing: only the author's own text, within the window, the latest edit wins, marked on all devices", async () => {
+  const conv = alice.me.account;
+  bob.lists.clear();
+  // A text can be sent under an id chosen beforehand (the interface shows it under that id while it waits).
+  const { id } = await bob.sendText(conv, "Vi ses kl 18", "chosen-id-1");
+  assert.equal(id, "chosen-id-1");
+  for (const dev of [alice, alice2]) await until(async () => (await dev.store.message(id))?.text === "Vi ses kl 18");
+
+  await bob.edit(conv, id, "Vi ses kl 19");
+  for (const dev of [bob, alice, alice2]) {
+    await until(async () => (await dev.store.message(id))?.text === "Vi ses kl 19");
+    assert.ok((await dev.store.message(id)).edited > 0);
+  }
+  // An older edit that arrives late does not win; a newer one does.
+  const m = await alice.store.message(id);
+  await alice.applyEdit(bob.me.account, id, bob.me.account, "Vi ses kl 17", m.edited - 1, "older");
+  assert.equal((await alice.store.message(id)).text, "Vi ses kl 19");
+  await alice.applyEdit(bob.me.account, id, bob.me.account, "Vi ses kl 20", m.edited + 1, "newer");
+  assert.equal((await alice.store.message(id)).text, "Vi ses kl 20");
+
+  // Only the author: not through the API, not with a forged edit.
+  await assert.rejects(alice.edit(bob.me.account, id, "Hackat"), (x) => x.code === "no_message");
+  await alice.deliver(await alice.peerTargets(bob.me.account), "edit", bob.me.account, { id, text: "Hackat" });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal((await bob.store.message(id)).text, "Vi ses kl 19");
+  // Not empty (deleting is the way for that), not after the window, not a message that was taken back.
+  await assert.rejects(bob.edit(conv, id, "   "), (x) => x.code === "empty_text");
+  const now = Math.floor(Date.now() / 1000);
+  await bob.store.putMessage({ id: "old-edit", conv, dir: "out", time: now - 2 * 86400, at: Date.now(), kind: "text", text: "gammalt" });
+  await assert.rejects(bob.edit(conv, "old-edit", "nytt"), (x) => x.code === "too_late");
+  await bob.retract(conv, id);
+  await until(async () => (await alice.store.message(id))?.kind === "retracted");
+  await alice.applyEdit(bob.me.account, id, bob.me.account, "tillbaka?", now + 5, "late");
+  assert.equal((await alice.store.message(id)).kind, "retracted");
+  assert.equal((await alice.store.message(id)).text, undefined);
+});
+
 test("files go live to connected devices, wait for absent ones, and own devices federate later", async () => {
   const data = noise(150_000);
   const file = new File([data], "bild.png", { type: "image/png" });

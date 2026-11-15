@@ -515,12 +515,15 @@ export class Messenger extends EventTarget {
     return this.deliver(await this.ownTargets(), kind, conv, body);
   }
 
-  async sendText(conv, text) {
+  /** Send a text. `id` may be chosen beforehand (the interface shows it under that id while it waits for "Ångra"). */
+  async sendText(conv, text, id = p.b64(p.random(16))) {
     const c = this.contacts.get(conv);
     if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
     const t = String(text).slice(0, TEXT_MAX);
-    const { id, time } = await this.send(conv, "text", { text: t });
+    const targets = [...(await this.peerTargets(conv)), ...(await this.ownTargets())];
+    const { time } = await this.deliver(targets, "text", conv, { text: t }, id);
     await this.record({ id, conv, dir: "out", time, kind: "text", text: t, device: this.me.device, delivered: 0 });
+    return { id, time };
   }
 
   async record(m) {
@@ -676,6 +679,9 @@ export class Messenger extends EventTarget {
       case "retract":
         if (c?.state === "accepted") await this.applyRetract(peer, m.body?.id, peer, m.time);
         return;
+      case "edit":
+        if (c?.state === "accepted") await this.applyEdit(peer, m.body?.id, peer, m.body?.text, m.time, m.id);
+        return;
       case "file":
         if (c?.state !== "accepted") return;
         if (await this.onFileMeta(m, peer, "in")) this.emit("incoming", { conv: peer, kind: "file" });
@@ -744,6 +750,9 @@ export class Messenger extends EventTarget {
         return;
       case "retract":
         await this.applyRetract(conv, m.body?.id, this.me.account, m.time);
+        return;
+      case "edit":
+        await this.applyEdit(conv, m.body?.id, this.me.account, m.body?.text, m.time, m.id);
         return;
       case "gifs":
         if (conv === this.me.account) await this.mergeGifs(m.body);
@@ -1361,6 +1370,47 @@ export class Messenger extends EventTarget {
     }
     if (t.kind === "retracted" && !t.pending && t.by === this.author(cur)) await this.tombstone(cur, { kind: "retracted", by: t.by, rt: t.rt });
     else if (t.kind === "deleted") await this.tombstone(cur, { kind: "deleted" });
+  }
+
+  // ── editing (DESIGN.md §6.7) ──────────────────────────────────────────────────────────────────────────────────
+
+  /** Whether our message `m` can still be edited: an own text, within RETRACT_WINDOW of sending it. */
+  canEdit(m) {
+    return m?.kind === "text" && this.canRetract(m);
+  }
+
+  /** Replace the text of our own message `id` for everyone. */
+  async edit(conv, id, text) {
+    const c = this.contacts.get(conv);
+    if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
+    const t = String(text ?? "").trim().slice(0, TEXT_MAX);
+    if (!t) throw new ApiError(400, "empty_text");
+    const m = await this.store.message(id);
+    if (!m || m.conv !== conv || m.dir !== "out" || m.kind !== "text") throw new ApiError(404, "no_message");
+    if (!this.canEdit(m)) throw new ApiError(409, "too_late");
+    if (t === m.text) return;
+    const { id: eid, time } = await this.send(conv, "edit", { id, text: t });
+    await this.applyEdit(conv, id, this.me.account, t, time, eid);
+  }
+
+  /**
+   * Take an edit of text message `id` by `who`, sent at `time` (edit message id `eid`): only the author's, within the
+   * window, and only if it is newer than the edit the message already has (an older edit arriving late is ignored).
+   */
+  async applyEdit(conv, id, who, text, time, eid) {
+    if (typeof id !== "string" || id.length > 64 || typeof text !== "string" || !Number.isSafeInteger(time)) return;
+    const t = text.trim().slice(0, TEXT_MAX);
+    if (!t) return;
+    const m = await this.store.message(id);
+    if (!m || m.conv !== conv || m.kind !== "text" || this.author(m) !== who) return;
+    if (!Messenger.retractable(m.time, time)) return;
+    if (m.at && Date.now() - m.at > RETRACT_LATEST) return;
+    if (m.edited && (m.edited > time || (m.edited === time && (m.eid ?? "") >= eid))) return;
+    m.text = t;
+    m.edited = time;
+    m.eid = eid;
+    await this.store.putMessage(m);
+    this.emit("messages", { conv });
   }
 
   /** "Delete for me": gone from this device and our other devices; the other party keeps its copy. */

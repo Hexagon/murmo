@@ -307,7 +307,11 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .react-btn:hover { color: var(--text); }
 .more-btn { margin-left: 2px; }
 .msg.retracted .body { font-style: italic; color: var(--muted); }
-.upload.held .mark { color: var(--muted); }
+.undo-btn { border: 0; background: transparent; color: var(--accent); padding: 0 2px; margin-left: 6px; vertical-align: -4px; border-radius: 6px; }
+.undo-btn svg { width: 16px; height: 16px; }
+.undo-btn:hover { color: var(--text); }
+@media (hover: none) { .undo-btn { padding: 2px 4px; } .undo-btn svg { width: 18px; height: 18px; } }
+.msg .meta .edited { color: var(--faint); }
 @media (hover: none) { .react-btn { opacity: .75; padding: 2px 4px; } .react-btn svg { width: 18px; height: 18px; } }
 .react-menu {
   position: absolute; bottom: calc(100% + 4px); z-index: 5; display: flex; gap: 2px; padding: 4px;
