@@ -13,11 +13,11 @@ rootcard-host = "=0.3.4"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 tower-http = { version = "0.6", features = ["fs", "set-header"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 getrandom = "0.4"
 zeroize = "1.9"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [lints.rust]
