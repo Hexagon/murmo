@@ -1,4 +1,4 @@
-// HTTP calls to the mesg server: the rootcard home under /id and the mesg API under /api/v1.
+// HTTP calls to the murmo server: the rootcard home under /id and the murmo API under /api/v1.
 
 import * as rc from "../vendor/rootcard/src/index.js";
 
@@ -11,7 +11,7 @@ export class ApiError extends Error {
 }
 
 export class Api {
-  /** `origin` is the server's origin, such as `https://mesg.example` (no trailing slash). */
+  /** `origin` is the server's origin, such as `https://murmo.example` (no trailing slash). */
   constructor(origin) {
     this.origin = origin;
     this.base = `${origin}/id`; // the rootcard base URL ([HST-22]): never ends in /v0
@@ -53,40 +53,40 @@ export class Api {
     return this.request(`${base}/${rc.API_VERSION}${path}`, method, body, token);
   }
 
-  mesg(method, path, body, token) {
+  murmo(method, path, body, token) {
     return this.request(`${this.origin}/api/v1${path}`, method, body, token);
   }
 
   devices(account) {
-    return this.mesg("GET", `/accounts/${account}/devices`);
+    return this.murmo("GET", `/accounts/${account}/devices`);
   }
 
   appendDevices(account, entries, prekeys) {
     const body = { entries };
     if (prekeys?.length) body.prekeys = prekeys;
-    return this.mesg("POST", `/accounts/${account}/devices`, body);
+    return this.murmo("POST", `/accounts/${account}/devices`, body);
   }
 
   info() {
-    return this.mesg("GET", "/info");
+    return this.murmo("GET", "/info");
   }
 
   /** Exact identifier among the identities this server knows; there is no search. */
   lookup(handle) {
-    return this.mesg("GET", `/lookup?handle=${encodeURIComponent(handle)}`);
+    return this.murmo("GET", `/lookup?handle=${encodeURIComponent(handle)}`);
   }
 
   /** Make an identity from another home known to this server. */
   connect(account, home) {
-    return this.mesg("POST", `/accounts/${account}/connect`, { home });
+    return this.murmo("POST", `/accounts/${account}/connect`, { home });
   }
 
   challenge() {
-    return this.mesg("POST", "/challenge", {});
+    return this.murmo("POST", "/challenge", {});
   }
 
   link(account, request, proof, nonce) {
-    return this.mesg("POST", `/accounts/${account}/link`, { request, proof, nonce });
+    return this.murmo("POST", `/accounts/${account}/link`, { request, proof, nonce });
   }
 
   wsUrl() {

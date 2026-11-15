@@ -2,4 +2,6 @@ node_modules/
 target/
 *.sqlite
 *.sqlite-*
+murmo-host.key
 mesg-host.key
+/deploy.sh

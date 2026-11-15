@@ -88,7 +88,7 @@ const MESSAGES = {
   disconnected: "Anslutningen bröts. Försök igen.",
   timeout: "Servern svarade inte. Försök igen.",
   unsupported_browser: "Webbläsaren saknar stöd för Ed25519/X25519 i WebCrypto.",
-  home_not_allowed: "Den här mesg-servern tar inte emot identiteter från den rootcard-servern.",
+  home_not_allowed: "Den här Murmo-servern tar inte emot identiteter från den rootcard-servern.",
   home_unreachable: "Det gick inte att nå rootcard-servern.",
   bad_home: "Ange ett domännamn, till exempel rootcard.org.",
   bad_proof: "Identiteten kunde inte bevisas för servern.",
@@ -168,7 +168,8 @@ const DEFAULTS = { notify: true, fileQueue: true, notifyPrompted: false };
 
 function settings() {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(`mesg-settings:${messenger?.me.account}`) ?? "{}") };
+    // `mesg-…`: the key under the project's old name, read until the setting is saved again.
+    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(`murmo-settings:${messenger?.me.account}`) ?? localStorage.getItem(`mesg-settings:${messenger?.me.account}`) ?? "{}") };
   } catch {
     return { ...DEFAULTS };
   }
@@ -176,7 +177,7 @@ function settings() {
 
 function setSetting(k, v) {
   try {
-    localStorage.setItem(`mesg-settings:${messenger.me.account}`, JSON.stringify({ ...settings(), [k]: v }));
+    localStorage.setItem(`murmo-settings:${messenger.me.account}`, JSON.stringify({ ...settings(), [k]: v }));
   } catch {
     // storage may be unavailable; the setting then keeps its default
   }
@@ -188,7 +189,8 @@ const THEMES = [["auto", "Auto"], ["light", "Ljust"], ["dark", "Mörkt"]];
 
 function theme() {
   try {
-    return localStorage.getItem("mesg-theme") || "auto";
+    // `mesg-theme`: the key under the project's old name.
+    return localStorage.getItem("murmo-theme") || localStorage.getItem("mesg-theme") || "auto";
   } catch {
     return "auto";
   }
@@ -198,7 +200,7 @@ function setTheme(t) {
   if (t === "auto") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.setAttribute("data-theme", t);
   try {
-    localStorage.setItem("mesg-theme", t);
+    localStorage.setItem("murmo-theme", t);
   } catch {
     // storage may be unavailable; the choice then lasts for this page only
   }
@@ -238,7 +240,7 @@ const FACTS = [
   "Identiteten är en rootcard-identitet. Lösenordet lämnar aldrig webbläsaren.",
 ];
 
-/** The short version, for the start page. */
+/** The short version, for the empty conversation list and the settings. */
 function about() {
   return h(
     "div",
@@ -272,17 +274,17 @@ const HELP = [
   ]],
   ["Notiser", [
     "Notiser är på från början om du tillåter dem när webbläsaren frågar. Du kan stänga av dem under Konto och inställningar, och valet gäller bara den enhet du gör det på.",
-    "När mesg är stängt skickar servern ett tomt meddelande via webbläsarens pushtjänst (Google, Mozilla eller Apple), som väcker webbläsaren. Pushtjänsten får veta att din webbläsare fick något från den här servern och när – inget om innehåll eller avsändare. Notisen säger bara ”Nytt meddelande”.",
-    "Att väckas gör inte att du visas som ansluten: webbläsaren ansluter inte till servern förrän du öppnar mesg.",
+    "När Murmo är stängt skickar servern ett tomt meddelande via webbläsarens pushtjänst (Google, Mozilla eller Apple), som väcker webbläsaren. Pushtjänsten får veta att din webbläsare fick något från den här servern och när – inget om innehåll eller avsändare. Notisen säger bara ”Nytt meddelande”.",
+    "Att väckas gör inte att du visas som ansluten: webbläsaren ansluter inte till servern förrän du öppnar Murmo.",
   ]],
   ["På din enhet", [
     "Historik, kontakter och nycklar sparas krypterat i webbläsaren och låses upp med ditt lösenord.",
-    "Med ”Kom ihåg den här enheten” sparar webbläsaren en upplåsningsnyckel, så att mesg öppnas utan lösenord. Den som kommer åt webbläsaren kan då läsa dina meddelanden. Använd det inte på delade datorer.",
+    "Med ”Kom ihåg den här enheten” sparar webbläsaren en upplåsningsnyckel, så att Murmo öppnas utan lösenord. Den som kommer åt webbläsaren kan då läsa dina meddelanden. Använd det inte på delade datorer.",
     "Utan någon kvarvarande enhet är historiken borta. Det finns ingen säkerhetskopia på servern.",
   ]],
   ["Begränsningar", [
     "Sidan hämtas från servern. Den som kontrollerar servern kan i princip leverera ändrad kod, och det gäller alla webbappar.",
-    "mesg och rootcard är tidiga versioner som inte har granskats av någon utomstående.",
+    "Murmo och rootcard är tidiga versioner som inte har granskats av någon utomstående.",
     "Krypteringen skyddar inte mot en enhet som redan är infekterad, eller mot någon som tittar på din skärm.",
   ]],
 ];
@@ -315,6 +317,17 @@ function showHelp() {
   );
   d.classList.add("wide");
   d.scrollTop = 0;
+}
+
+/**
+ * The page is a product page with the login card in it (index.html); once the user is past the login, the app takes
+ * the whole window and the page around it is hidden.
+ */
+function inApp(on) {
+  if (document.body.classList.contains("in-app") === on) return;
+  document.body.classList.toggle("in-app", on);
+  document.body.classList.toggle("landing", !on);
+  window.scrollTo(0, 0);
 }
 
 // ── start ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -355,18 +368,17 @@ function showAuth(tab = "login", prefill = "") {
     h("button", { class: tab === "login" ? "on" : "", text: "Logga in", onclick: () => showAuth("login") }),
     h("button", { class: tab === "register" ? "on" : "", text: "Skapa konto", onclick: () => showAuth("register") }),
   );
+  inApp(false);
   root.replaceChildren(
     h(
       "div",
-      { class: "center" },
+      { class: "auth" },
+      h("div", { class: "card" }, tabs, body, err),
       h(
         "div",
-        { class: "auth" },
-        h("h1", { class: "brand" }, h("img", { src: "icon.svg", alt: "" }), "mesg"),
-        h("p", { class: "tagline", text: "Krypterade meddelanden mellan dina enheter och dina kontakter." }),
-        h("div", { class: "card" }, tabs, body, err),
-        about(),
-        h("div", { class: "auth-foot" }, themePicker()),
+        { class: "auth-foot" },
+        h("button", { class: "link", type: "button", text: "Säkerhet och integritet i detalj", onclick: showHelp }),
+        themePicker(),
       ),
     ),
   );
@@ -451,13 +463,14 @@ async function loginForm(body, err, prefill) {
         "span",
         {},
         "Kom ihåg den här enheten",
-        h("span", { class: "hint", style: "display:block", text: "Sparar inte ditt lösenord. Webbläsaren behåller en låst nyckel så att mesg öppnas direkt – den som kommer åt webbläsaren kan då läsa dina meddelanden. Lämna av på delade datorer." }),
+        h("span", { class: "hint", style: "display:block", text: "Sparar inte ditt lösenord. Webbläsaren behåller en låst nyckel så att Murmo öppnas direkt – den som kommer åt webbläsaren kan då läsa dina meddelanden. Lämna av på delade datorer." }),
       ),
     ),
     btn,
   );
   body.replaceChildren(form);
-  (prefill ? pw : handle).focus();
+  // Not on touch (it would open the keyboard), and without scrolling the start page down to the form.
+  if (matchMedia("(hover: hover)").matches) (prefill ? pw : handle).focus({ preventScroll: true });
 }
 
 function registerForm(body, err) {
@@ -493,7 +506,7 @@ function registerForm(body, err) {
       btn,
     ),
   );
-  user.focus();
+  if (matchMedia("(hover: hover)").matches) user.focus({ preventScroll: true });
 }
 
 function download(name, blob) {
@@ -523,6 +536,7 @@ function showCard(reg, password) {
       go.replaceChildren("Skapa konto");
     }
   });
+  inApp(true);
   root.replaceChildren(
     h(
       "div",
@@ -584,6 +598,7 @@ async function loginAndEnter(homeInput, handle, password, remember) {
 function showLinkWait(setup, handle) {
   return new Promise((resolve) => {
     const ctl = new AbortController();
+    inApp(true);
     root.replaceChildren(
       h(
         "div",
@@ -595,7 +610,7 @@ function showLinkWait(setup, handle) {
           h(
             "div",
             { class: "card" },
-            h("p", { text: `${handle} används redan på en annan enhet. Öppna mesg där och godkänn den här enheten. Kontrollera att koden är densamma på båda skärmarna.` }),
+            h("p", { text: `${handle} används redan på en annan enhet. Öppna Murmo där och godkänn den här enheten. Kontrollera att koden är densamma på båda skärmarna.` }),
             h("div", { class: "code", text: setup.code }),
             h("p", { class: "hint" }, h("span", { class: "spinner" }), " Väntar på godkännande… (giltigt i 10 minuter)"),
             h("button", { class: "btn ghost", text: "Avbryt", onclick: () => { ctl.abort(); resolve(false); } }),
@@ -703,7 +718,7 @@ async function checkVersion() {
   const bar = h(
     "div",
     { class: "update", role: "status" },
-    h("span", { text: "En ny version av mesg finns." }),
+    h("span", { text: "En ny version av Murmo finns." }),
     h("button", { class: "btn small primary", text: "Ladda om", onclick: () => location.reload() }),
     h("button", { class: "btn small ghost", text: "Senare", onclick: () => bar.remove() }),
   );
@@ -720,7 +735,7 @@ async function setNotifications(on) {
     return "Notiser är av.";
   }
   const s = notify.support();
-  if (s === "ios-install") return "På iPhone och iPad fungerar notiser när mesg ligger på hemskärmen: välj Dela → Lägg till på hemskärmen och slå på notiser där.";
+  if (s === "ios-install") return "På iPhone och iPad fungerar notiser när Murmo ligger på hemskärmen: välj Dela → Lägg till på hemskärmen och slå på notiser där.";
   if (s !== "ok") return "Den här webbläsaren stöder inte notiser.";
   const r = await notify.request();
   if (r !== "granted") return r === "denied" ? "Notiser är blockerade för den här sidan. Tillåt dem i webbläsarens inställningar för sidan och försök igen." : "Notiser slogs inte på.";
@@ -728,12 +743,12 @@ async function setNotifications(on) {
   setSetting("notifyPrompted", true);
   try {
     const endpoint = await notify.pushEndpoint(info.push_key);
-    if (!endpoint) return "Notiser är på medan mesg är öppet i bakgrunden. Den här webbläsaren eller servern stöder inte push, så en stängd app väcks inte.";
+    if (!endpoint) return "Notiser är på medan Murmo är öppet i bakgrunden. Den här webbläsaren eller servern stöder inte push, så en stängd app väcks inte.";
     await messenger.setPushEndpoint(endpoint);
-    return "Notiser är på, även när mesg är stängt.";
+    return "Notiser är på, även när Murmo är stängt.";
   } catch (x) {
     console.warn("push", x?.message ?? x);
-    return "Notiser är på medan mesg är öppet i bakgrunden. Push gick inte att slå på just nu, så en stängd app väcks inte.";
+    return "Notiser är på medan Murmo är öppet i bakgrunden. Push gick inte att slå på just nu, så en stängd app väcks inte.";
   }
 }
 
@@ -752,7 +767,7 @@ function renderShell() {
       h(
         "div",
         { class: "side-top" },
-        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "mesg"),
+        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo"),
         h("button", { class: "icon-btn", "aria-label": "Ny konversation", title: "Ny konversation", onclick: () => openConversation(null, true) }, icon("plus")),
       ),
       ui.sideList,
@@ -760,6 +775,7 @@ function renderShell() {
     ),
     ui.main,
   );
+  inApp(true);
   root.replaceChildren(ui.shell);
   renderSidebar();
   openConversation(current);
@@ -819,7 +835,7 @@ addEventListener("popstate", () => {
   const open = document.querySelector("dialog[open]");
   if (open) {
     open.close();
-    if (ui.shell?.classList.contains("chat")) history.pushState({ mesg: 1 }, "");
+    if (ui.shell?.classList.contains("chat")) history.pushState({ murmo: 1 }, "");
     return;
   }
   pushed = false;
@@ -862,7 +878,7 @@ function openConversation(account, form = false) {
   const covering = !!current || form;
   ui.shell.classList.toggle("chat", covering);
   if (covering && !pushed) {
-    history.pushState({ mesg: 1 }, "");
+    history.pushState({ murmo: 1 }, "");
     pushed = true;
   }
   if (current) unread.delete(current);
@@ -950,7 +966,7 @@ function renderWelcome() {
     : h(
         "div",
         { class: "card offer" },
-        h("div", {}, h("strong", { text: "Notiser" }), h("div", { class: "hint", text: "Få veta när någon skriver, även när mesg är stängt." })),
+        h("div", {}, h("strong", { text: "Notiser" }), h("div", { class: "hint", text: "Få veta när någon skriver, även när Murmo är stängt." })),
         h("button", { class: "btn small", text: "Inte nu", onclick: () => { setSetting("notify", false); offer.remove(); } }),
         h("button", { class: "btn small primary", text: "Slå på", onclick: async () => { offer.remove(); toast(await setNotifications(true)); } }),
       );
@@ -1249,7 +1265,7 @@ function showLinkRequest({ request, code }) {
 function showAccountMenu() {
   const s = settings();
   const notice = h("input", { type: "checkbox", checked: s.notify && notify.permission() === "granted" });
-  const noticeHint = h("span", { class: "hint", style: "display:block", text: "Visar bara att något har kommit och från vem – aldrig innehållet. När mesg är stängt väcker servern webbläsaren via dess pushtjänst (Google, Mozilla eller Apple) med ett tomt meddelande: tjänsten får veta att den här webbläsaren fick något från den här servern och när, inget mer." });
+  const noticeHint = h("span", { class: "hint", style: "display:block", text: "Visar bara att något har kommit och från vem – aldrig innehållet. När Murmo är stängt väcker servern webbläsaren via dess pushtjänst (Google, Mozilla eller Apple) med ett tomt meddelande: tjänsten får veta att den här webbläsaren fick något från den här servern och när, inget mer." });
   notice.addEventListener("change", async () => {
     notice.disabled = true;
     const text = await setNotifications(notice.checked).catch((x) => say(x));

@@ -1,4 +1,4 @@
-# mesg: plan
+# Murmo: plan
 
 ## Phase 0: foundation (this commit)
 
@@ -23,7 +23,7 @@
 - [x] Fuzz targets for the server parsers (`fuzz/`: JSON bodies and device lists, WebSocket frames, query/proxy/origin text; a minute each in CI)
 - [x] Run the browser smoke test in CI
 - [x] Per-sender quota in the file queue: per (sender account, device) and per sender account, checked by
-      `relay-space` too (`MESG_FILE_QUEUE_SENDER_MB`, `MESG_FILE_QUEUE_ACCOUNT_MB`)
+      `relay-space` too (`MURMO_FILE_QUEUE_SENDER_MB`, `MURMO_FILE_QUEUE_ACCOUNT_MB`)
 - [x] Version and commit shown under "Säkerhet och integritet" (`/api/v1/info`: `version`, `commit`, `source`)
 - [x] Bounded memory for files: stored in IndexedDB in 48 KiB parts as they are read or arrive, hashed incrementally
       (pure-JS SHA-256), sent part by part; chunks before their `file` message wait in IndexedDB within 16 MiB per
@@ -51,7 +51,7 @@ Open, in order of priority:
 ## Phase 3: beyond one server
 
 - [x] Identities whose rootcard home is another host (logs fetched from allowlisted homes)
-- [ ] Server-to-server delivery (contacts on other mesg servers)
+- [ ] Server-to-server delivery (contacts on other Murmo servers)
 
 ## Open questions
 

@@ -5,6 +5,7 @@ import * as rc from "../vendor/rootcard/src/index.js";
 import { register as rcRegister, deriveLockSecrets, unlockVault, updateContents } from "../vendor/rootcard/src/vault-index.js";
 import { ApiError } from "./api.js";
 
+// The vault entry keeps the project's old name ("mesg") so that existing accounts find their local secret.
 const LOCAL_KEY = "app.mesg.localkey";
 const HANDLE = /^[A-Za-z0-9_.-]{1,32}#[0-9A-Za-z]{4}(-[0-9A-Za-z]{1,48})?$/;
 const now = () => Math.floor(Date.now() / 1000);
@@ -88,7 +89,7 @@ export function checkHandle(handle) {
 }
 
 /**
- * Look up an exact identifier among the identities known to this mesg server, then verify the identity's log from
+ * Look up an exact identifier among the identities known to this murmo server, then verify the identity's log from
  * its own home. There is no search: the full handle is required.
  */
 export async function lookup(api, realms, handle) {
@@ -134,7 +135,7 @@ export async function localSecret(api, login) {
   return secret;
 }
 
-/** A rootcard proof by the account key for a challenge from this mesg server (used to request linking). */
+/** A rootcard proof by the account key for a challenge from this murmo server (used to request linking). */
 export async function proveToServer(api, state, accountSeed) {
   const { nonce } = await api.challenge();
   const proof = await rc.prove(state, "account", accountSeed, rc.base64urlDecode(nonce), api.origin);

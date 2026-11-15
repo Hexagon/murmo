@@ -1,4 +1,4 @@
-// mesg protocol: device lists, prekeys, envelopes, signed messages, codes and file chunks (docs/DESIGN.md §4–§9).
+// murmo protocol: device lists, prekeys, envelopes, signed messages, codes and file chunks (docs/DESIGN.md §4–§9).
 // Pure functions over WebCrypto and the vendored rootcard core; no DOM, no storage, no network. Runs in browsers and
 // in Node 22 (used by the end-to-end test).
 
@@ -9,6 +9,7 @@ const subtle = globalThis.crypto.subtle;
 const enc = new TextEncoder();
 
 export const LABELS = {
+  // Signature and key-derivation labels keep the project's old name: changing them would invalidate existing data.
   devices: "mesg/devices/v1",
   prekey: "mesg/prekey/v1",
   wsAuth: "mesg/ws-auth/v1",

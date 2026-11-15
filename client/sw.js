@@ -15,9 +15,9 @@ self.addEventListener("push", (e) => {
     (async () => {
       const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
       if (!MUST_SHOW && wins.some((w) => w.visibilityState === "visible")) return; // the open page shows it
-      await self.registration.showNotification("mesg", {
+      await self.registration.showNotification("Murmo", {
         body: "Nytt meddelande",
-        tag: "mesg",
+        tag: "murmo",
         renotify: true,
         icon: "icon-512.png",
       });

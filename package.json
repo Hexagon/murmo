@@ -1,8 +1,8 @@
 {
-  "name": "mesg",
+  "name": "murmo",
   "private": true,
   "type": "module",
-  "description": "Development tooling for mesg (the client itself has no dependencies and no build step)",
+  "description": "Development tooling for Murmo (the client itself has no dependencies and no build step)",
   "scripts": {
     "test": "node --test tests/protocol.test.mjs tests/e2e.test.mjs",
     "test:ui": "node tests/ui-smoke.mjs"
