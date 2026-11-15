@@ -218,7 +218,7 @@ come with the Double Ratchet in phase 2 (PLAN.md).
   "v": 1,
   "id": "<16 random bytes>",
   "kind": "request",              // "request" | "accept" | "text" | "file" | "sync" | "history" | "receipt"
-                                  // | "reaction" | "retract" | "edit" | "gifs" (own devices only)
+                                  // | "reaction" | "retract" | "edit" | "ephemeral" | "gifs" (own devices only)
   "from": { "account": "…", "device": "…" },
   "to":   { "account": "…", "device": "…" },
   "conv": "<account id of the other party>",
@@ -344,6 +344,35 @@ not undo a newer one. The thread shows "redigerat" by the time on both sides, wi
 Only the latest text is kept: earlier versions are not stored on any device. An edit of a message that was taken
 back, or that this device does not have, is ignored (a device linked later gets the edited text in the history
 hand-over). A device with an older client keeps showing the first text (§12), which the edit dialog says.
+
+### 6.8 Disappearing messages
+
+A disappearing message is an `ephemeral` message `{ text, ttl, wait }` to the other party and the own other devices:
+`ttl` is its timer (15 s, 1 min, 5 min or 1 h in the interface), `wait` how long it may wait unread (7 days, or the
+conversation's retention when that is shorter, §8.1). Both are inside the encryption. Only text in this version.
+
+- **Countdown.** On the recipient's devices it starts when the message is on the screen of a visible page (each device
+  for itself); on the sender's devices when a `receipt` says it arrived (§6.4: there are no read receipts). A message
+  never seen, or never acknowledged, is gone `wait` seconds after it was sent; one that arrives later is not stored.
+- **Removal.** When the time is up the message is replaced by a record without content that only keeps its id, so
+  that a copy that comes again (a resend, a mailbox read twice) is not shown again; that record is deleted once no
+  copy can be left in a mailbox. Deadlines are kept in an encrypted secret (`timed`) and swept by a timer, at start and
+  when the page is visible again, so a countdown that ran while the app was closed is finished then. The interface
+  fades the message for its last 3 seconds and folds its row away. Reactions go with the message. The record is
+  one of the tombstones of §6.6 (`kind: "gone"`, hidden), so a late copy is ignored the same way.
+- **Not copied.** Disappearing messages are left out of the history handed to a newly linked device (§7), and are not
+  taken from one.
+- **Server.** Its envelopes carry `to[].ttl = wait` (§10), so the server drops them unread after that, not after 14
+  days. The server thereby learns that an envelope is short-lived, never what it says.
+- **Notifications** say "Försvinnande meddelande från …"; the push itself is empty as always (§10.1). The list of
+  conversations never shows message text.
+- **Taking back and editing.** "Ångra" holds a disappearing message like a text (§6.6), and "Ta bort för alla" and
+  "Ta bort för mig" work on it like on a text (a taken-back one leaves the usual placeholder, which does not
+  disappear). It cannot be edited (§6.7).
+- **Composer.** The timer is chosen with a button by the composer and stays on for that conversation until it is
+  turned off (kept in the contact record on that device, not synced). While it is on, files and GIFs cannot be sent.
+- **Mixed versions.** A device that does not know `ephemeral` drops it (§12): the message is lost there rather than
+  kept for good. No receipt comes from such a device, so the sender's copy is gone after `wait`.
 
 ## 7. Multi-device history
 
@@ -575,6 +604,8 @@ WebSocket frames (JSON):
 | client → server | `{ t: "ping" }` → `{ t: "pong" }` (the client's heartbeat; browsers drop sockets of background pages silently) |
 | server → client | `{ t: "link", request }`, `{ t: "devices", account, head }` |
 
+`to[].ttl` (seconds) is optional and shortens how long the server keeps that envelope (used for disappearing messages); the server learns that the envelope is short-lived, never its content.
+
 Limits (v0): envelope ≤ 64 KiB, ≤ 24 recipients per send, ≤ 2 000 queued envelopes per device, mailbox TTL 14 days,
 60 sends per minute per device, 20 lookups per minute and 5 link requests per hour per network address.
 
@@ -652,6 +683,7 @@ What clients from before emoji, reactions and the shared GIF collection get from
 | `edited` on messages in a history hand-over | stored, the edited text is shown without "redigerat" until the device is updated |
 | tombstones (`retracted`, `deleted`) in a history hand-over | stored, shown as an empty message until the device is updated |
 | `sync` with `remove` | the part it does not know is ignored: the message stays on the older own device |
+| `ephemeral` | dropped, never shown or stored, and not acknowledged with a receipt: a disappearing message is lost on an older device rather than kept for good |
 | `gifs` to an own older device | dropped; that device has no collection until it is updated, and then gets only GIFs saved after that. The bytes are pulled with `file-req` (§9.2), so no chunks are pushed to it; a `file-req` for `gif:…` sent to an older device finds no file message and is ignored |
 
 An older device sends nothing new, so a newer device has nothing to handle from it.

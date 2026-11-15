@@ -18,7 +18,11 @@ const NOTE_MAX = 500;
 const TEXT_MAX = 8000;
 const HISTORY_CHUNK = 40 * 1024;
 /** Message kinds the recipient should be notified about (the server only sees the flag, DESIGN.md §10.1). */
-const NOTIFY_KINDS = ["request", "text", "file"];
+const NOTIFY_KINDS = ["request", "text", "file", "ephemeral"];
+/** Timers a disappearing message can be sent with (seconds, DESIGN.md §6.8). */
+export const EPHEMERAL_TTLS = [15, 60, 300, 3600];
+/** Longest a disappearing message waits unread (in the mailbox or unseen on a device) before it is gone anyway. */
+export const EPHEMERAL_WAIT = 7 * 24 * 3600;
 /** A file nobody could take is offered again for this long (the mailbox lifetime). */
 const FILE_RETRY = 14 * 24 * 3600;
 const FILE_RETRY_EVERY = 60_000;
@@ -44,15 +48,22 @@ export const GIF_MAX_COUNT = 60;
 /** The file id a saved GIF is stored and streamed under (apart from the files of messages). */
 const gifFile = (id) => `gif:${id}`;
 /** Message kinds a reaction can be given to. */
-const REACTABLE = ["text", "file"];
+const REACTABLE = ["text", "file", "ephemeral"];
+/** What a disappearing message leaves behind once gone: no content, only its id, so a copy that comes again is ignored. */
+const GONE = "gone";
 /** How long after sending a message can be taken back from everyone (seconds, DESIGN.md §6.6). */
 export const RETRACT_WINDOW = 24 * 3600;
 /** How long after a message arrived on this device a retraction is still taken (it may wait in the mailbox). */
 const RETRACT_LATEST = (14 * 86400 + RETRACT_WINDOW) * 1000;
 /** Records that stand in for a message that is gone: kept so that a late copy of it does not come back. */
-const TOMBSTONES = ["retracted", "deleted"];
+const TOMBSTONES = ["retracted", "deleted", GONE];
 /** Whether a stored record is one the user does not see (a hidden tombstone). */
-const hidden = (m) => m.kind === "deleted" || (m.kind === "retracted" && m.pending);
+const hidden = (m) => m.kind === "deleted" || m.kind === GONE || (m.kind === "retracted" && m.pending);
+
+/** Whether `t` is a timer (seconds) a received disappearing message may carry. */
+export function validTtl(t) {
+  return Number.isSafeInteger(t) && t >= 1 && t <= EPHEMERAL_WAIT;
+}
 
 /** A reaction is one emoji (`""` takes one's reaction back). */
 export function validReaction(e) {
@@ -194,6 +205,7 @@ export class Messenger extends EventTarget {
     this.status = "offline";
     this.receipts = new Map(); // account → Set(message id): arrived here, the sender is told soon
     this.early = new Set(); // receipts that came before this device had stored the message
+    this.timed = new Map(); // message id → { conv, at (ms) }: disappearing messages and what they leave, by deadline
   }
 
   emit(type, detail) {
@@ -210,6 +222,8 @@ export class Messenger extends EventTarget {
     }
     for (const c of await this.store.contacts()) this.contacts.set(c.account, c);
     this.pendingFiles = (await this.store.secret("pendingFiles")) ?? [];
+    for (const t of (await this.store.secret("timed")) ?? []) this.timed.set(t.id, { conv: t.conv, at: t.at });
+    await this.sweepTimed(); // the app may have been closed in the middle of a countdown
     this.store.sweepParts(Date.now() - 3600_000).catch(() => {}); // left by a transfer that was interrupted
     this.ws = new Socket(this.api.wsUrl(), async (nonce) => ({
       account: this.me.account,
@@ -261,6 +275,8 @@ export class Messenger extends EventTarget {
     clearInterval(this.retryTimer);
     clearInterval(this.pruneTimer);
     clearTimeout(this.receiptTimer);
+    clearTimeout(this.timedTimer);
+    this.stopped = true;
     this.ws?.close();
     this.store.close();
   }
@@ -268,6 +284,7 @@ export class Messenger extends EventTarget {
   /** The page is visible again or the network came back: check the connection now. */
   wake() {
     this.ws?.wake();
+    this.sweepTimed().catch(() => {}); // timers do not run while a page sleeps
   }
 
   /** Tell the server where this device is woken by push (`null`: nowhere). */
@@ -461,8 +478,11 @@ export class Messenger extends EventTarget {
     return h;
   }
 
-  /** Encrypt one message to a list of `{ account, device, prekey }` targets and send it. */
-  async deliver(targets, kind, conv, body, id = p.b64(p.random(16))) {
+  /**
+   * Encrypt one message to a list of `{ account, device, prekey }` targets and send it. `ttl` (seconds) asks the server
+   * to keep the envelopes no longer than that while they wait (disappearing messages).
+   */
+  async deliver(targets, kind, conv, body, id = p.b64(p.random(16)), { ttl } = {}) {
     const heads = await this.heads(conv);
     const time = p.now();
     const to = [];
@@ -474,6 +494,7 @@ export class Messenger extends EventTarget {
       );
       const item = { device: t.device, env: await p.seal(t.device, t.prekey, bytes) };
       if (t.account !== this.me.account && NOTIFY_KINDS.includes(kind)) item.notify = true;
+      if (ttl) item.ttl = ttl;
       to.push(item);
     }
     if (to.length) {
@@ -505,9 +526,9 @@ export class Messenger extends EventTarget {
   }
 
   /** A message to the other party and to our own other devices. */
-  async send(conv, kind, body) {
+  async send(conv, kind, body, opts) {
     const targets = [...(await this.peerTargets(conv)), ...(await this.ownTargets())];
-    return this.deliver(targets, kind, conv, body);
+    return this.deliver(targets, kind, conv, body, undefined, opts);
   }
 
   /** A message only to our own other devices. */
@@ -532,8 +553,129 @@ export class Messenger extends EventTarget {
     // Local order within a second: when this device stored it (kept when history is handed over).
     m.at ??= Date.now();
     if (m.dir === "out" && this.early.delete(m.id)) m.delivered = p.now();
+    if (m.kind === "ephemeral") {
+      if (m.dir === "out" && m.delivered) m.expires = Date.now() + m.ttl * 1000;
+      if (this.deadline(m) <= Date.now()) return; // waited unread for too long
+    }
     await this.store.putMessage(m);
+    if (m.kind === "ephemeral") await this.track(m);
     this.emit("messages", { conv: m.conv });
+  }
+
+  // ── disappearing messages (DESIGN.md §6.8) ────────────────────────────────────────────────────────────────────
+  //
+  // A disappearing message carries its timer (`ttl`) and how long it may wait unread (`wait`) inside the encryption.
+  // Its countdown starts on the recipient's device when it is shown, and on the sender's devices when a receipt says
+  // it arrived; one that is never seen or never acknowledged is gone `wait` seconds after it was sent. When the time
+  // is up the message is replaced by a record without content (GONE), which is deleted once a late copy could no
+  // longer come. Deadlines are kept in `timed` (an encrypted secret), so they survive a reload.
+
+  /** The body of an "ephemeral" message, checked: `{ text, ttl, wait }`, or null. */
+  ephemeralBody(m) {
+    const b = m.body ?? {};
+    if (typeof b.text !== "string" || !validTtl(b.ttl) || !validTtl(b.wait)) return null;
+    return { text: b.text.slice(0, TEXT_MAX), ttl: b.ttl, wait: b.wait };
+  }
+
+  /** How long a disappearing message to `conv` may wait unread: EPHEMERAL_WAIT, or less when messages are kept less. */
+  ephemeralWait(conv) {
+    const r = this.contacts.get(conv)?.retention;
+    return r && validRetention(r) ? Math.min(r, EPHEMERAL_WAIT) : EPHEMERAL_WAIT;
+  }
+
+  /** When a disappearing message is gone (ms since the epoch). */
+  deadline(m) {
+    const unread = (m.time + Math.min(m.wait ?? EPHEMERAL_WAIT, EPHEMERAL_WAIT)) * 1000;
+    return m.expires ? Math.min(m.expires, unread) : unread;
+  }
+
+  /** The timer the composer of `conv` starts with (seconds, 0: off). Kept in the contact record on this device only. */
+  timer(conv) {
+    const t = this.contacts.get(conv)?.timer;
+    return EPHEMERAL_TTLS.includes(t) ? t : 0;
+  }
+
+  async setTimer(conv, ttl) {
+    const c = this.contacts.get(conv);
+    if (!c || (ttl !== 0 && !EPHEMERAL_TTLS.includes(ttl))) return;
+    c.timer = ttl;
+    await this.saveContact(c);
+  }
+
+  /** Send a disappearing message; `id` as for sendText ("Ångra"). */
+  async sendEphemeral(conv, text, ttl, id = p.b64(p.random(16))) {
+    const c = this.contacts.get(conv);
+    if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
+    if (!EPHEMERAL_TTLS.includes(ttl)) throw new ApiError(400, "bad_ttl");
+    const t = String(text).slice(0, TEXT_MAX);
+    const wait = this.ephemeralWait(conv);
+    const targets = [...(await this.peerTargets(conv)), ...(await this.ownTargets())];
+    const { time } = await this.deliver(targets, "ephemeral", conv, { text: t, ttl, wait }, id, { ttl: wait });
+    await this.record({ id, conv, dir: "out", time, kind: "ephemeral", text: t, ttl, wait, device: this.me.device, delivered: 0 });
+    return { id, time };
+  }
+
+  /** A received disappearing message is on the screen: its countdown starts on this device. */
+  async markSeen(conv, ids) {
+    let changed = false;
+    for (const id of ids) {
+      const m = await this.store.message(id);
+      if (!m || m.conv !== conv || m.kind !== "ephemeral" || m.dir !== "in" || m.expires) continue;
+      m.expires = Date.now() + m.ttl * 1000;
+      await this.store.putMessage(m);
+      await this.track(m);
+      changed = true;
+    }
+    if (changed) this.emit("messages", { conv });
+  }
+
+  async track(m) {
+    this.timed.set(m.id, { conv: m.conv, at: m.kind === GONE ? m.until : this.deadline(m) });
+    await this.saveTimed();
+    this.scheduleTimed();
+  }
+
+  async saveTimed() {
+    await this.store.setSecret("timed", [...this.timed].map(([id, t]) => ({ id, ...t })));
+  }
+
+  scheduleTimed() {
+    clearTimeout(this.timedTimer);
+    if (this.stopped || !this.timed.size) return;
+    const next = Math.min(...[...this.timed.values()].map((t) => t.at));
+    // At most a day ahead (setTimeout's limit is ~24.8 days); a sweep then finds what is due.
+    this.timedTimer = setTimeout(() => this.sweepTimed().catch((e) => this.fail(e)), Math.min(Math.max(0, next - Date.now()) + 50, 86_400_000));
+  }
+
+  /** Remove what is due: disappearing messages become GONE, and GONE records are deleted. One sweep at a time. */
+  sweepTimed() {
+    const r = (this.sweeping ?? Promise.resolve()).then(() => this.sweepDue());
+    this.sweeping = r.catch(() => {});
+    return r;
+  }
+
+  async sweepDue() {
+    const now = Date.now();
+    const convs = new Set();
+    for (const [id, t] of [...this.timed]) {
+      if (t.at > now) continue;
+      this.timed.delete(id);
+      const m = await this.store.message(id);
+      if (m?.kind === "ephemeral") {
+        // A copy that comes again (a resend, a mailbox read twice) must not bring it back: keep its id until no
+        // copy can be in a mailbox any longer.
+        const gone = { id, conv: m.conv, dir: m.dir, time: m.time, at: m.at, kind: GONE, until: (m.time + EPHEMERAL_WAIT) * 1000 + 3600_000 };
+        await this.store.putMessage(gone);
+        if (gone.until > now) this.timed.set(id, { conv: m.conv, at: gone.until });
+        else await this.store.deleteMessage(id);
+        convs.add(m.conv);
+      } else if (m?.kind === GONE) {
+        await this.store.deleteMessage(id);
+      }
+    }
+    await this.saveTimed();
+    for (const conv of convs) this.emit("messages", { conv });
+    this.scheduleTimed();
   }
 
   // ── receipts: "it arrived on one of my devices" (DESIGN.md §6.4) ──────────────────────────────────────────────
@@ -579,7 +721,10 @@ export class Messenger extends EventTarget {
     const mark = async (m) => {
       if (!m || m.conv !== conv || m.dir !== "out" || m.delivered) return;
       m.delivered = t;
+      // The sender's countdown starts when the message has arrived (there are no read receipts, §6.4).
+      if (m.kind === "ephemeral") m.expires = Date.now() + m.ttl * 1000;
       await this.store.putMessage(m);
+      if (m.kind === "ephemeral") await this.track(m);
       changed = true;
     };
     if (!ids) {
@@ -670,6 +815,21 @@ export class Messenger extends EventTarget {
         await this.record({ id: m.id, conv: peer, dir: "in", time: m.time, kind: "text", text: String(m.body?.text ?? "").slice(0, TEXT_MAX), device: m.from.device });
         this.emit("incoming", { conv: peer, kind: "text" });
         return;
+      case "ephemeral": {
+        if (c?.state !== "accepted") return;
+        const e = this.ephemeralBody(m);
+        if (!e) return;
+        this.queueReceipt(peer, m.id);
+        // Taken back, deleted or already gone: not again.
+        if (await this.superseded({ id: m.id, conv: peer, dir: "in", time: m.time, device: m.from.device })) return;
+        if (await this.store.hasMessage(m.id)) return;
+        // How long it may wait unread: what the sender asked for, and never longer than kept here.
+        const wait = Math.min(e.wait, this.ephemeralWait(peer));
+        if ((m.time + wait) * 1000 <= Date.now()) return;
+        await this.record({ id: m.id, conv: peer, dir: "in", time: m.time, kind: "ephemeral", text: e.text, ttl: e.ttl, wait, device: m.from.device });
+        this.emit("incoming", { conv: peer, kind: "ephemeral" });
+        return;
+      }
       case "receipt":
         if (c?.state === "accepted" && Array.isArray(m.body?.ids)) await this.markDelivered(peer, m.body.ids);
         return;
@@ -720,6 +880,14 @@ export class Messenger extends EventTarget {
         if (await this.store.hasMessage(m.id)) return;
         await this.record({ id: m.id, conv, dir: "out", time: m.time, kind: "text", text: String(m.body?.text ?? ""), device: m.from.device, delivered: 0 });
         return;
+      case "ephemeral": {
+        const e = this.ephemeralBody(m);
+        if (!e || conv === this.me.account) return;
+        if (await this.superseded({ id: m.id, conv, dir: "out", time: m.time, device: m.from.device })) return;
+        if (await this.store.hasMessage(m.id)) return;
+        await this.record({ id: m.id, conv, dir: "out", time: m.time, kind: "ephemeral", text: e.text, ttl: e.ttl, wait: e.wait, device: m.from.device, delivered: 0 });
+        return;
+      }
       case "file":
         await this.onFileMeta(m, conv, "out");
         return;
@@ -857,6 +1025,7 @@ export class Messenger extends EventTarget {
     let size = rc.canonical(batch).length;
     for (const c of contacts) {
       for (const m of await this.store.messages(c.account)) {
+        if (m.kind === "ephemeral" || m.kind === GONE) continue; // disappearing messages stay on the devices they reached
         const s = rc.canonical(m).length;
         if (size + s > HISTORY_CHUNK && batch.messages.length) {
           await this.deliver(target, "history", this.me.account, batch);
@@ -880,6 +1049,8 @@ export class Messenger extends EventTarget {
     }
     for (const m of body?.messages ?? []) {
       if (typeof m?.id !== "string" || typeof m.conv !== "string") continue;
+      // Disappearing messages (and what is left of them) stay on the devices they reached (§6.8).
+      if (m.kind === "ephemeral" || m.kind === GONE) continue;
       if (TOMBSTONES.includes(m.kind)) {
         await this.mergeTombstone(m);
         continue;
@@ -1271,7 +1442,9 @@ export class Messenger extends EventTarget {
 
   /** The messages of a conversation as the user sees them (with "retracted" placeholders, without hidden records). */
   async messages(conv) {
-    return (await this.store.messages(conv)).filter((m) => !hidden(m));
+    const now = Date.now();
+    // A disappearing message whose time is up is not shown, even before the sweep has removed it.
+    return (await this.store.messages(conv)).filter((m) => !hidden(m) && !(m.kind === "ephemeral" && this.deadline(m) <= now));
   }
 
   // ── taking messages back (DESIGN.md §6.6) ─────────────────────────────────────────────────────────────────────

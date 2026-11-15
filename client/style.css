@@ -321,6 +321,44 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .msg.out .react-menu { right: 0; }
 .react-menu button { border: 0; background: transparent; width: 36px; height: 36px; border-radius: 50%; font-size: 21px; padding: 0; display: grid; place-items: center; color: var(--muted); }
 .react-menu button:hover, .react-menu button:focus-visible, .react-menu button.on { background: var(--bubble); }
+/* disappearing messages: the timer by the composer, its menu, the countdown and the fade at the end */
+.composer { position: relative; }
+.composer.ephemeral, .composer.ephemeral:focus-within { border-color: color-mix(in srgb, var(--accent) 70%, var(--line)); }
+.icon-btn.timer-btn { width: auto; min-width: 34px; padding: 0 8px; grid-auto-flow: column; gap: 4px; color: var(--muted); }
+.icon-btn.timer-btn.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.icon-btn.timer-btn.on:hover { background: var(--accent-hover); }
+.icon-btn.timer-btn .ttl { font: 600 12px/1 var(--sans); }
+.icon-btn[disabled] { opacity: .35; cursor: default; }
+.icon-btn[disabled]:hover { background: transparent; }
+.timer-menu {
+  position: absolute; bottom: calc(100% + 6px); right: 52px; z-index: 5; display: grid; gap: 6px; padding: 8px 10px 10px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
+}
+.timer-menu .choices { display: flex; gap: 4px; }
+.timer-menu .choices button {
+  border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 5px 11px; font-size: 13px; color: var(--text); white-space: nowrap;
+}
+.timer-menu .choices button:hover, .timer-menu .choices button:focus-visible { background: var(--bubble); }
+.timer-menu .choices button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.msg .meta .fuse-wrap { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; vertical-align: -2px; line-height: 1; color: var(--accent); font-variant-numeric: tabular-nums; }
+.msg .meta .fuse-wrap.waiting { color: var(--faint); }
+.msg .meta .fuse-wrap svg { flex: none; }
+.msg.ephemeral.out { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+/* The last 3 s (DISSOLVE in app.js): fade and blur away, then the row folds so the thread closes up. */
+.msg.dissolve { overflow: hidden; animation: dissolve 3s ease-in forwards; pointer-events: none; }
+@keyframes dissolve {
+  0% { opacity: 1; filter: blur(0); max-height: var(--h); }
+  75% { opacity: 0; filter: blur(5px); transform: scale(.97); max-height: var(--h); margin-block: 0; }
+  100% { opacity: 0; filter: blur(5px); transform: scale(.97); max-height: 0; padding-block: 0; margin-block: -7px; } /* half the thread gap on each side */
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg.dissolve { animation-name: dissolve-plain; }
+  @keyframes dissolve-plain { 0% { opacity: 1; max-height: var(--h); } 85% { opacity: 0; max-height: var(--h); } 100% { opacity: 0; max-height: 0; padding-block: 0; margin-block: -7px; } }
+}
+@media (max-width: 760px) {
+  .timer-menu { right: 0; left: 0; }
+  .timer-menu .choices { flex-wrap: wrap; }
+}
 .picker.in-dialog { box-shadow: none; border: 0; padding: 0; margin: 0; width: 100%; max-height: min(380px, 60dvh); }
 
 /* GIF panel: tabs, the GIPHY note, results */
