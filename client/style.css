@@ -172,15 +172,27 @@ pre.cardtext {
 .banner.warn { background: #b3261e1a; color: var(--danger); }
 
 .scroll { flex: 1; overflow-y: auto; }
-.thread { width: min(768px, calc(100% - 32px)); margin: 0 auto; padding: 12px 0 24px; display: flex; flex-direction: column; gap: 14px; }
+.thread { width: min(768px, calc(100% - 32px)); margin: 0 auto; padding: 12px 0 24px; display: flex; flex-direction: column; gap: 6px; }
 .msg { max-width: 85%; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.in { align-self: flex-start; }
 .msg .body, .msg .fn { unicode-bidi: isolate; } /* text from others cannot reorder what is around it */
-.msg.out { align-self: flex-end; background: var(--bubble); padding: 10px 14px; border-radius: 16px 16px 4px 16px; }
-.msg.in .body { padding: 2px 0; }
+.msg.out { align-self: flex-end; background: var(--bubble); padding: 6px 10px 7px; border-radius: 14px 14px 4px 14px; }
 .msg.out.media { background: transparent; padding: 0; }
-.msg .meta { font-size: 11px; color: var(--faint); margin-top: 4px; }
-.msg.out .meta { text-align: right; }
+.msg .meta { font-size: 11px; line-height: 16px; color: var(--faint); white-space: nowrap; }
+/* WhatsApp-style: the time floats at the end of the text's last line, or drops to its own line when that line is full */
+.msg .body:not(.jumbo) { display: inline; }
+.msg > .body:not(.jumbo) + .meta { float: right; margin: 7px 0 -5px 10px; }
+.msg > .body.jumbo + .meta { text-align: right; }
+.msg .reactions { clear: both; }
+/* on a picture: a dark pill in its bottom corner */
+.msg .frame { position: relative; }
+.msg .frame:has(> img.inline) > .meta {
+  position: absolute; right: 6px; bottom: 6px; padding: 1px 6px; border-radius: 999px;
+  background: #000000a0; color: #fff; white-space: nowrap;
+}
+.msg .frame:has(> img.inline) > .meta :is(.delivery, .delivery.ok, .react-btn, .undo-btn, .save-gif-inline, .save-gif-inline.saved, .edited) { color: #fff; }
+.msg .frame:not(:has(> img.inline)) > .meta { margin-top: 3px; text-align: right; }
+.msg.in .frame:not(:has(> img.inline)) > .meta { text-align: left; }
 .day { align-self: center; font-size: 12px; color: var(--faint); }
 .msg img.inline { display: block; max-width: min(420px, 100%); max-height: 420px; border-radius: 12px; border: 1px solid var(--line); cursor: zoom-in; }
 .filecard { display: flex; align-items: center; gap: 12px; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: var(--panel); white-space: normal; }
@@ -197,7 +209,7 @@ pre.cardtext {
 .card.mine, .card.offer { display: flex; align-items: center; gap: 10px; padding: 14px 16px; box-shadow: none; }
 .card.mine > div, .card.offer > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .msg .meta .pending { color: var(--danger); }
-.msg .meta .delivery { display: inline-flex; vertical-align: -3px; margin-left: 5px; color: var(--muted); }
+.msg .meta .delivery { display: inline-flex; vertical-align: -3px; margin-left: 4px; color: var(--muted); }
 .msg .meta .delivery.ok { color: var(--ok); }
 .auth .card > .link { display: block; margin: 14px auto 0; }
 .recover { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
@@ -293,7 +305,7 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 
 /* reactions: chips under a message, a quiet button by the time, a row of quick choices */
 .msg { position: relative; }
-.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; white-space: normal; }
+.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; white-space: normal; }
 .msg.out .reactions { justify-content: flex-end; }
 .reaction { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 1px 8px; font-size: 15px; line-height: 22px; }
 .reaction .n { font-size: 12px; color: var(--muted); }
@@ -301,7 +313,7 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .reaction[disabled] { cursor: default; }
 .save-gif-inline { border: 0; background: transparent; color: var(--accent); font-size: 11px; padding: 0 2px; margin-left: 8px; text-decoration: underline; }
 .save-gif-inline.saved { color: var(--ok); text-decoration: none; cursor: default; }
-.react-btn { border: 0; background: transparent; color: var(--faint); padding: 0 2px; margin-left: 6px; vertical-align: -4px; border-radius: 6px; opacity: 0; }
+.react-btn { border: 0; background: transparent; color: var(--faint); padding: 0 2px; margin-left: 4px; vertical-align: -4px; border-radius: 6px; opacity: 0; }
 .react-btn svg { width: 16px; height: 16px; }
 .msg:hover .react-btn, .react-btn:focus-visible, .react-btn[aria-expanded="true"] { opacity: 1; }
 .react-btn:hover { color: var(--text); }
@@ -312,7 +324,7 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .undo-btn:hover { color: var(--text); }
 @media (hover: none) { .undo-btn { padding: 2px 4px; } .undo-btn svg { width: 18px; height: 18px; } }
 .msg .meta .edited { color: var(--faint); }
-@media (hover: none) { .react-btn { opacity: .75; padding: 2px 4px; } .react-btn svg { width: 18px; height: 18px; } }
+@media (hover: none) { .react-btn { opacity: .75; padding: 0 3px; } .react-btn svg { width: 16px; height: 16px; } }
 .react-menu {
   position: absolute; bottom: calc(100% + 4px); z-index: 5; display: flex; gap: 2px; padding: 4px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 999px; box-shadow: var(--shadow); white-space: nowrap;
