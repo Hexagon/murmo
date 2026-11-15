@@ -289,7 +289,16 @@ Database `mesg-<account>`:
 | `meta` | device id, public keys, wrapped (encrypted) private keys, optional remembered local key |
 | `contacts` | encrypted contact records: handle, pinned device list, state (requested, accepted, blocked) |
 | `messages` | encrypted messages, indexed by conversation and time |
-| `files` | encrypted file contents, by file id |
+| `files` | one header per complete file (`{ n, size }`), by file id; written last, after all its parts |
+| `parts` | encrypted file contents in 48 KiB parts, each encrypted on its own (`<file tag>:<index>`) |
+| `incoming` | chunks that came before their `file` message, still encrypted with the file key (temporary) |
+
+Files are never held in memory whole: a file being sent is read with `File.slice`, hashed incrementally and stored
+part by part, then streamed from the parts; an incoming chunk is decrypted and stored as a part on arrival, and the
+parts are hashed in order as they become contiguous. Chunks that come before their `file` message wait in `incoming`
+(at most 16 MiB per sender account and 64 MiB in all; beyond that a chunk is refused and, if queued, not acknowledged
+so it comes again) and are forgotten after 10 minutes without it. Parts without a header and incoming chunks older
+than an hour are deleted at start. Files stored by version 1 (one record in `files`) are still read.
 
 **Retention per conversation.** A contact record can carry `retention` (seconds; 0 or absent: keep). Messages of
 that conversation sent before *now − retention* are deleted from IndexedDB together with their files: when the
@@ -327,8 +336,10 @@ A file that does not fit is sent live later, when both devices are connected.
    Devices that got neither are recorded on the sender's message (`missed`) and offered the file again whenever the
    sender is connected and they are too (every minute and on reconnect, for 14 days). The interface shows a file that
    no device of the recipient has yet as *not sent yet*.
-4. Receivers check every chunk and the final hash, store the file encrypted locally and show images inline
-   (PNG, JPEG, GIF, WebP; never SVG). Relay chunks are accepted only from the account's own devices and from contacts
+4. Receivers check every chunk and the final hash, store the file encrypted locally (§8.1) and show images inline
+   (PNG, JPEG, GIF, WebP; never SVG) when their header gives at most 40 megapixels (for a GIF, also every frame in
+   its first 256 KiB): a small file can otherwise decode to gigabytes. Larger or unreadable images are offered
+   for saving only. Relay chunks are accepted only from the account's own devices and from contacts
    in state accepted or outgoing; others are dropped (and, if they came from the file queue, acknowledged so the server
    deletes them). Once the file key is known, every chunk is decrypted on arrival and a chunk that fails is dropped
    instead of spoiling the file. The file name and type in a `file` message are cleaned on receipt: control and

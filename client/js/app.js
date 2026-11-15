@@ -1106,8 +1106,15 @@ function showImage(url, name) {
 function fileView(m) {
   const f = m.file;
   if (f.have && p.inlineImage(f.mime, f.size)) {
+    // The dimensions are read from the header first: a small file can decode to gigabytes and freeze the tab.
     const img = h("img", { class: "inline", alt: f.name });
-    messenger.fileBlob(f.f, f.mime).then((b) => {
+    messenger.imageSize(f.f).then(async (size) => {
+      if (!p.imageFits(size)) {
+        const why = size ? `${size.width} × ${size.height} bildpunkter, för stor för att visas` : "kan inte visas här";
+        img.replaceWith(fileCard(m, why));
+        return;
+      }
+      const b = await messenger.fileBlob(f.f, f.mime);
       if (!b) return;
       const url = objectUrls.get(f.f) ?? URL.createObjectURL(b);
       objectUrls.set(f.f, url);
@@ -1116,9 +1123,15 @@ function fileView(m) {
       });
       img.src = url;
       img.addEventListener("click", () => showImage(url, f.name));
-    });
+    }).catch(() => img.replaceWith(fileCard(m)));
     return img;
   }
+  return fileCard(m);
+}
+
+/** A file as a card with its name, size and "Spara" (or a way to fetch it); `note` is said after the size. */
+function fileCard(m, note) {
+  const f = m.file;
   const action = f.have
     ? h("button", { class: "btn small", text: "Spara", onclick: async () => download(f.name, await messenger.fileBlob(f.f, "application/octet-stream")) })
     : h("button", {
@@ -1138,7 +1151,7 @@ function fileView(m) {
     "div",
     { class: "filecard" },
     h("div", { class: "ico", text: (f.name.split(".").pop() || "fil").slice(0, 4).toUpperCase() }),
-    h("div", { class: "fi" }, h("div", { class: "fn", dir: "auto", text: f.name }), h("div", { class: "fs", text: f.have ? bytes(f.size) : `${bytes(f.size)} · ${m.dir === "in" ? "inte mottagen än" : "inte mottagen på den här enheten"}` })),
+    h("div", { class: "fi" }, h("div", { class: "fn", dir: "auto", text: f.name }), h("div", { class: "fs", text: f.have ? (note ? `${bytes(f.size)} · ${note}` : bytes(f.size)) : `${bytes(f.size)} · ${m.dir === "in" ? "inte mottagen än" : "inte mottagen på den här enheten"}` })),
     action,
   );
 }

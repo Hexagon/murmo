@@ -21,6 +21,13 @@ const NOTIFY_KINDS = ["request", "text", "file"];
 /** A file nobody could take is offered again for this long (the mailbox lifetime). */
 const FILE_RETRY = 14 * 24 * 3600;
 const FILE_RETRY_EVERY = 60_000;
+// Chunks that come before their `file` message wait in IndexedDB, within these limits (bytes): per sender account
+// and for all senders. More is not taken (a queued chunk is then not acknowledged, so it comes again later).
+const EARLY_SENDER = 16 * 1024 * 1024;
+const EARLY_TOTAL = 64 * 1024 * 1024;
+const EARLY_KEEP = 10 * 60_000;
+const MAX_CHUNK_TEXT = Math.ceil((p.CHUNK + 16) / 3) * 4; // base64url of one encrypted chunk
+const IMAGE_HEAD = 256 * 1024; // where the dimensions of an image must be found
 const OFFLINE = ["offline", "disconnected", "timeout"];
 /** Receipts are collected for this long and sent together (a mailbox read after a while away is one receipt). */
 const RECEIPT_WAIT = 400;
@@ -115,7 +122,8 @@ export class Messenger extends EventTarget {
     this.lists = new Map(); // account → { state, list, prekeys: Map, at }
     this.contacts = new Map();
     this.prekeys = new Map(); // id → { privateKey, publicRaw, time }
-    this.files = new Map(); // f → { meta, chunks: [], got, from }
+    this.files = new Map(); // f → transfer state, see fileState()
+    this.fileWork = Promise.resolve(); // chunks and file messages are handled one at a time
     this.status = "offline";
     this.receipts = new Map(); // account → Set(message id): arrived here, the sender is told soon
     this.early = new Set(); // receipts that came before this device had stored the message
@@ -135,6 +143,7 @@ export class Messenger extends EventTarget {
     }
     for (const c of await this.store.contacts()) this.contacts.set(c.account, c);
     this.pendingFiles = (await this.store.secret("pendingFiles")) ?? [];
+    this.store.sweepParts(Date.now() - 3600_000).catch(() => {}); // left by a transfer that was interrupted
     this.ws = new Socket(this.api.wsUrl(), async (nonce) => ({
       account: this.me.account,
       device: this.me.device,
@@ -146,7 +155,12 @@ export class Messenger extends EventTarget {
       if (e.detail === "online") this.onOnline().catch((err) => this.fail(err));
     });
     this.ws.addEventListener("msg", (e) => this.onEnvelope(e.detail));
-    this.ws.addEventListener("relay", (e) => this.onRelay(e.detail).catch(() => {}));
+    this.ws.addEventListener("relay", (e) => {
+      const f = e.detail;
+      // file-req streams a whole file: not in the queue, or arriving chunks would wait for it
+      if (this.isChunk(f)) this.serial(() => this.onRelay(f)).catch(() => {});
+      else this.onRelay(f).catch(() => {});
+    });
     this.ws.addEventListener("relay-missed", (e) => {
       const set = this.missed.get(e.detail.ref);
       if (set) for (const d of e.detail.devices ?? []) set.add(d);
@@ -729,13 +743,21 @@ export class Messenger extends EventTarget {
     const c = this.contacts.get(conv);
     if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
     if (file.size > p.MAX_FILE) throw new ApiError(413, "too_large");
-    const bytes = new Uint8Array(await file.arrayBuffer());
     const f = p.b64(p.random(16));
     const key = await p.newFileKey();
-    const n = Math.max(1, Math.ceil(bytes.length / p.CHUNK));
+    const size = file.size;
+    const n = Math.max(1, Math.ceil(size / p.CHUNK));
+    // Read, hashed and stored part by part: the file is never in memory whole.
+    const hash = new p.Sha256();
+    for (let i = 0; i < n; i++) {
+      const part = new Uint8Array(await file.slice(i * p.CHUNK, (i + 1) * p.CHUNK).arrayBuffer());
+      hash.update(part);
+      await this.store.putPart(f, i, part);
+    }
+    if (hash.length !== size) throw new ApiError(409, "file_changed");
     const meta = {
       f, name: p.safeFileName(file.name), mime: p.safeMime(file.type),
-      size: bytes.length, sha256: p.b64(await p.sha256(bytes)), key: p.b64(key), n,
+      size, sha256: p.b64(hash.digest()), key: p.b64(key), n,
     };
     const peers = await this.peerTargets(conv);
     const owns = await this.ownTargets();
@@ -743,15 +765,15 @@ export class Messenger extends EventTarget {
     const online = await this.ws.presence(all);
     const away = all.filter((d) => !online.includes(d));
     // Asked before the transfer, so that a file is queued whole or not at all.
-    const queued = this.fileQueue() ? await this.ws.relaySpace(away, Math.ceil(bytes.length * 1.4) + n * 256) : [];
-    await this.store.putFile(f, bytes);
+    const queued = this.fileQueue() ? await this.ws.relaySpace(away, Math.ceil(size * 1.4) + n * 256) : [];
+    await this.store.finishFile(f, n, size);
     const { id, time } = await this.deliver([...peers, ...owns], "file", conv, meta);
     const m = { id, conv, dir: "out", time, kind: "file", file: { ...meta, have: true }, device: this.me.device, delivered: 0 };
     m.file.missed = away.filter((d) => !queued.includes(d));
     m.file.peers = peers.map((t) => t.device);
     await this.record(m);
     const to = [...online, ...queued];
-    if (to.length) m.file.missed.push(...(await this.streamFile(meta, bytes, to, queued.length > 0)));
+    if (to.length) m.file.missed.push(...(await this.streamFile(meta, await this.store.fileReader(f), to, queued.length > 0)));
     await this.settleFile(m);
     const isPeer = (d) => m.file.peers.includes(d);
     return {
@@ -761,15 +783,20 @@ export class Messenger extends EventTarget {
     };
   }
 
-  /** Stream the chunks of a file to devices; returns the devices the server could not give them to. */
-  async streamFile(meta, bytes, devices, store = false) {
+  /**
+   * Stream the chunks of a file to devices; `read(i)` gives part `i` (Store.fileReader). Returns the devices the server
+   * could not give them to.
+   */
+  async streamFile(meta, read, devices, store = false) {
     const key = p.unb64(meta.key);
     const ref = `${meta.f}.${p.b64(p.random(6))}`;
     const missed = new Set();
     this.missed.set(ref, missed);
     try {
       for (let i = 0; i < meta.n; i++) {
-        const data = await p.encryptChunk(key, meta.f, i, meta.n, bytes.subarray(i * p.CHUNK, (i + 1) * p.CHUNK));
+        const part = await read?.(i);
+        if (!part) throw new Error("no_file");
+        const data = await p.encryptChunk(key, meta.f, i, meta.n, part);
         await this.ws.drain();
         this.ws.relay(devices, data, { store, ref });
       }
@@ -809,15 +836,15 @@ export class Messenger extends EventTarget {
     try {
       for (const entry of [...this.pendingFiles]) {
         const m = (await this.store.messages(entry.conv)).find((x) => x.id === entry.id);
-        const bytes = m?.file && (await this.store.file(m.file.f));
-        if (!m || !bytes || p.now() - entry.time > FILE_RETRY || !m.file.missed?.length) {
+        const read = m?.file && (await this.store.fileReader(m.file.f));
+        if (!m || !read || p.now() - entry.time > FILE_RETRY || !m.file.missed?.length) {
           this.pendingFiles = this.pendingFiles.filter((x) => x.id !== entry.id);
           await this.store.setSecret("pendingFiles", this.pendingFiles);
           continue;
         }
         const online = await this.ws.presence(m.file.missed);
         if (!online.length) continue;
-        const failed = await this.streamFile(m.file, bytes, online);
+        const failed = await this.streamFile(m.file, read, online);
         sent += online.length - failed.length;
         m.file.missed = m.file.missed.filter((d) => !online.includes(d) || failed.includes(d));
         await this.settleFile(m);
@@ -830,7 +857,8 @@ export class Messenger extends EventTarget {
 
   async onFileMeta(m, conv, dir) {
     const b = m.body ?? {};
-    if (typeof b.f !== "string" || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.n) || b.size > p.MAX_FILE) return;
+    if (typeof b.f !== "string" || !Number.isSafeInteger(b.size) || !Number.isSafeInteger(b.n) || b.size < 0 || b.size > p.MAX_FILE) return;
+    if (b.n !== Math.max(1, Math.ceil(b.size / p.CHUNK))) return;
     b.name = p.safeFileName(b.name);
     b.mime = p.safeMime(b.mime);
     const fresh = !(await this.store.hasMessage(m.id));
@@ -842,12 +870,69 @@ export class Messenger extends EventTarget {
       // A file counts as arrived when its content is here (otherwise tryAssemble says so later).
       if (dir === "in" && have) this.queueReceipt(conv, m.id);
     }
-    const t = this.files.get(b.f) ?? { chunks: [], got: 0 };
-    t.meta = b;
-    t.message = { id: m.id, conv };
-    this.files.set(b.f, t);
-    await this.tryAssemble(b.f);
+    await this.serial(() => this.expectFile(b, { id: m.id, conv }));
     return fresh;
+  }
+
+  /** Run file work one piece at a time (chunks arrive concurrently; a file is hashed in order). */
+  serial(fn) {
+    const r = this.fileWork.then(fn);
+    this.fileWork = r.catch(() => {});
+    return r;
+  }
+
+  isChunk(f) {
+    try {
+      return p.unpack(f.data).k === "chunk";
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The state of a transfer that is under way. Parts are stored as they arrive and hashed in order, so memory holds
+   * only which parts are here: `have` (indices stored as parts), `early` (index → bytes of chunks waiting in
+   * `incoming` for the `file` message), `hash` and `next` (parts hashed so far), `ids` (queued copies to acknowledge).
+   */
+  fileState(f) {
+    let t = this.files.get(f);
+    if (!t) {
+      t = { have: new Set(), early: new Map(), earlyBytes: 0, ids: [], hash: new p.Sha256(), next: 0, total: 0, updated: Date.now() };
+      this.files.set(f, t);
+    }
+    return t;
+  }
+
+  /** The `file` message for a transfer is known (it came, or this device asked its own devices for the file). */
+  async expectFile(meta, message) {
+    const f = meta.f;
+    if (await this.store.hasFile(f)) {
+      const t = this.files.get(f);
+      if (t) await this.dropTransfer(f, t);
+      return;
+    }
+    let t = this.files.get(f);
+    if (t?.meta && t.meta.key !== meta.key) {
+      // Another file message with this id: start again with the newer one.
+      await this.dropTransfer(f, t);
+      t = undefined;
+    }
+    t = t ?? this.fileState(f);
+    t.meta = meta;
+    t.message = message;
+    t.updated = Date.now();
+    // Chunks that came first are checked and stored as parts now.
+    if (t.early.size) {
+      const early = [...t.early.keys()].sort((x, y) => x - y);
+      t.early.clear();
+      t.earlyBytes = 0;
+      for (const i of early) {
+        const c = await this.store.incoming(f, i);
+        if (c && i < meta.n && c.n === meta.n) await this.storeChunk(f, t, { f, i, n: c.n, c: c.c });
+      }
+      await this.store.deleteIncoming(f);
+    }
+    await this.tryAssemble(f);
   }
 
   async onRelay(f) {
@@ -858,45 +943,84 @@ export class Messenger extends EventTarget {
       return;
     }
     if (r.k === "chunk") {
-      if (typeof r.f !== "string" || !Number.isSafeInteger(r.i) || !Number.isSafeInteger(r.n) || r.i < 0 || r.i >= r.n || r.n > 4096) return;
-      // Chunks only from own devices and from contacts we talk to: anyone else could fill memory, or this device's
+      const ack = () => f.id && this.ws.relayAck([f.id]);
+      if (typeof r.f !== "string" || r.f.length > 64 || !Number.isSafeInteger(r.i) || !Number.isSafeInteger(r.n) || r.i < 0 || r.i >= r.n || r.n > 4096) return ack();
+      if (typeof r.c !== "string" || r.c.length > MAX_CHUNK_TEXT) return ack();
+      // Chunks only from own devices and from contacts we talk to: anyone else could fill storage, or this device's
       // share of the server's file queue (queued copies are acknowledged so the server drops them).
-      if (!this.mayRelay(f)) {
-        if (f.id) this.ws.relayAck([f.id]);
-        return;
-      }
+      if (!this.mayRelay(f)) return ack();
       let t = this.files.get(r.f);
-      if (!t && (await this.store.hasFile(r.f))) {
-        if (f.id) this.ws.relayAck([f.id]); // a queued copy of a file we already have
-        return;
-      }
-      // With the file key known, a chunk that does not decrypt is dropped at once, so it cannot spoil the file.
-      if (t?.meta && !t.chunks[r.i]) {
-        try {
-          await p.decryptChunk(p.unb64(t.meta.key), r);
-        } catch {
-          if (f.id) this.ws.relayAck([f.id]);
-          return;
-        }
-      }
-      t = this.files.get(r.f) ?? t ?? { chunks: [], got: 0 };
-      if (f.id) (t.ids ??= []).push(f.id); // from the server's queue: acknowledged when the file is complete
-      if (!t.chunks[r.i]) {
-        t.chunks[r.i] = r;
-        t.got++;
+      if (!t && (await this.store.hasFile(r.f))) return ack(); // a queued copy of a file we already have
+      if (!t) {
+        if (this.files.size >= 64) this.sweepFiles();
+        if (this.files.size >= 64) return; // too many transfers at once; a queued copy comes again
+        t = this.fileState(r.f);
       }
       t.updated = Date.now();
-      this.files.set(r.f, t);
-      if (this.files.size > 64) this.sweepFiles();
+      if (t.have.has(r.i) || t.early.has(r.i)) {
+        if (f.id) t.ids.push(f.id);
+        return;
+      }
+      if (t.meta) {
+        // With the file key known, a chunk that does not decrypt is dropped at once, so it cannot spoil the file.
+        if (r.n !== t.meta.n || !(await this.storeChunk(r.f, t, r))) return ack();
+      } else {
+        // Before the file message: kept in IndexedDB, within a budget per sender, until the key is known.
+        const size = Math.ceil((r.c.length * 3) / 4);
+        this.sweepFiles();
+        let mine = 0;
+        let all = 0;
+        for (const x of this.files.values()) {
+          all += x.earlyBytes;
+          if (x.from === f.account) mine += x.earlyBytes;
+        }
+        if (mine + size > EARLY_SENDER || all + size > EARLY_TOTAL) return; // not acknowledged: it comes again
+        await this.store.putIncoming(r.f, r.i, { n: r.n, c: r.c });
+        t.from ??= f.account;
+        t.early.set(r.i, size);
+        t.earlyBytes += size;
+      }
+      if (f.id) t.ids.push(f.id); // from the server's queue: acknowledged when the file is complete
       await this.tryAssemble(r.f);
     } else if (r.k === "file-req" && f.account === this.me.account) {
       // Later federation: serve our own other devices only.
       const own = await this.ownList();
       if (!own.present.some((d) => d.id === f.from)) return;
       const m = await this.findFileMessage(r.f, r.conv);
-      const bytes = await this.store.file(r.f);
-      if (m && bytes) await this.streamFile(m.file, bytes, [f.from]);
+      const read = await this.store.fileReader(r.f);
+      if (m && read) await this.streamFile(m.file, read, [f.from]);
     }
+  }
+
+  /** Decrypt a chunk with the file key and store it as a part; false if it does not decrypt. */
+  async storeChunk(f, t, r) {
+    let bytes;
+    try {
+      bytes = await p.decryptChunk(p.unb64(t.meta.key), r);
+    } catch {
+      return false;
+    }
+    if (bytes.length > p.CHUNK) return false;
+    await this.store.putPart(f, r.i, bytes);
+    t.have.add(r.i);
+    // Hash the parts that are now here in order; the one that just came is still in memory.
+    while (t.have.has(t.next)) {
+      const x = t.next === r.i ? bytes : await this.store.part(f, t.next);
+      if (!x) break;
+      t.hash.update(x);
+      t.total += x.length;
+      t.next++;
+    }
+    return true;
+  }
+
+  /** Forget a transfer: its incoming chunks and, unless the file is complete, its parts; acknowledge queued copies. */
+  async dropTransfer(f, t, parts = false) {
+    if (this.files.get(f) === t) this.files.delete(f);
+    if (t.ids.length) this.ws.relayAck(t.ids);
+    t.ids = [];
+    if (parts) await this.store.deleteFile(f);
+    else if (t.early.size) await this.store.deleteIncoming(f);
   }
 
   /** Whether a relay frame comes from an own device or from a contact this account talks to. */
@@ -905,39 +1029,26 @@ export class Messenger extends EventTarget {
     return ["accepted", "outgoing"].includes(this.contacts.get(f.account)?.state);
   }
 
+  /** Forget chunks whose file message has not come within EARLY_KEEP. */
   sweepFiles() {
-    const t = Date.now() - 10 * 60_000;
-    for (const [f, v] of this.files) if ((v.updated ?? 0) < t && !v.meta) this.files.delete(f);
+    const t = Date.now() - EARLY_KEEP;
+    for (const [f, v] of this.files) {
+      if (v.updated < t && !v.meta) {
+        this.files.delete(f);
+        this.store.deleteIncoming(f).catch(() => {});
+      }
+    }
   }
 
   async tryAssemble(f) {
     const t = this.files.get(f);
-    if (!t?.meta || t.got < t.meta.n) return;
+    if (!t?.meta || t.have.size < t.meta.n) return;
     // Complete, good or bad: the server may forget its queued copy.
-    const drop = () => {
-      this.files.delete(f);
-      if (t.ids?.length) this.ws.relayAck(t.ids);
-    };
-    const key = p.unb64(t.meta.key);
-    const parts = [];
-    try {
-      for (let i = 0; i < t.meta.n; i++) parts.push(await p.decryptChunk(key, t.chunks[i]));
-    } catch {
-      return drop();
-    }
-    const total = parts.reduce((a, b) => a + b.length, 0);
-    if (total !== t.meta.size) return drop();
-    const bytes = new Uint8Array(total);
-    let o = 0;
-    for (const x of parts) {
-      bytes.set(x, o);
-      o += x.length;
-    }
-    if (p.b64(await p.sha256(bytes)) !== t.meta.sha256) return drop();
-    await this.store.putFile(f, bytes);
-    drop();
-    const msgs = await this.store.messages(t.message.conv);
-    const m = msgs.find((x) => x.id === t.message.id);
+    const good = t.next === t.meta.n && t.total === t.meta.size && p.b64(t.hash.digest()) === t.meta.sha256;
+    if (!good) return this.dropTransfer(f, t, true);
+    await this.store.finishFile(f, t.meta.n, t.meta.size);
+    await this.dropTransfer(f, t);
+    const m = await this.store.message(t.message.id);
     if (m) {
       m.file.have = true;
       await this.store.putMessage(m);
@@ -960,10 +1071,7 @@ export class Messenger extends EventTarget {
   async fetchFromOwnDevices(conv, f) {
     const m = await this.findFileMessage(f, conv);
     if (!m) return 0;
-    const t = this.files.get(f) ?? { chunks: [], got: 0 };
-    t.meta = m.file;
-    t.message = { id: m.id, conv };
-    this.files.set(f, t);
+    await this.serial(() => this.expectFile(m.file, { id: m.id, conv }));
     const own = (await this.ownTargets()).map((x) => x.device);
     const online = await this.ws.presence(own);
     if (online.length) this.ws.relay(online, p.pack({ k: "file-req", f, conv }));
@@ -971,8 +1079,14 @@ export class Messenger extends EventTarget {
   }
 
   async fileBlob(f, mime) {
-    const bytes = await this.store.file(f);
-    return bytes ? new Blob([bytes], { type: mime }) : null;
+    const parts = await this.store.fileParts(f);
+    return parts ? new Blob(parts, { type: mime }) : null;
+  }
+
+  /** Width and height of a stored image, from its header (null when they cannot be read). */
+  async imageSize(f) {
+    const head = await this.store.fileHead(f, IMAGE_HEAD);
+    return head ? p.imageSize(head) : null;
   }
 
   async messages(conv) {

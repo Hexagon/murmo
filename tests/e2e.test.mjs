@@ -305,6 +305,75 @@ test("files go live to connected devices, wait for absent ones, and own devices 
   });
 });
 
+test("chunks are stored as they come: before the file message, out of order, within a budget per sender", async () => {
+  const conv = alice.me.account;
+  const from = { account: alice.me.account, from: alice.me.device };
+  const data = noise(3 * p.CHUNK + 1000);
+  const f = p.b64(p.random(16));
+  const key = await p.newFileKey();
+  const n = 4;
+  const meta = { f, name: "x.bin", mime: "application/octet-stream", size: data.length, sha256: p.b64(await p.sha256(data)), key: p.b64(key), n };
+  const chunk = (i) => p.encryptChunk(key, f, i, n, data.subarray(i * p.CHUNK, (i + 1) * p.CHUNK));
+  const relay = async (bytes) => bob.serial(() => bob.onRelay({ ...from, data: bytes }));
+
+  // Two chunks before the file message wait in IndexedDB, not in memory.
+  await relay(await chunk(3));
+  await relay(await chunk(1));
+  assert.deepEqual([...bob.files.get(f).early.keys()], [3, 1]);
+  assert.ok(await bob.store.incoming(f, 3));
+  await bob.serial(() => bob.expectFile(meta, { id: "none", conv }));
+  const t = bob.files.get(f);
+  assert.deepEqual([...t.have].sort(), [1, 3]);
+  assert.equal(await bob.store.incoming(f, 3), undefined);
+  assert.equal(t.next, 0); // nothing hashed until part 0 is here
+  // A chunk that does not decrypt is dropped; the right one still counts.
+  const bad = p.unpack(await chunk(0));
+  bad.c = p.b64(p.random(100));
+  await relay(p.pack(bad));
+  assert.ok(!t.have.has(0));
+  const got = waitFor(bob, "file", (d) => d.f === f);
+  await relay(await chunk(0));
+  assert.equal(t.next, 2);
+  await relay(await chunk(2));
+  await got;
+  assert.ok(await bob.store.hasFile(f));
+  assert.deepEqual(await bob.store.file(f), data);
+  assert.equal(bob.files.has(f), false);
+
+  // A file whose hash does not match is deleted, parts included.
+  const f2 = p.b64(p.random(16));
+  const k2 = await p.newFileKey();
+  await bob.serial(() => bob.expectFile({ ...meta, f: f2, key: p.b64(k2), n: 1, size: 10, sha256: p.b64(p.random(32)) }, { id: "none", conv }));
+  await relay(await p.encryptChunk(k2, f2, 0, 1, p.random(10)));
+  assert.equal(await bob.store.hasFile(f2), false);
+  assert.equal(await bob.store.part(f2, 0), undefined);
+
+  // Chunks without a file message: at most 16 MiB from one account, then they are refused (and not acknowledged).
+  const f3 = p.b64(p.random(16));
+  const big = (i) => p.pack({ k: "chunk", f: f3, i, n: 4096, c: p.b64(noise(p.CHUNK + 16)) });
+  for (let i = 0; i < 360; i++) await relay(big(i));
+  const t3 = bob.files.get(f3);
+  assert.ok(t3.early.size < 360 && t3.earlyBytes <= 16 * 1024 * 1024, `${t3.early.size} chunks kept`);
+  // Forgotten after a while, from IndexedDB too.
+  t3.updated = 0;
+  bob.sweepFiles();
+  assert.equal(bob.files.has(f3), false);
+  await until(async () => (await bob.store.incoming(f3, 0)) === undefined);
+
+  // Files stored by an earlier version (one record) are still read.
+  const old = noise(70_000);
+  const k = await bob.store.tag("file", "old-file");
+  const v = await p.encryptLocal(bob.store.key, old, `file:${k}`);
+  const tx = bob.store.db.transaction("files", "readwrite");
+  tx.objectStore("files").put({ k, v });
+  await new Promise((r) => (tx.oncomplete = r));
+  assert.deepEqual(await bob.store.file("old-file"), old);
+  assert.deepEqual(await bob.store.fileHead("old-file", 10), old.subarray(0, 10));
+  const read = await bob.store.fileReader("old-file");
+  assert.equal(read.n, 2);
+  assert.deepEqual(await read(1), old.subarray(p.CHUNK));
+});
+
 test("a message to a device that is away wakes it with an empty push", async () => {
   assert.ok(info.push_key, "the server offers push");
   await bob.setPushEndpoint(`http://127.0.0.1:${PUSH_PORT}/sub/bob`);

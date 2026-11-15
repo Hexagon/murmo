@@ -25,16 +25,14 @@
 - [x] Per-sender quota in the file queue: per (sender account, device) and per sender account, checked by
       `relay-space` too (`MESG_FILE_QUEUE_SENDER_MB`, `MESG_FILE_QUEUE_ACCOUNT_MB`)
 - [x] Version and commit shown under "Säkerhet och integritet" (`/api/v1/info`: `version`, `commit`, `source`)
+- [x] Bounded memory for files: stored in IndexedDB in 48 KiB parts as they are read or arrive, hashed incrementally
+      (pure-JS SHA-256), sent part by part; chunks before their `file` message wait in IndexedDB within 16 MiB per
+      sender account and 64 MiB in all (`DESIGN.md` §8.1, §9)
+- [x] Image decompression bombs: dimensions read from the PNG/GIF/JPEG/WebP header before an image is decoded;
+      above 40 MP, or unreadable, it is shown as a file card with "Spara"
 
 Open, in order of priority:
 
-- [ ] **Bounded memory for incoming files.** Chunks that arrive before their `file` message are buffered without a
-      byte limit (only 64 such files, swept after 10 minutes), and assembly holds the file about three times
-      (chunks, plaintext parts, joined copy) before one large IndexedDB write: a 100 MiB file can exhaust a phone.
-      Cap buffered bytes per sender, store chunks in IndexedDB as they arrive and hash incrementally.
-- [ ] **Image decompression bombs.** Inline images are limited by byte size only (25 MiB); a small PNG/WebP with huge
-      dimensions can freeze or crash the tab. Check dimensions (`createImageBitmap` in a worker, or the header)
-      before showing inline; above ~40 MP offer only "Spara".
 - [ ] Rate limit relay bytes, not only frames (3000 frames/min ≈ 190 MiB/min per device into one recipient).
 - [ ] **Separate limits for live transfer and the file queue.** Today one client constant (100 MiB) governs both.
       Advertise the queue's per-file and per-device limits in `/api/v1/info`, show before sending whether a file can be

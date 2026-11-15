@@ -100,3 +100,49 @@ test("file names and types from other devices are made safe", () => {
   assert.ok(!p.inlineImage(p.safeMime("image/svg+xml"), 10));
   assert.equal(p.safeMime(42), "application/octet-stream");
 });
+
+test("incremental SHA-256 matches WebCrypto at every split", async () => {
+  for (const n of [0, 1, 55, 56, 63, 64, 65, 119, 120, 128, 1000, 65536]) {
+    const data = p.random(n);
+    const want = await p.sha256(data);
+    for (const step of [1, 7, 64, 1000]) {
+      const h = new p.Sha256();
+      for (let o = 0; o < n; o += step) h.update(data.subarray(o, o + step));
+      assert.deepEqual(h.digest(), want, `length ${n}, step ${step}`);
+    }
+  }
+});
+
+test("image dimensions come from the header, without decoding", () => {
+  const png = new Uint8Array(33);
+  png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  new DataView(png.buffer).setUint32(16, 100_000);
+  new DataView(png.buffer).setUint32(20, 100_000);
+  assert.deepEqual(p.imageSize(png), { width: 100_000, height: 100_000 });
+  assert.ok(!p.imageFits(p.imageSize(png))); // ten gigapixels from 33 bytes
+
+  // GIF: a small logical screen, but a frame that claims to be far larger
+  const gif = new Uint8Array([
+    ...p.utf8("GIF89a"), 10, 0, 10, 0, 0, 0, 0,
+    0x21, 0xf9, 4, 0, 0, 0, 0, 0,
+    0x2c, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0, 2, 2, 0x44, 0x01, 0, 0x3b,
+  ]);
+  assert.deepEqual(p.imageSize(gif), { width: 65535, height: 65535 });
+  assert.ok(!p.imageFits(p.imageSize(gif)));
+  assert.ok(p.imageFits(p.imageSize(gif.slice(0, 13)))); // only the screen: 10 × 10
+
+  // JPEG: an APP0 segment, then the frame header (SOF2)
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc2, 0, 11, 8, 0x0b, 0xb8, 0x0f, 0xa0, 3]);
+  assert.deepEqual(p.imageSize(jpeg), { width: 4000, height: 3000 });
+  assert.ok(p.imageFits(p.imageSize(jpeg)));
+  assert.equal(p.imageSize(jpeg.slice(0, 10)), null); // frame header not in the bytes read: not shown inline
+
+  const webp = (kind, body) => new Uint8Array([...p.utf8("RIFF"), 0, 0, 0, 0, ...p.utf8("WEBP"), ...p.utf8(kind), 0, 0, 0, 0, ...body, ...new Uint8Array(10)]);
+  assert.deepEqual(p.imageSize(webp("VP8X", [0, 0, 0, 0, 0x3f, 0x1f, 0, 0x3f, 0x1f, 0])), { width: 8000, height: 8000 });
+  const l = (8000 - 1) | ((6000 - 1) << 14);
+  assert.deepEqual(p.imageSize(webp("VP8L", [0x2f, l & 255, (l >> 8) & 255, (l >> 16) & 255, (l >>> 24) & 255, 0])), { width: 8000, height: 6000 });
+  assert.deepEqual(p.imageSize(webp("VP8 ", [0, 0, 0, 0x9d, 0x01, 0x2a, 0x40, 0x06, 0xb0, 0x04])), { width: 1600, height: 1200 });
+
+  assert.equal(p.imageSize(p.utf8("<svg/>")), null);
+  assert.ok(!p.imageFits(null));
+});
