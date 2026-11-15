@@ -37,10 +37,12 @@
 
 Open, in order of priority:
 
-- [ ] **Separate limits for live transfer and the file queue.** Today one client constant (100 MiB) governs both.
-      ~~Advertise the queue's per-file and per-device limits in `/api/v1/info`~~ (done: `file_queue_limits`, `DESIGN.md` §9);
-      ~~show before sending whether a file can be queued~~ (done: the upload row and account settings); and let live
-      transfer go further once it no longer needs the whole file in memory (Phase 2).
+- [x] **Separate limits for live transfer and the file queue.** The queue's per-file and per-device limits are
+      advertised in `/api/v1/info` (`file_queue_limits`, `DESIGN.md` §9) and shown before sending; live transfer
+      takes files up to 1 GiB (`MAX_FILE`), since files are read, stored and sent part by part. Files over 100 MiB
+      are saved part by part where the browser allows it (`showSaveFilePicker`) and not shown inline (`DESIGN.md` §8.1)
+- [x] Files over 50 MiB wait for the recipient: nothing is pushed or queued, and the recipient takes the file on the
+      device of their choice, live from the sending device (`ask`, `DESIGN.md` §9)
 - [ ] Signed, reproducible client release with published hashes; installable copy not served by the server
 - [ ] History from contacts after every device is lost: a contact sends its copy of a conversation on request,
       shown as the contact's copy (`DESIGN.md` §7.1, option 3)
@@ -51,8 +53,8 @@ Open, in order of priority:
       format versioned
 - [ ] Hybrid post-quantum prekeys (X25519 + ML-KEM-768)
 - [ ] Group conversations (sender keys first, MLS later)
-- [ ] Resumable file transfers and transfers larger than 100 MiB (streaming from `File.slice` and to IndexedDB in
-      chunks; the live limit can then exceed the queue's)
+- [ ] Resumable file transfers (a receiver that has some parts asks for the rest), and saving large files part by
+      part in browsers without `showSaveFilePicker` (a service worker that streams the download)
 
 ## Phase 3: beyond one server
 

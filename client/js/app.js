@@ -615,6 +615,41 @@ function registerForm(body, err) {
   if (canHover()) user.focus({ preventScroll: true });
 }
 
+/**
+ * Save a received or sent file. One larger than MAX_INLINE is written part by part to a file the user picks, where the
+ * browser can (`showSaveFilePicker`), so it is never in memory whole; elsewhere, and for smaller files, it is put
+ * together as a Blob and downloaded.
+ */
+async function saveFile(f, btn) {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const label = btn.textContent;
+  try {
+    if (f.size > p.MAX_INLINE && typeof window.showSaveFilePicker === "function") {
+      let handle;
+      try {
+        handle = await window.showSaveFilePicker({ suggestedName: f.name });
+      } catch (x) {
+        if (x?.name === "AbortError") return; // the user closed the dialog
+        throw x;
+      }
+      await messenger.writeFile(f.f, await handle.createWritable(), (done, total) => {
+        btn.textContent = `${Math.floor((done / total) * 100)} %`;
+      });
+      toast(tr("msg.saved", { name: f.name }));
+    } else {
+      const b = await messenger.fileBlob(f.f, "application/octet-stream");
+      if (!b) throw new ApiError(404, "no_file");
+      download(f.name, b);
+    }
+  } catch (x) {
+    toast(say(x));
+  } finally {
+    btn.textContent = label;
+    btn.disabled = false;
+  }
+}
+
 function download(name, blob) {
   const url = URL.createObjectURL(blob);
   const a = h("a", { href: url, download: name });
@@ -880,6 +915,13 @@ async function enter({ store, account, handle, home }) {
     renderSidebar();
   });
   messenger.addEventListener("gifs", () => refreshGifHashes().then(renderThread).catch(() => {}));
+  // A file on its way here: its card says how far it has come.
+  messenger.addEventListener("fileProgress", (e) => {
+    const { f, done, total } = e.detail;
+    for (const el of document.querySelectorAll(`[data-coming="${CSS.escape(f)}"]`)) {
+      el.textContent = `${bytes(Number(el.dataset.size))} · ${tr("msg.receiving", { pct: percent(done / total) })}`;
+    }
+  });
   messenger.addEventListener("status", (e) => {
     renderSidebar();
     if (e.detail !== "online") return;
@@ -1583,7 +1625,8 @@ function composer(c) {
         bar.value = 0.15 + 0.85 * share;
         showSending(id);
       });
-      if (r.live) finish("ok", tr("compose.sent"), 2500);
+      if (r.ask) finish("ok", tr("compose.asked"), 7000);
+      else if (r.live) finish("ok", tr("compose.sent"), 2500);
       else if (r.queued) finish("wait", tr("compose.queued"), 7000);
       else if (r.tooBig) finish("wait", tr("compose.laterTooBig", { size: bytes(Math.max(0, queueMaxFile() ?? 0)) }), 12000);
       else finish("wait", tr("compose.later"), 7000);
@@ -2208,6 +2251,7 @@ function message(m) {
     return h("div", { class: `msg out held${m.kind === "ephemeral" ? " ephemeral" : ""}` }, body, meta);
   }
   if (sending.has(m.id)) meta.append(sendingNote(m.id));
+  else if (m.dir === "out" && m.kind === "file" && m.file?.ask && !m.delivered) meta.append(h("span", { class: "pending", text: tr("msg.awaitingTake") }));
   else if (Messenger.undelivered(m)) {
     meta.append(
       h("span", { class: "pending", text: tr("msg.notYet") }),
@@ -2409,7 +2453,7 @@ function placeImage(img, { width, height }) {
 
 function fileView(m) {
   const f = m.file;
-  if (f.have && p.inlineVideo(f.mime)) return imgNodes.get(f.f) ?? fileCard(m, null, true);
+  if (f.have && p.inlineVideo(f.mime, f.size)) return imgNodes.get(f.f) ?? fileCard(m, null, true);
   if (f.have && p.inlineImage(f.mime, f.size)) {
     const made = imgNodes.get(f.f);
     if (made) return made;
@@ -2479,8 +2523,30 @@ async function playVideo(m, card) {
  */
 function fileCard(m, note, play = false) {
   const f = m.file;
+  // A large file waits for this side to take it (`ask`): taken on the device where the button is pressed.
+  const take = !f.have && m.dir === "in" && f.ask;
   const action = f.have
-    ? h("button", { class: "btn small", text: tr("common.save"), onclick: async () => download(f.name, await messenger.fileBlob(f.f, "application/octet-stream")) })
+    ? h("button", { class: "btn small", text: tr("common.save"), onclick: (e) => saveFile(f, e.currentTarget) })
+    : take
+    ? h("button", {
+        class: "btn small",
+        text: tr("msg.take"),
+        title: tr("msg.takeTitle"),
+        onclick: async (e) => {
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          try {
+            if (await messenger.acceptFile(current, f.f)) toast(tr("msg.taking"));
+            else {
+              btn.disabled = false;
+              toast(tr("msg.senderAway"));
+            }
+          } catch (x) {
+            btn.disabled = false;
+            toast(say(x));
+          }
+        },
+      })
     : h("button", {
         class: "btn small",
         text: tr("msg.fetchOwn"),
@@ -2508,7 +2574,7 @@ function fileCard(m, note, play = false) {
     play
       ? h("button", { type: "button", class: "ico play", "aria-label": tr("msg.play"), title: tr("msg.play"), onclick: onPlay }, icon("play", 20))
       : h("div", { class: "ico", text: (f.name.split(".").pop() || tr("msg.file")).slice(0, 4).toUpperCase() }),
-    h("div", { class: "fi" }, h("div", { class: "fn", dir: "auto", text: f.name }), h("div", { class: "fs", text: f.have ? (note ? `${bytes(f.size)} · ${note}` : bytes(f.size)) : `${bytes(f.size)} · ${tr(m.dir === "in" ? "msg.notReceived" : "msg.notHere")}` })),
+    h("div", { class: "fi" }, h("div", { class: "fn", dir: "auto", text: f.name }), h("div", { class: "fs", "data-coming": f.have ? null : f.f, "data-size": f.size, text: f.have ? (note ? `${bytes(f.size)} · ${note}` : bytes(f.size)) : `${bytes(f.size)} · ${tr(take ? "msg.waitsToBeTaken" : m.dir === "in" ? "msg.notReceived" : "msg.notHere")}` })),
     action,
   );
 }

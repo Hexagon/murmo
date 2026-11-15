@@ -7,6 +7,7 @@ import * as emoji from "../client/js/emoji.js";
 import * as giphy from "../client/js/giphy.js";
 import { validReaction } from "../client/js/core.js";
 import { Socket } from "../client/js/net.js";
+import { partKey } from "../client/js/store.js";
 
 async function device(label) {
   const kp = await p.newKeyPair("Ed25519");
@@ -275,4 +276,30 @@ test("queued bytes of a file and the largest file a queue limit takes", () => {
   assert.equal(p.largestQueued(255), -1);
   assert.equal(p.largestQueued(0), -1);
   assert.equal(p.largestQueued(1e12), p.MAX_FILE);
+});
+
+test("live files go up to 1 GiB; only files up to 100 MiB are put together in memory to be shown", () => {
+  const MiB = 1024 * 1024;
+  assert.equal(p.MAX_FILE, 1024 * MiB);
+  assert.equal(p.MAX_PARTS, p.chunkCount(p.MAX_FILE));
+  assert.ok(p.MAX_PARTS > 10_000); // past the four digits part keys had
+  // The file queue still takes what the server says: its largest file is far below the live limit by default.
+  assert.ok(p.largestQueued(50 * MiB) < 50 * MiB);
+  assert.equal(p.inlineVideo("video/mp4", 100 * MiB), true);
+  assert.equal(p.inlineVideo("video/mp4", 100 * MiB + 1), false);
+  assert.equal(p.inlineVideo("application/pdf", 1), false);
+  assert.equal(p.inlineImage("image/png", 26 * MiB), false);
+});
+
+test("part keys sort in part order, and keys of parts stored before stay the same", () => {
+  assert.equal(partKey("t", 0), "t:0000");
+  assert.equal(partKey("t", 9999), "t:9999");
+  assert.equal(partKey("t", 10_000), "t:~00010000");
+  const keys = [];
+  for (let i = 0; i < p.MAX_PARTS; i += 7) keys.push(partKey("t", i));
+  keys.push(partKey("t", p.MAX_PARTS - 1));
+  const sorted = [...keys].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  assert.deepEqual(sorted, keys);
+  // All within the range a file's parts are deleted by (`t:` … `t:\uffff`), and not in another tag's.
+  for (const k of keys) assert.ok(k > "t:" && k < "t:\uffff");
 });

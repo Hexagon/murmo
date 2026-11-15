@@ -598,6 +598,171 @@ test("chunks are stored as they come: before the file message, out of order, wit
   assert.equal(await bob.store.file("many-parts"), undefined);
 });
 
+test("large files: parts past 10 000, chunks of files over 100 MiB, saving part by part, a full disk", async () => {
+  // Parts are stored by index past the four digits of earlier versions, and a block that crosses 10 000 reads whole.
+  const parts = Array.from({ length: 64 }, (_, j) => p.utf8(`part ${9984 + j}`));
+  await bob.store.putParts("past-ten-thousand", 9984, parts);
+  await bob.store.finishFile("past-ten-thousand", 10_048, 0);
+  const read = await bob.store.fileReader("past-ten-thousand");
+  for (const i of [9984, 9999, 10_000, 10_015, 10_016, 10_047]) assert.deepEqual(await read(i), p.utf8(`part ${i}`), `${i}`);
+  assert.equal(await read(9983), undefined);
+  await bob.store.deleteFile("past-ten-thousand");
+  assert.equal(await bob.store.part("past-ten-thousand", 10_000), undefined);
+
+  // A chunk of a file with more parts than the old limit of 4096 is taken (it waits for its file message).
+  const conv = alice.me.account;
+  const from = { account: alice.me.account, from: alice.me.device };
+  const relay = async (bytes) => bob.serial(() => bob.onRelay({ ...from, data: bytes }));
+  const fBig = p.b64(p.random(16));
+  await relay(p.pack({ k: "chunk", f: fBig, i: 9000, n: p.MAX_PARTS, c: p.b64(noise(100)) }));
+  assert.deepEqual([...bob.files.get(fBig).early.keys()], [9000]);
+  await relay(p.pack({ k: "chunk", f: fBig, i: 1, n: p.MAX_PARTS + 1, c: p.b64(noise(100)) }));
+  assert.deepEqual([...bob.files.get(fBig).early.keys()], [9000]); // more parts than any file has: dropped
+  await bob.dropTransfer(fBig, bob.files.get(fBig));
+
+  // A stored file over several batches comes back whole as a Blob and when written to a stream part by part.
+  const data = noise(300 * p.CHUNK + 123);
+  await bob.store.putFile("to-save", data);
+  const blob = await bob.fileBlob("to-save", "application/octet-stream");
+  assert.equal(blob.size, data.length);
+  assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), data);
+  const written = [];
+  let closed = false;
+  const steps = [];
+  await bob.writeFile("to-save", new WritableStream({ write: (x) => written.push(x), close: () => (closed = true) }), (done, total) => steps.push([done, total]));
+  assert.ok(closed);
+  assert.deepEqual(new Uint8Array(await new Blob(written).arrayBuffer()), data);
+  assert.deepEqual(steps.at(-1), [301, 301]);
+  // A missing part aborts the stream instead of leaving a short file that looks complete.
+  const pk = `${await bob.store.tag("file", "to-save")}:0150`;
+  const del = bob.store.db.transaction("parts", "readwrite");
+  del.objectStore("parts").delete(pk);
+  await new Promise((r) => (del.oncomplete = r));
+  let aborted = false;
+  await assert.rejects(
+    bob.writeFile("to-save", new WritableStream({ write() {}, abort: () => (aborted = true) })),
+    (x) => x.code === "no_file",
+  );
+  assert.ok(aborted);
+  assert.equal(await bob.fileBlob("to-save", "application/octet-stream"), null);
+  await bob.store.deleteFile("to-save");
+
+  // No room on the sending device: what was stored of the file is deleted at once, and it is said as such.
+  const count = async (s) => {
+    const r = bob.store.db.transaction(s).objectStore(s).count();
+    return new Promise((ok) => (r.onsuccess = () => ok(r.result)));
+  };
+  const partsBefore = await count("parts");
+  const put = bob.store.putParts;
+  let calls = 0;
+  bob.store.putParts = async (...a) => {
+    if (++calls === 2) throw new DOMException("full", "QuotaExceededError");
+    return put.apply(bob.store, a);
+  };
+  try {
+    const file = new File([noise(3 * PART_BATCH * p.CHUNK)], "stor.bin");
+    await assert.rejects(bob.sendFile(conv, file), (x) => x.code === "storage_full");
+  } finally {
+    bob.store.putParts = put;
+  }
+  assert.equal(await count("parts"), partsBefore);
+
+  // No room on the receiving device: the transfer is let go, its parts too.
+  const fFull = p.b64(p.random(16));
+  const key = await p.newFileKey();
+  const two = noise(p.CHUNK + 10);
+  const meta = { f: fFull, name: "x.bin", mime: "application/octet-stream", size: two.length, sha256: p.b64(await p.sha256(two)), key: p.b64(key), n: 2 };
+  await bob.serial(() => bob.expectFile(meta, { id: "none", conv }));
+  await relay(await p.encryptChunk(key, fFull, 0, 2, two.subarray(0, p.CHUNK)));
+  assert.ok(await bob.store.part(fFull, 0));
+  const putPart = bob.store.putPart;
+  bob.store.putPart = async () => {
+    throw new DOMException("full", "QuotaExceededError");
+  };
+  try {
+    await assert.rejects(relay(await p.encryptChunk(key, fFull, 1, 2, two.subarray(p.CHUNK))), (x) => x.name === "QuotaExceededError");
+  } finally {
+    bob.store.putPart = putPart;
+  }
+  assert.equal(bob.files.has(fFull), false);
+  assert.equal(await bob.store.part(fFull, 0), undefined);
+  assert.equal(await bob.store.hasFile(fFull), false);
+});
+
+test("a large file waits for the recipient, who takes it on the device of their choice", async () => {
+  const conv = bob.me.account;
+  alice.askAbove = () => 100_000;
+  const data = noise(300_000);
+  let r;
+  try {
+    r = await alice.sendFile(conv, new File([data], "film.mp4", { type: "video/mp4" }));
+  } finally {
+    alice.askAbove = () => p.ASK_ABOVE;
+  }
+  assert.deepEqual(r, { live: 0, queued: 0, waiting: 0, ask: true });
+  const sent = (await alice.messages(conv)).find((m) => m.file?.name === "film.mp4");
+  assert.equal(sent.file.ask, true);
+  assert.deepEqual(sent.file.missed, []); // not offered again by itself either
+  assert.equal(Messenger.undelivered(sent), false);
+  const f = sent.file.f;
+
+  // Nothing is pushed: Bob's device and Alice's second device know the file, and have none of it.
+  const seen = await until(async () => (await bob.messages(alice.me.account)).find((m) => m.file?.f === f));
+  assert.equal(seen.file.ask, true);
+  assert.equal(seen.file.have, false);
+  await until(async () => (await alice2.messages(conv)).find((m) => m.file?.f === f));
+  await new Promise((ok) => setTimeout(ok, 500));
+  assert.equal(await bob.store.hasFile(f), false);
+  assert.equal(await bob.store.part(f, 0), undefined);
+  assert.equal(await alice2.store.part(f, 0), undefined);
+  const db = new DatabaseSync(DB, { readOnly: true });
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM relay_queue").get().n, 0); // never through the file queue
+  db.close();
+
+  // Only the device that sent it is asked; when it is not connected, nothing happens and Bob can try later.
+  const presence = bob.ws.presence;
+  bob.ws.presence = async () => [];
+  try {
+    assert.equal(await bob.acceptFile(alice.me.account, f), false);
+  } finally {
+    bob.ws.presence = presence;
+  }
+
+  // Alice's device streams it only to a verified device of the contact it was sent to, and only a file that waits.
+  let streamed = 0;
+  const stream = alice.streamFile;
+  alice.streamFile = async (...a) => {
+    streamed++;
+    return stream.apply(alice, a);
+  };
+  try {
+    await alice.serveAsked({ account: bob.me.account, from: "not-a-device" }, { k: "file-req", f });
+    await alice.serveAsked({ account: "B".repeat(52), from: bob.me.device }, { k: "file-req", f });
+    const small = (await alice.messages(conv)).find((m) => m.file && !m.file.ask && m.file.have);
+    await alice.serveAsked({ account: bob.me.account, from: bob.me.device }, { k: "file-req", f: small.file.f });
+    assert.equal(streamed, 0);
+
+    // Bob takes it here: it comes live from Alice's device, and Alice sees it delivered.
+    const got = waitFor(bob, "file", (d) => d.f === f, 20000);
+    const progress = [];
+    const onProgress = (e) => e.detail.f === f && progress.push(e.detail.done);
+    bob.addEventListener("fileProgress", onProgress);
+    assert.equal(await bob.acceptFile(alice.me.account, f), true);
+    await got;
+    bob.removeEventListener("fileProgress", onProgress);
+    assert.equal(streamed, 1);
+    assert.equal(progress.at(-1), p.chunkCount(data.length));
+    assert.deepEqual(await bob.store.file(f), data);
+    await until(async () => (await alice.messages(conv)).find((m) => m.file?.f === f)?.delivered > 0);
+  } finally {
+    alice.streamFile = stream;
+  }
+  // Alice's second device still has none of it (Bob chose his device), and can fetch it from her own devices.
+  assert.equal(await alice2.store.hasFile(f), false);
+  // Only the recipient takes a file: the sender's own devices fetch it from each other as before.
+  await assert.rejects(alice.acceptFile(conv, f), (x) => x.code === "no_file");
+});
+
 test("a file id already here or under way cannot be taken over from another conversation", async () => {
   const conv = alice.me.account;
   const other = "someone-else"; // a contact who learned the id (the server sees it in relayed chunks)

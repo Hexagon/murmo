@@ -34,6 +34,7 @@ const EARLY_KEEP = 10 * 60_000;
 /** How long the server keeps a link request (docs/DESIGN.md §4.3). */
 const LINK_TTL = 10 * 60_000;
 const MAX_CHUNK_TEXT = Math.ceil((p.CHUNK + 16) / 3) * 4; // base64url of one encrypted chunk
+const BLOB_BATCH = 256; // parts folded into a Blob at a time (12 MiB)
 const IMAGE_HEAD = 256 * 1024; // where the dimensions of an image must be found
 const OFFLINE = ["offline", "disconnected", "timeout"];
 /** Receipts are collected for this long and sent together (a mailbox read after a while away is one receipt). */
@@ -194,6 +195,7 @@ export class Messenger extends EventTarget {
     super();
     this.fileQueue = fileQueue;
     this.queueLimit = queueLimit;
+    this.askAbove = () => p.ASK_ABOVE; // files larger than this wait for the recipient to take them
     this.pendingFiles = []; // [{ conv, id, time }] files some device has not been given yet
     this.missed = new Map(); // f → Set(device): "relay-missed" during a transfer
     this.refused = new Set(); // refs of transfers of which the server refused a chunk
@@ -207,6 +209,7 @@ export class Messenger extends EventTarget {
     this.contacts = new Map();
     this.prekeys = new Map(); // id → { privateKey, publicRaw, time }
     this.files = new Map(); // f → transfer state, see fileState()
+    this.serving = new Set(); // `${f}:${device}` of files streamed now to a contact's device that asked for them
     this.fileWork = Promise.resolve(); // chunks and file messages are handled one at a time
     this.status = "offline";
     this.receipts = new Map(); // account → Set(message id): arrived here, the sender is told soon
@@ -1058,7 +1061,9 @@ export class Messenger extends EventTarget {
    * Send a file: live to the devices connected now and, unless the user turned that off, as encrypted chunks the
    * server keeps for the devices that are away. Devices that got neither are tried again when they are connected.
    * Returns `{ live, queued, waiting }` (numbers of the recipient's devices), with `tooBig: true` when the file would
-   * have been queued but is larger than the server's queue takes for one file. `progress({ phase, done, total, id })`
+   * have been queued but is larger than the server's queue takes for one file. A file over `askAbove()` (p.ASK_ABOVE) is not sent to
+   * any device: the `file` message says so (`ask`), and the recipient takes it on the device it chooses
+   * (`acceptFile`); the result is then `{ live: 0, queued: 0, waiting: 0, ask: true }`. `progress({ phase, done, total, id })`
    * is told how far it has come: "read" while it is read and stored, "send" while it is sent (`id` is the message's
    * from then on).
    */
@@ -1078,21 +1083,38 @@ export class Messenger extends EventTarget {
       r.catch(() => {}); // seen when awaited; not left unhandled if storing fails first
       return r;
     };
-    let next = readBlock(0);
-    for (let from = 0; from < n; from += PART_BATCH) {
-      const block = new Uint8Array(await next);
-      next = readBlock(from + PART_BATCH);
-      const parts = [];
-      for (let o = 0; o < block.length || (o === 0 && parts.length === 0); o += p.CHUNK) parts.push(block.subarray(o, o + p.CHUNK));
-      for (const part of parts) hash.update(part);
-      await this.store.putParts(f, from, parts);
-      progress?.({ phase: "read", done: Math.min(n, from + PART_BATCH), total: n });
+    try {
+      let next = readBlock(0);
+      for (let from = 0; from < n; from += PART_BATCH) {
+        const block = new Uint8Array(await next);
+        next = readBlock(from + PART_BATCH);
+        const parts = [];
+        for (let o = 0; o < block.length || (o === 0 && parts.length === 0); o += p.CHUNK) parts.push(block.subarray(o, o + p.CHUNK));
+        for (const part of parts) hash.update(part);
+        await this.store.putParts(f, from, parts);
+        progress?.({ phase: "read", done: Math.min(n, from + PART_BATCH), total: n });
+      }
+      if (hash.length !== size) throw new ApiError(409, "file_changed");
+    } catch (x) {
+      // What was stored of it is deleted at once (a large file could otherwise fill the device's storage until the
+      // next sweep), and a full disk is said as such.
+      await this.store.deleteFile(f).catch(() => {});
+      if (x?.name === "QuotaExceededError") throw new ApiError(507, "storage_full");
+      throw x;
     }
-    if (hash.length !== size) throw new ApiError(409, "file_changed");
     const meta = {
       f, name: p.safeFileName(file.name), mime: p.safeMime(file.type),
       size, sha256: p.b64(hash.digest()), key: p.b64(key), n,
     };
+    if (size > this.askAbove()) {
+      meta.ask = true;
+      const peers = await this.peerTargets(conv);
+      await this.store.finishFile(f, n, size, meta.sha256);
+      const { id, time } = await this.deliver([...peers, ...(await this.ownTargets())], "file", conv, meta);
+      const m = { id, conv, dir: "out", time, kind: "file", file: { ...meta, have: true, missed: [], peers: peers.map((t) => t.device) }, device: this.me.device, delivered: 0 };
+      await this.record(m);
+      return { live: 0, queued: 0, waiting: 0, ask: true };
+    }
     const peers = await this.peerTargets(conv);
     const owns = await this.ownTargets();
     const all = [...peers, ...owns].map((t) => t.device);
@@ -1221,6 +1243,7 @@ export class Messenger extends EventTarget {
     if (stored && (stored.sha256 !== b.sha256 || stored.size !== b.size)) return;
     b.name = p.safeFileName(b.name);
     b.mime = p.safeMime(b.mime);
+    if (b.ask !== true) delete b.ask;
     if (await this.superseded({ id: m.id, conv, dir, time: m.time, device: m.from.device })) return false;
     const fresh = !(await this.store.hasMessage(m.id));
     if (fresh) {
@@ -1308,7 +1331,7 @@ export class Messenger extends EventTarget {
     }
     if (r.k === "chunk") {
       const ack = () => f.id && this.ws.relayAck([f.id]);
-      if (typeof r.f !== "string" || r.f.length > 64 || !Number.isSafeInteger(r.i) || !Number.isSafeInteger(r.n) || r.i < 0 || r.i >= r.n || r.n > 4096) return ack();
+      if (typeof r.f !== "string" || r.f.length > 64 || !Number.isSafeInteger(r.i) || !Number.isSafeInteger(r.n) || r.i < 0 || r.i >= r.n || r.n > p.MAX_PARTS) return ack();
       if (typeof r.c !== "string" || r.c.length > MAX_CHUNK_TEXT) return ack();
       // Chunks only from own devices and from contacts we talk to: anyone else could fill storage, or this device's
       // share of the server's file queue (queued copies are acknowledged so the server drops them).
@@ -1346,6 +1369,8 @@ export class Messenger extends EventTarget {
       }
       if (f.id) t.ids.push(f.id); // from the server's queue: acknowledged when the file is complete
       await this.tryAssemble(r.f);
+    } else if (r.k === "file-req" && f.account !== this.me.account) {
+      await this.serveAsked(f, r);
     } else if (r.k === "file-req" && f.account === this.me.account) {
       // Later federation: serve our own other devices only.
       const own = await this.ownList();
@@ -1354,6 +1379,44 @@ export class Messenger extends EventTarget {
       const read = meta && (await this.store.fileReader(r.f));
       if (read) await this.streamFile(meta, read, [f.from]);
     }
+  }
+
+  /**
+   * A contact's device asks for a file that waits for it to be taken (`ask`): streamed to that device only, if it is
+   * one of the contact's verified devices and the file was sent to that conversation. One stream per file and device
+   * at a time, so repeated asking cannot make this device send a large file over and over at once.
+   */
+  async serveAsked(f, r) {
+    if (typeof r.f !== "string" || r.f.startsWith("gif:") || this.contacts.get(f.account)?.state !== "accepted") return;
+    const m = await this.findFileMessage(r.f, f.account);
+    if (m?.dir !== "out" || !m.file?.ask) return;
+    if (!(await this.peerTargets(f.account)).some((t) => t.device === f.from)) return;
+    const ref = `${r.f}:${f.from}`;
+    if (this.serving.has(ref)) return;
+    const read = await this.store.fileReader(r.f);
+    if (!read) return;
+    this.serving.add(ref);
+    try {
+      await this.streamFile(m.file, read, [f.from]);
+    } finally {
+      this.serving.delete(ref);
+    }
+  }
+
+  /**
+   * Take a file that waits to be taken (`ask`, over p.ASK_ABOVE) on this device: the device that sent it is asked to
+   * stream it here, now. Returns false when that device is not connected (nothing is sent; try again later).
+   */
+  async acceptFile(conv, f) {
+    this.requireAccepted(conv);
+    const m = await this.findFileMessage(f, conv);
+    if (m?.dir !== "in" || !m.file?.ask) throw new ApiError(404, "no_file");
+    await this.serial(() => this.expectFile(m.file, { id: m.id, conv }));
+    if (await this.store.hasFile(f)) return true;
+    const online = await this.ws.presence([m.device]);
+    if (!online.length) return false;
+    this.ws.relay(online, p.pack({ k: "file-req", f }));
+    return true;
   }
 
   /** Decrypt a chunk with the file key and store it as a part; false if it does not decrypt. */
@@ -1365,8 +1428,20 @@ export class Messenger extends EventTarget {
       return false;
     }
     if (bytes.length > p.CHUNK) return false;
-    await this.store.putPart(f, r.i, bytes);
+    try {
+      await this.store.putPart(f, r.i, bytes);
+    } catch (x) {
+      // No room left on this device: what came of the file is let go, not kept half (it can be fetched again later).
+      if (x?.name === "QuotaExceededError") await this.dropTransfer(f, t, true);
+      throw x;
+    }
     t.have.add(r.i);
+    // How far it has come, in whole percent (told only when that changes).
+    const pct = Math.floor((t.have.size * 100) / t.meta.n);
+    if (pct !== t.pct) {
+      t.pct = pct;
+      this.emit("fileProgress", { f, done: t.have.size, total: t.meta.n });
+    }
     // Hash the parts that are now here in order; the one that just came is still in memory.
     while (t.have.has(t.next)) {
       const x = t.next === r.i ? bytes : await this.store.part(f, t.next);
@@ -1444,9 +1519,48 @@ export class Messenger extends EventTarget {
     return online.length;
   }
 
+  /**
+   * A stored file as a `Blob`. It is built BLOB_BATCH parts at a time, each batch folded into the Blob made so far,
+   * so the page holds the parts of one batch at most; how the browser keeps the Blob is up to it (Chromium moves
+   * large ones to disk).
+   */
   async fileBlob(f, mime) {
-    const parts = await this.store.fileParts(f);
-    return parts ? new Blob(parts, { type: mime }) : null;
+    const read = await this.store.fileReader(f);
+    if (!read) return null;
+    let blob = new Blob([], { type: mime });
+    for (let from = 0; from < read.n; from += BLOB_BATCH) {
+      const parts = [];
+      for (let i = from; i < Math.min(read.n, from + BLOB_BATCH); i++) {
+        const x = await read(i);
+        if (!x) return null;
+        parts.push(x);
+      }
+      blob = new Blob([blob, ...parts], { type: mime });
+    }
+    return blob;
+  }
+
+  /**
+   * Write a stored file to `sink` (a `WritableStream`, such as the one `showSaveFilePicker` gives) part by part, so
+   * that a file of any size is saved without being in memory. `progress(done, total)` is told the parts written.
+   * The sink is closed when the file is written and aborted if a part is missing.
+   */
+  async writeFile(f, sink, progress = null) {
+    const read = await this.store.fileReader(f);
+    const w = sink.getWriter();
+    try {
+      if (!read) throw new ApiError(404, "no_file");
+      for (let i = 0; i < read.n; i++) {
+        const x = await read(i);
+        if (!x) throw new ApiError(404, "no_file");
+        await w.write(x);
+        progress?.(i + 1, read.n);
+      }
+      await w.close();
+    } catch (x) {
+      await w.abort(x).catch(() => {});
+      throw x;
+    }
   }
 
   /** Width and height of a stored image, from its header (null when they cannot be read). */
