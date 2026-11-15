@@ -374,6 +374,18 @@ conversation's retention when that is shorter, §8.1). Both are inside the encry
 - **Mixed versions.** A device that does not know `ephemeral` drops it (§12): the message is lost there rather than
   kept for good. No receipt comes from such a device, so the sender's copy is gone after `wait`.
 
+### 6.9 Search
+
+A search button by the new-conversation button (or Ctrl+K / ⌘K) opens a search field in the sidebar; Esc empties
+it, and an empty field closes. The server cannot search (it never has the texts) and the local store has no index
+over them (records are encrypted, §8), so the client searches by decrypting each conversation's messages while a query
+is typed. Matching is case-insensitive on the text of `text` messages and the name of `file` messages; disappearing
+messages are not searched. Results are the conversations whose handle matches, then the matching messages, newest
+first (at most 100). Choosing one opens the conversation with that message centred and briefly marked. What was
+decrypted for a search is held in memory per conversation while the field has a query, is dropped for a
+conversation when its messages change, and is forgotten when the field is emptied. Nothing about a search is
+stored or sent.
+
 ## 7. Multi-device history
 
 - Every message is also encrypted to the sender's own other devices, with `kind` unchanged and `to` set to that

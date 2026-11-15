@@ -303,6 +303,41 @@ try {
   await a.waitForFunction(() => document.querySelector(".topbar .title")?.textContent.includes("raderas efter 1 vecka"), { timeout: 5000 });
   await a.screenshot({ path: `${shots}/a-7-retention.png` });
   await a.keyboard.press("Escape");
+  // Search: the field in the sidebar finds a contact by handle and an old message by its text (any case), with the
+  // match marked; the hit opens the conversation with that message in view and marked. Escape brings the list back.
+  // The field is hidden until the search button (or Ctrl+K) opens it, and Esc on an empty field hides it again.
+  if (await a.$eval(".side-search", (e) => e.offsetParent !== null)) throw new Error("search field shown before it is opened");
+  await a.click(".side-top .search-btn");
+  await a.waitForFunction(() => document.activeElement === document.querySelector(".side-search input"), { timeout: 5000 });
+  await a.keyboard.press("Escape");
+  await a.waitForFunction(() => document.querySelector(".side-search").offsetParent === null, { timeout: 5000 });
+  await a.keyboard.down("Control");
+  await a.keyboard.press("k");
+  await a.keyboard.up("Control");
+  await a.waitForFunction(() => document.activeElement === document.querySelector(".side-search input"), { timeout: 5000 });
+  await a.type(".side-search input", "BOB");
+  await a.waitForFunction(() => document.querySelector(".side-list .conv:not(.hit) .name")?.textContent.startsWith("Bob"), { timeout: 5000 });
+  await a.click(".side-search input", { clickCount: 3 });
+  await a.type(".side-search input", "andra RAD");
+  await a.waitForFunction(() => document.querySelectorAll(".side-list .conv.hit").length === 1 && document.querySelector(".side-list .conv.hit mark")?.textContent === "Andra rad", { timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-7b-search.png` });
+  await a.evaluate(() => { const s = document.querySelector(".main .scroll"); s.scrollTop = s.scrollHeight; });
+  await a.click(".side-list .conv.hit");
+  await a.waitForFunction(() => {
+    const m = document.querySelector(".msg.found");
+    if (!m || !m.textContent.includes("Andra raden.")) return false;
+    const r = m.getBoundingClientRect(), s = document.querySelector(".main .scroll").getBoundingClientRect();
+    return r.top >= s.top && r.bottom <= s.bottom;
+  }, { timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-7c-search-jump.png` });
+  await a.focus(".side-search input");
+  await a.keyboard.press("Escape");
+  await a.waitForFunction(() => !document.querySelector(".side-list .conv.hit") && document.querySelector(".side-search input").value === "", { timeout: 5000 });
+  await a.type(".side-search input", "finns inte någonstans");
+  await a.waitForSelector(".side-list .search-none", { timeout: 5000 });
+  await a.keyboard.press("Escape");
+  await a.keyboard.press("Escape");
+  await a.waitForFunction(() => document.querySelector(".side-search").offsetParent === null, { timeout: 5000 });
   // Dark mode and narrow screen.
   await b.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }]);
   await b.keyboard.press("Escape");
@@ -323,7 +358,7 @@ try {
   // Headless Chrome has not been allowed to notify: the header shows a struck-through bell that says so.
   const bell = await b.$eval(".side-top .bell-off", (e) => ({ shown: !e.hidden && e.offsetWidth > 0, title: e.title }));
   if (!bell.shown || !bell.title.startsWith("Murmo kan inte skicka notiser.")) throw new Error(`no notification warning: ${JSON.stringify(bell)}`);
-  await b.click(".side-top .icon-btn:not(.bell-off)");
+  await b.click(".side-top .new-btn");
   await b.waitForSelector("#new-handle", { visible: true, timeout: 5000 });
   await b.screenshot({ path: `${shots}/b-10-mobile-new.png` });
   await clickText(b, "Säkerhet och integritet i detalj");
