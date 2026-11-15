@@ -3,7 +3,7 @@
 import * as p from "./protocol.js";
 import { Api, ApiError } from "./api.js";
 import * as id from "./identity.js";
-import { GIF_MAX_BYTES, GIF_MAX_COUNT, Messenger, Store, setupDevice, validRetention } from "./core.js";
+import { EPHEMERAL_TTLS, GIF_MAX_BYTES, GIF_MAX_COUNT, Messenger, Store, setupDevice, validRetention } from "./core.js";
 import * as emoji from "./emoji.js";
 import * as giphy from "./giphy.js";
 import { accounts } from "./store.js";
@@ -30,11 +30,12 @@ const imgNodes = new Map();
 const imgSizes = new Map();
 /** Outgoing files on their way: message id → share sent (0…1). */
 const sending = new Map();
-// Texts waiting for "Ångra" (holdForUndo): each entry sends its text now. When the page is hidden (another app on a
-// phone, a closed tab) they are sent at once rather than lost.
-const held = new Set();
+// Texts waiting for "Ångra" (DESIGN.md §6.6), by the message id they will be sent with: `{ m, fire, undo }`. They
+// are shown in the thread like sent messages. When the page is hidden (another app on a phone, a closed tab) they
+// are sent at once rather than lost.
+const heldMsgs = new Map();
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") for (const send of [...held]) send();
+  if (document.visibilityState === "hidden") for (const e of [...heldMsgs.values()]) e.fire();
 });
 
 // ── tiny DOM helpers ────────────────────────────────────────────────────────────────────────────────────────────
@@ -95,6 +96,8 @@ const ICONS = {
   close: "M6 6l12 12M18 6L6 18",
   smile: "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 0 0 0-17zM8.5 14a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01",
   clock: "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 0 0 0-17zM12 7.5V12l3 2",
+  undo: "M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
+  timer: "M12 6a7.5 7.5 0 1 0 0 15a7.5 7.5 0 0 0 0-15zM12 9.5v4l2.5 1.5M10 2.5h4M18.5 6.5l1.5-1.5",
 };
 
 function icon(name) {
@@ -310,7 +313,7 @@ const HELP = [
   ["help.crypto", 3],
   ["help.identity", 5],
   ["help.server", 4],
-  ["help.undo", 3],
+  ["help.undo", 4],
   ["help.files", 4],
   ["help.notify", 3],
   ["help.device", 3],
@@ -855,7 +858,8 @@ function onIncoming({ conv, kind }) {
   renderSidebar();
   if (looking || !settings().notify) return;
   const who = messenger.contacts.get(conv)?.handle ?? tr("common.someone");
-  const text = tr(kind === "request" ? "notify.request" : kind === "file" ? "notify.file" : "notify.message", { who });
+  const key = { request: "notify.request", file: "notify.file", ephemeral: "notify.ephemeral" }[kind] ?? "notify.message";
+  const text = tr(key, { who });
   notify.show(text).catch(() => {});
 }
 
@@ -1213,8 +1217,24 @@ function singleDeviceReminder() {
   return slot;
 }
 
+/** How a disappearing message's timer is said: "15 s", "1 min", "1 tim". */
+function ttlLabel(t) {
+  return t < 60 ? tr("ttl.s", { n: i18n.num(t) }) : t < 3600 ? tr("ttl.min", { n: i18n.num(t / 60) }) : tr("ttl.h", { n: i18n.num(t / 3600) });
+}
+
+/** What is left of a countdown, short: "14 s", "4:59", "59 min". */
+function remainingLabel(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  if (s < 60) return tr("ttl.s", { n: s });
+  if (s < 600) return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return s < 3600 ? tr("ttl.min", { n: Math.ceil(s / 60) }) : tr("ttl.h", { n: Math.ceil(s / 3600) });
+}
+
 function composer(c) {
-  const ta = h("textarea", { rows: 1, placeholder: tr("compose.placeholder", { name: splitHandle(c.handle)[0] }) });
+  const name = splitHandle(c.handle)[0];
+  const ta = h("textarea", { rows: 1 });
+  // The timer stays on for this conversation until it is turned off (kept on this device only).
+  let ttl = messenger.timer(c.account);
   const file = h("input", { type: "file", class: "hidden", multiple: true });
   const send = h("button", { class: "send", "aria-label": tr("compose.send"), disabled: true }, icon("send"));
   const grow = () => {
@@ -1222,9 +1242,10 @@ function composer(c) {
     ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`;
     send.disabled = !ta.value.trim();
   };
-  const sendNow = async (text) => {
+  const sendNow = async (text, id, t = ttl) => {
     try {
-      await messenger.sendText(c.account, text);
+      if (t) await messenger.sendEphemeral(c.account, text, t, id);
+      else await messenger.sendText(c.account, text, id);
     } catch (x) {
       if (!ta.value.trim()) {
         ta.value = text;
@@ -1238,46 +1259,44 @@ function composer(c) {
     if (!text) return;
     ta.value = "";
     grow();
-    if (settings().undoSend) holdForUndo(text, sendNow, (back) => {
-      // Taken back before it was sent: nothing left this device. The text returns to an empty composer.
-      if (!ta.value.trim()) {
-        ta.value = back;
-        grow();
-        ta.focus();
-      } else toast(tr("compose.notSent"));
-    });
+    if (settings().undoSend) holdForUndo(text);
     else await sendNow(text);
+  };
+  // "Ångra": the text is shown in the thread like a sent message, with an undo button where the menu would be, and
+  // is encrypted and sent only after UNDO_SEND ms. It is sent under the id it is shown with, so the node stays.
+  const holdForUndo = (text) => {
+    const id = p.b64(p.random(16));
+    const t = ttl; // the timer as it was when the message was written
+    const e = {
+      m: { id, conv: c.account, dir: "out", time: p.now(), kind: t ? "ephemeral" : "text", text, held: true, ...(t ? { ttl: t } : {}) },
+      fire: async () => {
+        if (e.m.firing) return;
+        clearTimeout(timer);
+        e.m = { ...e.m, firing: true }; // shown without the undo button from now on
+        renderThread();
+        await sendNow(text, id, t);
+        heldMsgs.delete(id);
+        renderThread();
+      },
+      undo: () => {
+        if (e.m.firing) return;
+        clearTimeout(timer);
+        heldMsgs.delete(id);
+        renderThread();
+        // Taken back before it was sent: nothing left this device. The text returns to an empty composer.
+        if (!ta.value.trim()) {
+          ta.value = text;
+          grow();
+          ta.focus();
+        } else toast(tr("compose.notSent"));
+      },
+    };
+    const timer = setTimeout(e.fire, UNDO_SEND);
+    heldMsgs.set(id, e);
+    renderThread();
   };
   // Files on their way, one row each above the composer: name, how far it has come, then how it went.
   const uploads = h("div", { class: "uploads", role: "status", "aria-live": "polite" });
-  // "Ångra": a text waits a few seconds above the composer before it is encrypted and sent (DESIGN.md §6.6).
-  const holdForUndo = (text, go, undo) => {
-    let left = Math.round(UNDO_SEND / 1000);
-    const state = h("span", { class: "state", text: tr("compose.sendsIn", { n: left }) });
-    const fire = () => {
-      clearInterval(tick);
-      held.delete(fire);
-      row.remove();
-      go(text);
-    };
-    const back = h("button", {
-      type: "button", class: "btn small", text: tr("compose.undo"),
-      onclick: () => {
-        clearInterval(tick);
-        held.delete(fire);
-        row.remove();
-        undo(text);
-      },
-    });
-    const row = h("div", { class: "upload held" }, h("span", { class: "mark", "aria-hidden": "true", text: "…" }), h("span", { class: "name", dir: "auto", text }), state, back);
-    const tick = setInterval(() => {
-      left -= 1;
-      if (left <= 0) fire();
-      else state.textContent = tr("compose.sendsIn", { n: left });
-    }, 1000);
-    held.add(fire);
-    uploads.append(row);
-  };
   const upload = async (name, run) => {
     const bar = h("progress", { max: 1, value: 0 });
     const state = h("span", { class: "state", text: tr("compose.preparing") });
@@ -1322,6 +1341,7 @@ function composer(c) {
     }
   };
   const sendFiles = async (files) => {
+    if (ttl) return toast(tr("err.ephemeral_files"));
     for (const f of files) await upload(f.name, (progress) => messenger.sendFile(c.account, f, progress));
   };
   /** Put text where the cursor is (or over the selection), and keep the cursor after it. */
@@ -1368,6 +1388,32 @@ function composer(c) {
     if (which === "emoji") emojiPanel(panel, (e) => insert(e), alive).catch(fail);
     else gifPanel(panel, c, { upload, close: closePanel, alive, track: (u) => urls.push(u) }).catch(fail);
   };
+  // The timer: a small menu of choices; while one is on, the button and the composer say so, and files wait.
+  const timerBtn = h("button", { class: "icon-btn timer-btn", type: "button", "aria-haspopup": "menu", "aria-expanded": "false" });
+  const clipBtn = h("button", { class: "icon-btn", "aria-label": tr("compose.attach"), title: tr("compose.sendFile"), onclick: () => file.click() }, icon("clip"));
+  const showTimer = () => {
+    put(timerBtn, icon("timer"), ttl ? h("span", { class: "ttl", text: ttlLabel(ttl) }) : null);
+    timerBtn.classList.toggle("on", !!ttl);
+    const what = ttl ? tr("timer.on", { time: ttlLabel(ttl) }) : tr("timer.off");
+    timerBtn.setAttribute("aria-label", what);
+    timerBtn.title = what;
+    ta.placeholder = ttl ? tr("compose.placeholderEphemeral", { name, time: ttlLabel(ttl) }) : tr("compose.placeholder", { name });
+    box?.classList.toggle("ephemeral", !!ttl);
+    for (const b of [clipBtn, gifBtn]) {
+      b.disabled = !!ttl;
+      b.title = ttl ? tr("err.ephemeral_files") : tr(b === clipBtn ? "compose.sendFile" : "compose.yourGifs");
+    }
+    if (ttl && open === "gif") closePanel();
+  };
+  const setTtl = (t) => {
+    ttl = t;
+    showTimer();
+    messenger.setTimer(c.account, t).catch(() => {});
+  };
+  timerBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    timerMenu(timerBtn, ttl, (t) => { setTtl(t); if (matchMedia("(hover: hover)").matches) ta.focus(); });
+  });
   emojiBtn.addEventListener("click", () => toggle("emoji"));
   gifBtn.addEventListener("click", () => toggle("gif"));
   panel.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); closePanel(); ta.focus(); } });
@@ -1380,14 +1426,16 @@ function composer(c) {
     h(
       "div",
       { class: "row" },
-      h("button", { class: "icon-btn", "aria-label": tr("compose.attach"), title: tr("compose.sendFile"), onclick: () => file.click() }, icon("clip")),
+      clipBtn,
       emojiBtn,
       gifBtn,
+      timerBtn,
       h("span", { class: "grow" }),
       send,
     ),
     file,
   );
+  showTimer();
   const wrap = h("div", { class: "composer-wrap" }, panel, uploads, box, h("div", { class: "foot-note", text: tr("compose.foot") }));
   // A click outside the panel and its buttons closes it.
   const outside = (e) => {
@@ -1401,6 +1449,40 @@ function composer(c) {
   wrap.addEventListener("drop", (e) => { e.preventDefault(); box.classList.remove("drop"); sendFiles([...e.dataTransfer.files]); });
   if (matchMedia("(hover: hover)").matches) setTimeout(() => ta.focus()); // not on touch: it would open the keyboard
   return wrap;
+}
+
+/** The timer choices by the composer's timer button: Off and EPHEMERAL_TTLS; `pick(seconds)` (0: off). */
+function timerMenu(anchor, now, pick) {
+  const open = document.querySelector(".timer-menu");
+  open?.remove();
+  if (open) return; // the button again closes it
+  const close = () => {
+    menu.remove();
+    anchor.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", outside, true);
+    document.removeEventListener("keydown", esc, true);
+  };
+  const outside = (e) => { if (!menu.contains(e.target) && !anchor.contains(e.target)) close(); };
+  const esc = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); anchor.focus(); } };
+  const item = (t) => h("button", {
+    type: "button",
+    role: "menuitemradio",
+    "aria-checked": String(t === now),
+    class: t === now ? "on" : "",
+    text: t ? ttlLabel(t) : tr("timer.offShort"),
+    onclick: () => { close(); pick(t); },
+  });
+  const menu = h(
+    "div",
+    { class: "timer-menu", role: "menu", "aria-label": tr("timer.label") },
+    h("div", { class: "picker-title", text: tr("timer.title") }),
+    h("div", { class: "choices" }, [0, ...EPHEMERAL_TTLS].map(item)),
+  );
+  anchor.closest(".composer").append(menu);
+  anchor.setAttribute("aria-expanded", "true");
+  document.addEventListener("pointerdown", outside, true);
+  document.addEventListener("keydown", esc, true);
+  (menu.querySelector(".on") ?? menu.querySelector("button"))?.focus({ preventScroll: true });
 }
 
 /** The emoji picker: recently used first, then the categories (emoji.js); `pick(e)` inserts one. */
@@ -1646,8 +1728,11 @@ async function renderThread() {
   if (!ui.thread || !current) return;
   const seq = ++renderSeq;
   const conv = current;
-  const msgs = await messenger.messages(conv);
+  const stored = await messenger.messages(conv);
   if (seq !== renderSeq || conv !== current) return;
+  // Texts waiting for "Ångra" come last, until the sent message (same id) is stored.
+  const ids = new Set(stored.map((m) => m.id));
+  const msgs = [...stored, ...[...heldMsgs.values()].map((e) => e.m).filter((m) => m.conv === conv && !ids.has(m.id))];
   const nearBottom = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 80;
   const out = [];
   const seen = new Set();
@@ -1673,13 +1758,80 @@ async function renderThread() {
   if (!msgs.length) out.push(h("div", { class: "day", text: tr("conv.empty") }));
   reconcile(ui.thread, out);
   if (nearBottom || seq === 1) ui.scroll.scrollTop = ui.scroll.scrollHeight;
+  watchUnseen();
+  tickFuses();
+}
+
+// ── disappearing messages: when they are seen, and their countdown ──────────────────────────────────────────────
+
+/** How long before the end a disappearing message fades and folds away (ms; the same as the CSS animation). */
+const DISSOLVE = 3000;
+let seenObserver = null;
+const inView = new Set(); // received disappearing messages on the screen whose countdown has not started
+
+/** Watch the received disappearing messages of the thread that have not been seen yet. */
+function watchUnseen() {
+  if (seenObserver?.root !== ui.scroll) {
+    seenObserver?.disconnect();
+    inView.clear();
+    seenObserver = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const id = e.target.dataset.unseen;
+        if (!e.target.isConnected) seenObserver.unobserve(e.target); // replaced by a newer drawing of the message
+        if (e.isIntersecting && e.target.isConnected) inView.add(id);
+        else inView.delete(id);
+      }
+      markSeen();
+    }, { root: ui.scroll, threshold: 0.6 });
+  }
+  for (const el of ui.thread.querySelectorAll(".msg[data-unseen]")) seenObserver.observe(el);
+}
+
+/** Start the countdown of what is on the screen, while the page is visible. */
+function markSeen() {
+  if (!inView.size || !current || document.visibilityState !== "visible") return;
+  const ids = [...inView];
+  inView.clear();
+  messenger.markSeen(current, ids).catch(() => {});
+}
+document.addEventListener("visibilitychange", markSeen);
+
+/** Update the countdowns in the thread; the last DISSOLVE ms fade the message out and fold its row away. */
+function tickFuses() {
+  if (!ui.thread) return;
+  const now = Date.now();
+  for (const el of ui.thread.querySelectorAll(".fuse[data-end]")) {
+    const left = Number(el.dataset.end) - now;
+    el.textContent = remainingLabel(left);
+    const msg = el.closest(".msg");
+    if (left <= DISSOLVE && msg && !msg.classList.contains("dissolve")) {
+      msg.style.setProperty("--h", `${msg.offsetHeight}px`);
+      msg.style.animationDelay = `${Math.min(0, left - DISSOLVE)}ms`; // opened late: join the animation where it is
+      msg.classList.add("dissolve");
+    }
+  }
+}
+setInterval(tickFuses, 250);
+
+/** The timer under a disappearing message: the countdown once it runs, before that what it will be. */
+function fuseView(m) {
+  const s = icon("timer");
+  s.setAttribute("width", "12");
+  s.setAttribute("height", "12");
+  s.setAttribute("aria-hidden", "true");
+  if (m.expires) {
+    const end = messenger.deadline(m);
+    return h("span", { class: "fuse-wrap", title: tr("timer.running") }, s, h("span", { class: "fuse", "data-end": String(end), text: remainingLabel(end - Date.now()) }));
+  }
+  const waiting = tr(m.dir === "out" ? "timer.afterDelivery" : "timer.afterReading", { time: ttlLabel(m.ttl) });
+  return h("span", { class: "fuse-wrap waiting", title: waiting }, s, h("span", { text: ttlLabel(m.ttl) }));
 }
 
 /** Everything `message(m)` shows: when it is the same, the node made before is still right. */
 function messageSig(m) {
   const f = m.file;
   return JSON.stringify([
-    m.kind, m.text, m.time, m.dir, m.delivered, m.reactions ?? null,
+    m.kind, m.text, m.time, m.dir, m.delivered, m.reactions ?? null, m.edited ?? 0, m.held ? (m.firing ? 2 : 1) : 0, m.ttl ?? null, m.expires ?? null,
     f ? [f.f, f.have, f.missed ?? null, f.peers ?? null, f.mime === "image/gif" && gifHashes.has(f.sha256)] : null,
     messenger.contacts.get(m.conv)?.state, sending.has(m.id),
   ]);
@@ -1697,9 +1849,9 @@ function showSending(id) {
   }
 }
 
-/** "Ta bort" under a message: for everyone (own, recent) or for me. */
+/** The menu under a message: edit (own text, recent), delete for everyone (own, recent) or for me. */
 function moreButton(m) {
-  const btn = h("button", { type: "button", class: "react-btn more-btn", "aria-label": tr("msg.deleteLabel"), title: tr("msg.deleteTitle"), "aria-haspopup": "dialog" }, icon("more"));
+  const btn = h("button", { type: "button", class: "react-btn more-btn", "aria-label": tr("msg.moreLabel"), title: tr("msg.moreTitle"), "aria-haspopup": "dialog" }, icon("more"));
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
     messageMenu(m);
@@ -1707,8 +1859,44 @@ function moreButton(m) {
   return btn;
 }
 
+/** The undo button of a text waiting to be sent, where the menu of a sent message is. */
+function undoButton(m) {
+  return h("button", {
+    type: "button", class: "undo-btn", "aria-label": tr("compose.undoLabel"), title: tr("compose.undoTitle"),
+    onclick: (ev) => { ev.stopPropagation(); heldMsgs.get(m.id)?.undo(); },
+  }, icon("undo"));
+}
+
+/** Change the text of an own message for everyone. */
+function editDialog(m) {
+  const ta = h("textarea", { rows: 4, dir: "auto", maxlength: 8000, "aria-label": tr("edit.textLabel") });
+  ta.value = m.text ?? "";
+  const save = async () => {
+    const text = ta.value.trim();
+    if (!text) return toast(say({ code: "empty_text" }));
+    d.close();
+    try {
+      await messenger.edit(m.conv, m.id, text);
+    } catch (x) {
+      toast(say(x));
+    }
+  };
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
+  });
+  const d = dialog(
+    h("h2", { text: tr("edit.title") }),
+    h("div", { class: "field" }, ta),
+    h("p", { class: "hint", text: tr("edit.hint", { name: personName(m.conv) }) }),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.cancel"), onclick: () => d.close() }), h("button", { class: "btn primary", text: tr("common.save"), onclick: save })),
+  );
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+
 function messageMenu(m) {
   const forAll = m.kind !== "retracted" && messenger.canRetract(m);
+  const canEdit = messenger.canEdit(m);
   const run = async (fn, done) => {
     d.close();
     try {
@@ -1719,7 +1907,7 @@ function messageMenu(m) {
     }
   };
   const d = dialog(
-    h("h2", { text: tr(m.kind === "retracted" ? "msg.deleteTombstone" : "msg.deleteQuestion") }),
+    h("h2", { text: tr(m.kind === "retracted" ? "msg.deleteTombstone" : canEdit ? "msg.editOrDelete" : "msg.deleteQuestion") }),
     forAll ? h("p", { class: "hint", text: tr("msg.forAllHint", { name: personName(m.conv) }) }) : null,
     !forAll && m.dir === "out" && m.kind !== "retracted" ? h("p", { class: "hint", text: tr("msg.tooLateHint") }) : null,
     h("p", { class: "hint", text: tr("msg.forMeHint", { name: personName(m.conv) }) }),
@@ -1727,6 +1915,7 @@ function messageMenu(m) {
       "div",
       { class: "actions" },
       h("button", { class: "btn", text: tr("common.cancel"), onclick: () => d.close() }),
+      canEdit ? h("button", { class: "btn", text: tr("msg.edit"), onclick: () => { d.close(); editDialog(m); } }) : null,
       h("button", { class: "btn danger", text: tr("msg.forMe"), onclick: () => run(() => messenger.deleteForMe(m.conv, m.id), tr("msg.removedForMe")) }),
       forAll ? h("button", { class: "btn danger", text: tr("msg.forAll"), onclick: () => run(() => messenger.retract(m.conv, m.id), tr("msg.removedForAll")) }) : null,
     ),
@@ -1744,6 +1933,13 @@ function message(m) {
   const body = m.kind === "file" ? fileView(m) : h("div", { class: emoji.emojiOnly(m.text) ? "body jumbo" : "body", dir: "auto", text: m.text ?? "" });
   const media = m.kind === "file" ? " media" : "";
   const meta = h("div", { class: "meta" }, timeView(m.time));
+  if (m.kind === "ephemeral") meta.append(fuseView(m));
+  if (m.edited) meta.append(h("span", { class: "edited", text: tr("msg.edited"), title: tr("msg.editedAt", { when: i18n.dateTime(m.edited) }) }));
+  if (m.held) {
+    // Waiting for "Ångra": looks like a sent message; not on the server yet, so no delivery mark.
+    if (!m.firing) meta.append(undoButton(m));
+    return h("div", { class: `msg out held${m.kind === "ephemeral" ? " ephemeral" : ""}` }, body, meta);
+  }
   if (sending.has(m.id)) meta.append(sendingNote(m.id));
   else if (Messenger.undelivered(m)) {
     meta.append(
@@ -1763,10 +1959,14 @@ function message(m) {
   }
   else if (m.dir === "out" && m.delivered !== undefined) meta.append(deliveryMark(m));
   if (m.kind === "file" && m.file?.have && m.file.mime === "image/gif") meta.append(saveGifButton(m));
-  const canReact = ["text", "file"].includes(m.kind) && messenger.contacts.get(m.conv)?.state === "accepted";
+  const canReact = ["text", "file", "ephemeral"].includes(m.kind) && messenger.contacts.get(m.conv)?.state === "accepted";
   if (canReact) meta.append(reactButton(m));
   meta.append(moreButton(m));
-  return h("div", { class: `msg ${m.dir}${media}` }, body, reactionsView(m, canReact), meta);
+  // A picture carries its time on itself; text ends with it on the last line, as long as it fits there.
+  const shown = media ? h("div", { class: "frame" }, body, meta) : [body, meta];
+  const node = h("div", { class: `msg ${m.dir}${media}${m.kind === "ephemeral" ? " ephemeral" : ""}` }, shown, reactionsView(m, canReact));
+  if (m.kind === "ephemeral" && m.dir === "in" && !m.expires) node.dataset.unseen = m.id;
+  return node;
 }
 
 // ── saving GIFs from a conversation ─────────────────────────────────────────────────────────────────────────────

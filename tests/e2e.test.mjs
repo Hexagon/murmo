@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Api, ApiError } from "../client/js/api.js";
 import * as id from "../client/js/identity.js";
-import { Messenger, Store, setupDevice } from "../client/js/core.js";
+import { EPHEMERAL_TTLS, EPHEMERAL_WAIT, Messenger, Store, setupDevice } from "../client/js/core.js";
 import * as p from "../client/js/protocol.js";
 
 const PORT = 18000 + Math.floor(Math.random() * 1000);
@@ -330,6 +330,43 @@ test("taking a message back: only the author's own, within the window, everywher
   assert.ok(!(await alice.store.hasFile(f)));
   await until(async () => (await bob.store.message(fm.id))?.kind === "retracted");
   assert.ok(!(await bob.store.hasFile(f)));
+});
+
+test("editing: only the author's own text, within the window, the latest edit wins, marked on all devices", async () => {
+  const conv = alice.me.account;
+  bob.lists.clear();
+  // A text can be sent under an id chosen beforehand (the interface shows it under that id while it waits).
+  const { id } = await bob.sendText(conv, "Vi ses kl 18", "chosen-id-1");
+  assert.equal(id, "chosen-id-1");
+  for (const dev of [alice, alice2]) await until(async () => (await dev.store.message(id))?.text === "Vi ses kl 18");
+
+  await bob.edit(conv, id, "Vi ses kl 19");
+  for (const dev of [bob, alice, alice2]) {
+    await until(async () => (await dev.store.message(id))?.text === "Vi ses kl 19");
+    assert.ok((await dev.store.message(id)).edited > 0);
+  }
+  // An older edit that arrives late does not win; a newer one does.
+  const m = await alice.store.message(id);
+  await alice.applyEdit(bob.me.account, id, bob.me.account, "Vi ses kl 17", m.edited - 1, "older");
+  assert.equal((await alice.store.message(id)).text, "Vi ses kl 19");
+  await alice.applyEdit(bob.me.account, id, bob.me.account, "Vi ses kl 20", m.edited + 1, "newer");
+  assert.equal((await alice.store.message(id)).text, "Vi ses kl 20");
+
+  // Only the author: not through the API, not with a forged edit.
+  await assert.rejects(alice.edit(bob.me.account, id, "Hackat"), (x) => x.code === "no_message");
+  await alice.deliver(await alice.peerTargets(bob.me.account), "edit", bob.me.account, { id, text: "Hackat" });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal((await bob.store.message(id)).text, "Vi ses kl 19");
+  // Not empty (deleting is the way for that), not after the window, not a message that was taken back.
+  await assert.rejects(bob.edit(conv, id, "   "), (x) => x.code === "empty_text");
+  const now = Math.floor(Date.now() / 1000);
+  await bob.store.putMessage({ id: "old-edit", conv, dir: "out", time: now - 2 * 86400, at: Date.now(), kind: "text", text: "gammalt" });
+  await assert.rejects(bob.edit(conv, "old-edit", "nytt"), (x) => x.code === "too_late");
+  await bob.retract(conv, id);
+  await until(async () => (await alice.store.message(id))?.kind === "retracted");
+  await alice.applyEdit(bob.me.account, id, bob.me.account, "tillbaka?", now + 5, "late");
+  assert.equal((await alice.store.message(id)).kind, "retracted");
+  assert.equal((await alice.store.message(id)).text, undefined);
 });
 
 test("files go live to connected devices, wait for absent ones, and own devices federate later", async () => {
@@ -668,6 +705,119 @@ test("the server keeps no delivered messages and no files", async () => {
   const queued = db2count("relay_queue");
   assert.equal(queued, 0);
   assert.deepEqual(tables, ["changes", "device_lists", "device_seen", "identities", "mailbox", "prekeys", "push_subs", "rate_limits", "relay_queue", "remote_ids", "settings", "sqlite_sequence"]);
+});
+
+test("disappearing messages: a shorter countdown on the recipient and the sender's devices", async () => {
+  const conv = bob.me.account;
+  const peer = alice.me.account;
+  const text = "Borta om en kvart";
+  await alice.sendEphemeral(conv, text, 15);
+  // Bob stores it as an ephemeral message; its countdown has not started (it has not been shown yet).
+  const id = await until(async () => {
+    const m = (await bob.messages(peer)).find((x) => x.text === text);
+    return m && m.kind === "ephemeral" && m.ttl === 15 ? m.id : null;
+  });
+  const b = await bob.store.message(id);
+  assert.equal(b.kind, "ephemeral");
+  assert.equal(b.ttl, 15);
+  assert.equal(b.text, text);
+  assert.equal(b.expires, undefined); // no countdown until Bob's device shows it
+  // Alice's other device keeps its own copy of the same message.
+  await until(async () => {
+    const m = (await alice2.messages(conv)).find((x) => x.text === text);
+    return m && m.kind === "ephemeral" && m.ttl === 15;
+  });
+  // Bob's receipt arrives: the sender's copies get a countdown ...
+  await until(async () => (await alice.store.message(id))?.expires);
+  assert.ok(Math.abs((await alice.store.message(id)).expires - (Date.now() + 15000)) < 5000);
+  await until(async () => (await alice2.store.message(id))?.expires);
+  // ... and showing it on Bob's device starts his too.
+  await bob.markSeen(peer, [id]);
+  assert.ok(Math.abs((await bob.store.message(id)).expires - (Date.now() + 15000)) < 5000);
+  assert.ok((await bob.messages(peer)).some((m) => m.id === id));
+});
+
+test("a disappearing message that is due becomes gone and cannot come back", async () => {
+  const conv = bob.me.account;
+  const peer = alice.me.account;
+  const text = "Försvinner snart";
+  await alice.sendEphemeral(conv, text, 3600);
+  const id = await until(async () => (await bob.messages(peer)).find((m) => m.text === text)?.id);
+  const before = await bob.store.message(id);
+  assert.equal(before.kind, "ephemeral");
+  const wire = {
+    id, kind: "ephemeral", time: before.time, conv: peer, heads: {},
+    from: { account: alice.me.account, device: alice.me.device },
+    to: { account: bob.me.account, device: bob.me.device },
+    body: { text: before.text, ttl: before.ttl, wait: before.wait },
+  };
+  // Do not wait an hour: wind the stored deadline into the past, tell the sweeper, and sweep.
+  const due = { ...before, expires: Date.now() - 1000 };
+  await bob.store.putMessage(due);
+  await bob.track(due);
+  await bob.sweepTimed();
+  assert.ok(!(await bob.messages(peer)).some((m) => m.id === id));
+  const gone = await bob.store.message(id);
+  assert.equal(gone.kind, "gone");
+  assert.equal(gone.text, undefined);
+  // The same envelope arriving again (a resend, a second mailbox read) does not bring it back.
+  await bob.handleMessage(wire);
+  await bob.sweepTimed();
+  assert.ok(!(await bob.messages(peer)).some((m) => m.id === id));
+  assert.equal((await bob.store.message(id)).kind, "gone");
+});
+
+test("history to a newly linked device leaves disappearing messages behind", async () => {
+  const conv = alice.me.account;
+  // Bob has disappearing messages (or what is left of them) from the tests before: they must not be handed over.
+  assert.ok((await bob.store.messages(conv)).some((m) => m.kind === "ephemeral" || m.kind === "gone"));
+  const bob2 = await device(bobHandle, PW, "bob2", async (setup) => {
+    const req = await waitFor(bob, "link");
+    assert.equal(req.code, setup.code);
+    await bob.approveLink(req.request);
+  });
+  await until(async () => bob2.contacts.get(conv)?.state === "accepted");
+  const msgs = await until(async () => {
+    const all = await bob2.messages(conv);
+    return all.some((m) => m.text === "Hemligt meddelande") ? all : null;
+  });
+  assert.ok(!msgs.some((m) => m.kind === "ephemeral" || m.kind === "gone"));
+});
+
+test("a disappearing message can be taken back from everyone like a text", async () => {
+  const conv = bob.me.account;
+  const peer = alice.me.account;
+  const { id } = await alice.sendEphemeral(conv, "Ångrar mig", 3600);
+  await until(async () => (await bob.store.message(id))?.kind === "ephemeral");
+  await alice.retract(conv, id);
+  // Both sides keep the usual placeholder instead of the text; no countdown brings anything back.
+  await until(async () => (await bob.store.message(id))?.kind === "retracted");
+  assert.equal((await bob.store.message(id)).text, undefined);
+  assert.equal((await alice.store.message(id)).kind, "retracted");
+  await bob.sweepTimed();
+  assert.ok((await bob.messages(peer)).some((m) => m.id === id && m.kind === "retracted"));
+});
+
+test("the server keeps an ephemeral envelope for the shorter wait", async () => {
+  const conv = bob.me.account;
+  bob.ws.close(); // Bob's first device is away: the envelope waits in the mailbox
+  await new Promise((r) => setTimeout(r, 300));
+  const before = Math.floor(Date.now() / 1000);
+  await alice.sendEphemeral(conv, "Bara sju dagar", 60);
+  const db = new DatabaseSync(DB, { readOnly: true });
+  const row = db.prepare("SELECT expires FROM mailbox WHERE device = ? ORDER BY id DESC LIMIT 1").get(bob.me.device);
+  db.close();
+  assert.ok(row, "the envelope waits on the server");
+  // `to[].ttl` is the unread wait (7 days), not the 14-day mailbox default.
+  assert.ok(Math.abs(row.expires - (before + EPHEMERAL_WAIT)) < 120, `expires ${row.expires} vs ${before + EPHEMERAL_WAIT}`);
+  assert.ok(row.expires < before + 14 * 24 * 3600, "not the 14-day default");
+});
+
+test("a timer outside the offered ones is refused", async () => {
+  for (const bad of [0, 7, EPHEMERAL_WAIT, "15", null]) {
+    await assert.rejects(alice.sendEphemeral(bob.me.account, "x", bad), (e) => e.code === "bad_ttl");
+  }
+  assert.ok(EPHEMERAL_TTLS.includes(15));
 });
 
 function db2count(table) {

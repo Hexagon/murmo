@@ -175,7 +175,7 @@ async fn session(
     loop {
         let batch = app
             .db
-            .queued(&me.device, after, 200)
+            .queued(&me.device, after, 200, now())
             .map_err(axum::Error::new)?;
         if batch.is_empty() {
             break;
@@ -319,9 +319,18 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
         return Err(ApiError::new(400, "bad_field"));
     }
     let mut failed: Vec<Value> = Vec::new();
-    let expires = now() + MAILBOX_TTL;
+    let now = now();
     for r in to {
         let o = r.as_object().ok_or(ApiError::new(400, "bad_field"))?;
+        // An optional shorter lifetime for this envelope (disappearing messages): absent means the mailbox TTL.
+        let ttl = match o.get("ttl") {
+            None => MAILBOX_TTL,
+            Some(v) => v
+                .as_int()
+                .filter(|t| *t > 0)
+                .ok_or(ApiError::new(400, "bad_field"))?,
+        };
+        let expires = now + ttl.clamp(1, MAILBOX_TTL);
         let device = o
             .get("device")
             .and_then(Value::as_str)
@@ -744,5 +753,106 @@ mod tests {
         assert!(is_limited(&relay_to(&app, &a, &to, MAX_RELAY)));
         // Small frames still fit in what is left.
         assert!(!is_limited(&relay_to(&app, &a, &["x", "x", "a1"], 1000)));
+    }
+
+    /// A `send` to one device, with `ttl` as the given JSON value (or absent).
+    fn send_one(app: &Arc<App>, me: &Authed, ttl: Option<Value>) -> Map {
+        let mut item = Map::new().with("device", "b1").with("env", "e");
+        if let Some(ttl) = ttl {
+            item.insert("ttl", ttl);
+        }
+        let f = Map::new()
+            .with("t", "send")
+            .with("id", "s")
+            .with("to", Value::Array(vec![Value::Object(item)]));
+        match handle(app, me, &f) {
+            Some(Message::Text(t)) => match parse_limited(t.as_bytes(), MAX_FRAME) {
+                Ok(Value::Object(m)) => m,
+                _ => panic!("not an object"),
+            },
+            _ => panic!("no reply"),
+        }
+    }
+
+    fn newest_expires(app: &Arc<App>) -> i64 {
+        app.db
+            .conn()
+            .expect("conn")
+            .query_row(
+                "SELECT expires FROM mailbox ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("expires")
+    }
+
+    fn sender_with_known_device() -> (Arc<App>, Authed) {
+        let app = app();
+        app.db
+            .put_prekey("B", "b1", &Value::from("p"))
+            .expect("prekey");
+        (app, me("A", "a1"))
+    }
+
+    #[test]
+    fn ttl_shortens_mailbox_lifetime() {
+        let (app, a) = sender_with_known_device();
+        let before = now();
+        let r = send_one(&app, &a, Some(60i64.into()));
+        let after = now();
+        assert_eq!(r.get("t").and_then(Value::as_str), Some("sent"));
+        let expires = newest_expires(&app);
+        assert!(
+            (before + 60..=after + 60).contains(&expires),
+            "expires {expires} outside [{}, {}]",
+            before + 60,
+            after + 60
+        );
+    }
+
+    #[test]
+    fn absent_ttl_keeps_the_mailbox_default() {
+        let (app, a) = sender_with_known_device();
+        let before = now();
+        let r = send_one(&app, &a, None);
+        let after = now();
+        assert_eq!(r.get("t").and_then(Value::as_str), Some("sent"));
+        let expires = newest_expires(&app);
+        assert!(
+            (before + MAILBOX_TTL..=after + MAILBOX_TTL).contains(&expires),
+            "expires {expires}"
+        );
+    }
+
+    #[test]
+    fn ttl_above_mailbox_ttl_is_capped() {
+        let (app, a) = sender_with_known_device();
+        let before = now();
+        let r = send_one(&app, &a, Some((MAILBOX_TTL * 10).into()));
+        let after = now();
+        assert_eq!(r.get("t").and_then(Value::as_str), Some("sent"));
+        let expires = newest_expires(&app);
+        assert!(
+            (before + MAILBOX_TTL..=after + MAILBOX_TTL).contains(&expires),
+            "expires {expires}"
+        );
+    }
+
+    #[test]
+    fn bad_ttl_is_rejected() {
+        let (app, a) = sender_with_known_device();
+        for bad in [
+            Value::from("soon"),
+            0i64.into(),
+            (-5i64).into(),
+            Value::Bool(false),
+        ] {
+            let r = send_one(&app, &a, Some(bad));
+            assert_eq!(
+                r.get("error").and_then(Value::as_str),
+                Some("bad_field"),
+                "ttl should be rejected"
+            );
+        }
     }
 }

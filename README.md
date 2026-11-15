@@ -33,8 +33,9 @@ that log rather than in trust in the server. The server is one Rust binary that 
   server can keep the encrypted chunks until they are fetched (at most 14 days; the sender can turn this off, and so
   can the operator); otherwise the file is sent when both are connected. Images (PNG, JPEG, GIF, WebP) show inline.
   Your own devices can later fetch a file from each other.
-- **Undo and delete.** A text waits 5 seconds before it is sent and can be taken back ("Ångra"); a sent text or file
-  can be deleted for everyone within 24 hours (it becomes "… tog bort ett meddelande" on both sides), or for yourself
+- **Undo, edit and delete.** A text waits 5 seconds before it is sent, shown in the thread with an undo button
+  ("Ångra"); a sent text can be edited within 24 hours (marked "redigerat" on both sides); a sent text or file can be
+  deleted for everyone within 24 hours (it becomes "… tog bort ett meddelande" on both sides), or for yourself
   on all your devices. Deleting for everyone cannot reach what the other person has already seen, or a device with an
   older or modified client, and the app says so (docs/DESIGN.md §6.6).
 - **Emoji, reactions and GIFs.** An emoji picker in the composer (plain Unicode drawn by the system font; messages of

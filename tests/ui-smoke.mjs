@@ -151,6 +151,27 @@ try {
   await a.keyboard.press("Enter");
   await b.waitForSelector(".msg .body.jumbo", { timeout: 20000 });
   if (await a.$(".picker:not(.hidden)")) await a.keyboard.press("Escape");
+  // Disappearing messages: the timer stays on, files wait; the countdown starts on screen, the message fades away.
+  await a.click(".composer .timer-btn");
+  await a.waitForSelector(".timer-menu", { visible: true, timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-6d-timer-menu.png` });
+  await clickText(a, "15 s", ".timer-menu button");
+  await a.waitForSelector(".composer.ephemeral .timer-btn.on", { timeout: 5000 });
+  if (!(await a.$eval(".composer textarea", (t) => t.placeholder)).startsWith("Försvinnande meddelande")) throw new Error("the placeholder does not say the message disappears");
+  if (!(await a.$eval(".composer .gif-btn", (x) => x.disabled))) throw new Error("GIFs can be sent with a timer on");
+  await a.type(".composer textarea", "Den här försvinner.");
+  await a.keyboard.press("Enter");
+  await b.waitForSelector(".msg.ephemeral.in .fuse[data-end]", { timeout: 20000 }); // seen: the countdown runs
+  await a.waitForSelector(".msg.ephemeral.out .fuse[data-end]", { timeout: 20000 }); // delivered: the sender's too
+  await b.screenshot({ path: `${shots}/b-6e-ephemeral.png` });
+  if (!(await a.$(".composer .timer-btn.on"))) throw new Error("the timer did not stay on after sending");
+  await b.waitForSelector(".msg.ephemeral.dissolve", { timeout: 20000 });
+  await b.screenshot({ path: `${shots}/b-6f-dissolve.png` });
+  await b.waitForFunction(() => !document.querySelector(".msg.ephemeral"), { timeout: 10000 });
+  await a.waitForFunction(() => !document.querySelector(".msg.ephemeral"), { timeout: 20000 });
+  await a.click(".composer .timer-btn");
+  await clickText(a, "Av", ".timer-menu button");
+  await a.waitForFunction(() => !document.querySelector(".composer.ephemeral"), { timeout: 5000 });
   // GIFs: picked from a file (and kept in the collection), then saved by the recipient from the viewer and resent.
   fs.writeFileSync(`${shots}/tiny.gif`, Buffer.from("R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==", "base64"));
   await a.click(".composer .gif-btn");
@@ -197,25 +218,42 @@ try {
   const bobBefore = await count(b, ".msg");
   await a.type(".composer textarea", "Oj, fel");
   await a.keyboard.press("Enter");
-  await a.waitForSelector(".upload.held", { timeout: 5000 });
+  // It is shown in the thread like a sent message, with an undo button instead of the menu.
+  await a.waitForSelector(".msg.out.held .undo-btn", { timeout: 5000 });
+  if (await a.$(".msg.out.held .more-btn")) throw new Error("a waiting text shows the menu");
   await a.screenshot({ path: `${shots}/a-6h-undo.png` });
-  await clickText(a, "Ångra");
-  await a.waitForFunction(() => document.querySelector(".composer textarea").value === "Oj, fel" && !document.querySelector(".upload.held"), { timeout: 5000 });
+  await a.click(".msg.out.held .undo-btn");
+  await a.waitForFunction(() => document.querySelector(".composer textarea").value === "Oj, fel" && !document.querySelector(".msg.held"), { timeout: 5000 });
   await sleep(6000);
   if ((await count(b, ".msg")) !== bobBefore) throw new Error("a text taken back with Ångra was sent");
   // Sent after all, then deleted for everyone: a placeholder on both sides.
   await a.keyboard.press("Enter");
   await b.waitForFunction((n) => document.querySelectorAll(".msg").length > n, { timeout: 20000 }, bobBefore);
+  await a.waitForFunction(() => !document.querySelector(".msg.held"), { timeout: 10000 });
+  // Edited: the new text and "redigerat" on both sides.
+  const sentNow = await a.$$(".msg.out");
+  const edited = sentNow[sentNow.length - 1];
+  await edited.hover();
+  await (await edited.$(".more-btn")).click();
+  await clickText(a, "Redigera", "dialog button");
+  await a.waitForSelector("dialog textarea", { timeout: 5000 });
+  await a.$eval("dialog textarea", (t) => { t.value = ""; });
+  await a.type("dialog textarea", "Oj, rätt");
+  await a.screenshot({ path: `${shots}/a-6h2-edit.png` });
+  await clickText(a, "Spara", "dialog button");
+  await b.waitForFunction(() => [...document.querySelectorAll(".msg.in")].some((m) => m.textContent.includes("Oj, rätt") && m.querySelector(".edited")), { timeout: 20000 });
+  await a.waitForFunction(() => [...document.querySelectorAll(".msg.out")].some((m) => m.textContent.includes("Oj, rätt") && m.querySelector(".edited")), { timeout: 10000 });
+  await b.screenshot({ path: `${shots}/b-6h2-edited.png` });
   const own = await a.$$(".msg.out");
   const last = own[own.length - 1];
   await last.hover();
   await (await last.$(".more-btn")).click();
   await a.waitForSelector("dialog .btn.danger", { timeout: 5000 });
   await a.screenshot({ path: `${shots}/a-6i-delete-menu.png` });
-  await clickText(a, "Ta bort för alla");
+  await clickText(a, "Ta bort för alla", "dialog button");
   await a.waitForFunction(() => [...document.querySelectorAll(".msg.retracted")].some((m) => m.textContent.includes("Du tog bort")), { timeout: 10000 });
   await b.waitForFunction(() => [...document.querySelectorAll(".msg.retracted")].some((m) => m.textContent.includes("tog bort ett meddelande")), { timeout: 20000 });
-  if (await b.evaluate(() => [...document.querySelectorAll(".msg")].some((m) => m.textContent.includes("Oj, fel")))) throw new Error("retracted text still shown");
+  if (await b.evaluate(() => [...document.querySelectorAll(".msg")].some((m) => m.textContent.includes("Oj,")))) throw new Error("retracted text still shown");
   await b.screenshot({ path: `${shots}/b-6i-retracted.png` });
   for (const pg of [a, b]) await pg.waitForFunction(() => !document.querySelector(".toast"), { timeout: 10000 });
   // GIPHY search: nothing is asked before typing; the warning is there; a tap saves into the collection.

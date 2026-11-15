@@ -390,21 +390,22 @@ impl Db {
         Ok(Some(id))
     }
 
-    /// Queued envelopes of a device after `after`, oldest first.
+    /// Queued envelopes of a device after `after`, oldest first, that have not expired at `now`.
     pub fn queued(
         &self,
         device: &str,
         after: i64,
         limit: i64,
+        now: i64,
     ) -> Result<Vec<(i64, String)>, StoreError> {
         let c = self.conn()?;
         let mut st = c
             .prepare(
-                "SELECT id, env FROM mailbox WHERE device = ?1 AND id > ?2 ORDER BY id LIMIT ?3",
+                "SELECT id, env FROM mailbox WHERE device = ?1 AND id > ?2 AND expires >= ?3 ORDER BY id LIMIT ?4",
             )
             .map_err(store_err)?;
         let rows = st
-            .query_map(params![device, after, limit], |r| {
+            .query_map(params![device, after, now, limit], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .map_err(store_err)?;
@@ -961,5 +962,31 @@ mod tests {
         let db = db();
         assert!(!put(&db, "nobody", "A", 1));
         assert!(db.relay_usage("nobody", "A").expect("usage").is_none());
+    }
+
+    #[test]
+    fn queued_hides_expired_envelopes() {
+        let db = db();
+        db.enqueue("b1", "old", 100, 10).expect("enqueue");
+        db.enqueue("b1", "new", 200, 10).expect("enqueue");
+        // Before the purge sweep runs, the expired envelope is still stored but not handed out.
+        let queued = db.queued("b1", 0, 10, 150).expect("queued");
+        assert_eq!(
+            queued
+                .iter()
+                .map(|(_, env)| env.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new"]
+        );
+        let n: i64 = db
+            .conn()
+            .expect("conn")
+            .query_row("SELECT COUNT(*) FROM mailbox", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(n, 2, "not purged yet");
+        // An envelope is kept while `expires >= now`, and hidden once `now` has moved past it.
+        assert_eq!(db.queued("b1", 0, 10, 100).expect("queued").len(), 2);
+        assert_eq!(db.queued("b1", 0, 10, 101).expect("queued").len(), 1);
+        assert_eq!(db.queued("b1", 0, 10, 201).expect("queued").len(), 0);
     }
 }
