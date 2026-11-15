@@ -17,12 +17,46 @@ let session = null; // { token, home } while a rootcard session exists
 let info = null; // what this server accepts (GET /api/v1/info)
 let current = null; // open conversation (account id)
 const objectUrls = new Map();
+/**
+ * The open conversation's rendered messages, by id: `{ sig, node }`. A message whose `sig` is unchanged keeps its node
+ * on the next render, so pictures and GIFs are not loaded again (and do not blink) each time something changes.
+ */
+const msgNodes = new Map();
+/** The open conversation's pictures, by file id: the <img> is moved into a rebuilt message rather than made again. */
+const imgNodes = new Map();
+/** The size of pictures seen (file id → { width, height }), to give an <img> its place before it has loaded. */
+const imgSizes = new Map();
+/** Outgoing files on their way: message id → share sent (0…1). */
+const sending = new Map();
 
 // ── tiny DOM helpers ────────────────────────────────────────────────────────────────────────────────────────────
 
 /** `el.replaceChildren` without null, undefined or false children. */
 function put(el, ...children) {
   el.replaceChildren(...children.flat().filter((c) => c !== null && c !== undefined && c !== false));
+}
+
+/**
+ * Make `el`'s children `nodes`, touching only what differs: nodes kept in their order are not moved, so a picture or
+ * GIF already shown is not taken out of the page and put back (which can make it blink or start over).
+ */
+function reconcile(el, nodes) {
+  const keep = new Set(nodes);
+  let at = el.firstChild;
+  for (const n of nodes) {
+    while (at && !keep.has(at)) {
+      const next = at.nextSibling;
+      at.remove();
+      at = next;
+    }
+    if (n === at) at = at.nextSibling;
+    else el.insertBefore(n, at);
+  }
+  while (at) {
+    const next = at.nextSibling;
+    at.remove();
+    at = next;
+  }
 }
 
 function h(tag, props = {}, ...children) {
@@ -1060,6 +1094,8 @@ function openConversation(account, form = false) {
   current = account && messenger.contacts.has(account) ? account : null;
   for (const u of objectUrls.values()) URL.revokeObjectURL(u);
   objectUrls.clear();
+  msgNodes.clear();
+  imgNodes.clear();
   const covering = !!current || form;
   ui.shell.classList.toggle("chat", covering);
   if (covering && !pushed) {
@@ -1232,19 +1268,53 @@ function composer(c) {
       toast(say(x));
     }
   };
-  const sent = (name, r) => {
-    if (r.live) toast(`${name} skickad.`);
-    else if (r.queued) toast(`${name} väntar krypterad på servern tills mottagaren ansluter.`);
-    else toast(`${name} är inte skickad än: mottagaren är inte ansluten. Den skickas när ni båda är anslutna.`);
-  };
-  const sendFiles = async (files) => {
-    for (const f of files) {
-      try {
-        sent(f.name, await messenger.sendFile(c.account, f));
-      } catch (x) {
-        toast(say(x));
+  // Files on their way, one row each above the composer: name, how far it has come, then how it went.
+  const uploads = h("div", { class: "uploads", role: "status", "aria-live": "polite" });
+  const upload = async (name, run) => {
+    const bar = h("progress", { max: 1, value: 0 });
+    const state = h("span", { class: "state", text: "Förbereder…" });
+    const label = h("span", { class: "name", dir: "auto", text: name });
+    const row = h("div", { class: "upload" }, h("span", { class: "spinner" }), label, state, bar);
+    uploads.append(row);
+    let id = null;
+    const finish = (kind, text, ms) => {
+      const close = h("button", { type: "button", class: "close-up", "aria-label": "Stäng", title: "Stäng", onclick: () => row.remove() }, icon("close"));
+      row.className = `upload ${kind}`;
+      put(row, h("span", { class: "mark", "aria-hidden": "true", text: kind === "fail" ? "!" : kind === "ok" ? "✓" : "…" }), label, h("span", { class: "state", text }), close);
+      setTimeout(() => row.remove(), ms);
+    };
+    try {
+      const r = await run(({ phase, done, total, id: mid }) => {
+        const share = total ? done / total : 1;
+        if (phase === "read") {
+          state.textContent = "Förbereder…";
+          bar.value = 0.15 * share;
+          return;
+        }
+        if (!id) {
+          id = mid;
+          sending.set(id, share);
+          if (current === c.account) renderThread();
+        }
+        sending.set(id, share);
+        state.textContent = `Skickar… ${Math.round(share * 100)} %`;
+        bar.value = 0.15 + 0.85 * share;
+        showSending(id);
+      });
+      if (r.live) finish("ok", "Skickad", 2500);
+      else if (r.queued) finish("wait", "Väntar krypterad på servern tills mottagaren ansluter", 7000);
+      else finish("wait", "Inte skickad än – skickas när ni båda är anslutna", 7000);
+    } catch (x) {
+      finish("fail", say(x), 12000);
+    } finally {
+      if (id) {
+        sending.delete(id);
+        if (current === c.account) renderThread();
       }
     }
+  };
+  const sendFiles = async (files) => {
+    for (const f of files) await upload(f.name, (progress) => messenger.sendFile(c.account, f, progress));
   };
   /** Put text where the cursor is (or over the selection), and keep the cursor after it. */
   const insert = (text) => {
@@ -1288,7 +1358,7 @@ function composer(c) {
     (which === "emoji" ? emojiBtn : gifBtn).setAttribute("aria-expanded", "true");
     const fail = (x) => { if (alive()) put(panel, h("p", { class: "hint", text: say(x) })); };
     if (which === "emoji") emojiPanel(panel, (e) => insert(e), alive).catch(fail);
-    else gifPanel(panel, c, { sent, close: closePanel, alive, track: (u) => urls.push(u) }).catch(fail);
+    else gifPanel(panel, c, { upload, close: closePanel, alive, track: (u) => urls.push(u) }).catch(fail);
   };
   emojiBtn.addEventListener("click", () => toggle("emoji"));
   gifBtn.addEventListener("click", () => toggle("gif"));
@@ -1310,7 +1380,7 @@ function composer(c) {
     ),
     file,
   );
-  const wrap = h("div", { class: "composer-wrap" }, panel, box, h("div", { class: "foot-note", text: "Krypterat från enhet till enhet. Servern sparar inget efter leverans." }));
+  const wrap = h("div", { class: "composer-wrap" }, panel, uploads, box, h("div", { class: "foot-note", text: "Krypterat från enhet till enhet. Servern sparar inget efter leverans." }));
   // A click outside the panel and its buttons closes it.
   const outside = (e) => {
     if (!wrap.isConnected) return document.removeEventListener("pointerdown", outside);
@@ -1365,7 +1435,7 @@ async function emojiPanel(panel, pick, alive) {
  * tap saves a result in the collection). The collection is encrypted on the device and shared with the account's
  * other devices (docs/DESIGN.md §9.2–9.3).
  */
-async function gifPanel(panel, c, { sent, close, alive, track }) {
+async function gifPanel(panel, c, { upload, close, alive, track }) {
   const body = h("div", { class: "gif-body" });
   const search = info?.giphy?.key ? info.giphy : null;
   const tabs = h("div", { class: "seg gif-tabs", role: "tablist" });
@@ -1376,7 +1446,7 @@ async function gifPanel(panel, c, { sent, close, alive, track }) {
     );
     const still = () => alive() && tabs.dataset.on === which;
     tabs.dataset.on = which;
-    (which === "mine" ? gifMine(body, c, { sent, close, alive: still, track }) : gifSearch(body, search, { alive: still, track }))
+    (which === "mine" ? gifMine(body, c, { upload, close, alive: still, track }) : gifSearch(body, search, { alive: still, track }))
       .catch((x) => { if (still()) put(body, h("p", { class: "hint", text: say(x) })); });
   };
   put(panel, tabs, body);
@@ -1384,7 +1454,7 @@ async function gifPanel(panel, c, { sent, close, alive, track }) {
 }
 
 /** The user's collection: one tap sends a GIF, the cross removes it (on all own devices). */
-async function gifMine(box, c, { sent, close, alive, track }) {
+async function gifMine(box, c, { upload, close, alive, track }) {
   const pickFile = h("input", { type: "file", class: "hidden", accept: "image/gif" });
   const grid = h("div", { class: "gif-grid" });
   let shown = []; // object URLs of this view, replaced on each render
@@ -1424,11 +1494,7 @@ async function gifMine(box, c, { sent, close, alive, track }) {
           title: "Skicka",
           onclick: async () => {
             close();
-            try {
-              sent("GIF:en", await messenger.sendGif(c.account, g.id));
-            } catch (x) {
-              toast(say(x));
-            }
+            await upload("GIF", (progress) => messenger.sendGif(c.account, g.id, progress));
           },
         }, h("img", { src: url, alt: "Sparad GIF", width: String(g.width), height: String(g.height) })),
         remove,
@@ -1456,11 +1522,7 @@ async function gifMine(box, c, { sent, close, alive, track }) {
         toast(say(x));
         continue;
       }
-      try {
-        sent(f.name, await messenger.sendFile(c.account, f));
-      } catch (x) {
-        toast(say(x));
-      }
+      await upload(f.name, (progress) => messenger.sendFile(c.account, f, progress));
     }
   });
   put(
@@ -1580,25 +1642,57 @@ async function renderThread() {
   if (seq !== renderSeq || conv !== current) return;
   const nearBottom = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 80;
   const out = [];
+  const seen = new Set();
   let lastDay = "";
   for (const m of msgs) {
     const d = dayLabel(m.time);
     if (d !== lastDay) {
-      out.push(h("div", { class: "day", text: d }));
+      let day = msgNodes.get(`day:${d}`)?.node;
+      if (!day) msgNodes.set(`day:${d}`, { node: (day = h("div", { class: "day", text: d })) });
+      seen.add(`day:${d}`);
+      out.push(day);
       lastDay = d;
     }
-    out.push(message(m));
+    const sig = messageSig(m);
+    let entry = msgNodes.get(m.id);
+    if (entry?.sig !== sig) msgNodes.set(m.id, (entry = { sig, node: message(m) }));
+    seen.add(m.id);
+    out.push(entry.node);
   }
+  for (const id of msgNodes.keys()) if (!seen.has(id)) msgNodes.delete(id);
   if (!msgs.length) out.push(h("div", { class: "day", text: "Inga meddelanden ännu." }));
-  put(ui.thread,...out);
+  reconcile(ui.thread, out);
   if (nearBottom || seq === 1) ui.scroll.scrollTop = ui.scroll.scrollHeight;
+}
+
+/** Everything `message(m)` shows: when it is the same, the node made before is still right. */
+function messageSig(m) {
+  const f = m.file;
+  return JSON.stringify([
+    m.kind, m.text, m.time, m.dir, m.delivered, m.reactions ?? null,
+    f ? [f.f, f.have, f.missed ?? null, f.peers ?? null, f.mime === "image/gif" && gifHashes.has(f.sha256)] : null,
+    messenger.contacts.get(m.conv)?.state, sending.has(m.id),
+  ]);
+}
+
+/** "Skickar … %" under an outgoing file on its way, updated in place (no new render for each part). */
+function sendingNote(id) {
+  const share = sending.get(id);
+  return h("span", { class: "pending sending", "data-id": id, text: ` · Skickar… ${Math.round((share ?? 0) * 100)} %` });
+}
+
+function showSending(id) {
+  for (const el of ui.thread?.querySelectorAll(".sending") ?? []) {
+    if (el.dataset.id === id) el.textContent = ` · Skickar… ${Math.round((sending.get(id) ?? 0) * 100)} %`;
+  }
 }
 
 function message(m) {
   const body = m.kind === "file" ? fileView(m) : h("div", { class: emoji.emojiOnly(m.text) ? "body jumbo" : "body", dir: "auto", text: m.text ?? "" });
   const media = m.kind === "file" ? " media" : "";
   const meta = h("div", { class: "meta", text: clock(m.time) });
-  if (Messenger.undelivered(m)) {
+  if (sending.has(m.id)) meta.append(sendingNote(m.id));
+  else if (Messenger.undelivered(m)) {
     meta.append(
       h("span", { class: "pending", text: " · Inte skickad än – skickas när mottagaren är ansluten " }),
       h("button", {
@@ -1783,17 +1877,34 @@ function showImage(url, name, gif = null) {
   d.addEventListener("click", () => d.close());
 }
 
+/** Give a picture its shown size before it has loaded, so the thread does not jump when it comes. */
+function placeImage(img, { width, height }) {
+  if (!(width > 0 && height > 0)) return;
+  const scale = Math.min(1, 420 / width, 420 / height);
+  img.style.width = `${Math.round(width * scale)}px`;
+  img.style.aspectRatio = `${width} / ${height}`;
+}
+
 function fileView(m) {
   const f = m.file;
   if (f.have && p.inlineImage(f.mime, f.size)) {
+    const made = imgNodes.get(f.f);
+    if (made) return made;
     // The dimensions are read from the header first: a small file can decode to gigabytes and freeze the tab.
     const img = h("img", { class: "inline", alt: f.name });
+    imgNodes.set(f.f, img);
+    const known = imgSizes.get(f.f);
+    if (known) placeImage(img, known);
     messenger.imageSize(f.f).then(async (size) => {
       if (!p.imageFits(size)) {
         const why = size ? `${size.width} × ${size.height} bildpunkter, för stor för att visas` : "kan inte visas här";
-        img.replaceWith(fileCard(m, why));
+        const card = fileCard(m, why);
+        imgNodes.set(f.f, card);
+        img.replaceWith(card);
         return;
       }
+      imgSizes.set(f.f, { width: size.width, height: size.height });
+      placeImage(img, size);
       const b = await messenger.fileBlob(f.f, f.mime);
       if (!b) return;
       const url = objectUrls.get(f.f) ?? URL.createObjectURL(b);
@@ -1804,7 +1915,11 @@ function fileView(m) {
       img.src = url;
       const gif = f.mime === "image/gif" ? () => messenger.fileBlob(f.f, "image/gif") : null;
       img.addEventListener("click", () => showImage(url, f.name, gif));
-    }).catch(() => img.replaceWith(fileCard(m)));
+    }).catch(() => {
+      const card = fileCard(m);
+      imgNodes.set(f.f, card);
+      img.replaceWith(card);
+    });
     return img;
   }
   return fileCard(m);
