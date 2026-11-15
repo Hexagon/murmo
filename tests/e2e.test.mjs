@@ -259,6 +259,79 @@ test("reactions: one per person, the latest wins, on all devices of both", async
   assert.equal((await alice.store.message(target.id)).reactions[bob.me.account].e, "");
 });
 
+test("taking a message back: only the author's own, within the window, everywhere; late copies stay away", async () => {
+  const conv = alice.me.account;
+  const find = async (dev, c, text) => (await dev.messages(c)).find((m) => m.text === text);
+  bob.lists.clear();
+  await bob.sendText(conv, "Fel mottagare");
+  for (const dev of [alice, alice2]) await until(() => find(dev, bob.me.account, "Fel mottagare"));
+  const sent = await find(bob, conv, "Fel mottagare");
+  await alice.react(bob.me.account, sent.id, "👍");
+  await until(async () => (await bob.store.message(sent.id)).reactions?.[alice.me.account]);
+
+  // The other party cannot take back Bob's message, neither through the API nor with a forged retract.
+  await assert.rejects(alice.retract(bob.me.account, sent.id), (x) => x.code === "no_message");
+  await alice.deliver(await alice.peerTargets(bob.me.account), "retract", bob.me.account, { id: sent.id });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal((await bob.store.message(sent.id)).text, "Fel mottagare");
+
+  // Bob takes it back: a placeholder on all devices of both, text and reactions gone.
+  await bob.retract(conv, sent.id);
+  for (const [dev, c] of [[bob, conv], [alice, bob.me.account], [alice2, bob.me.account]]) {
+    await until(async () => (await dev.store.message(sent.id))?.kind === "retracted");
+    const m = await dev.store.message(sent.id);
+    assert.equal(m.text, undefined);
+    assert.equal(m.reactions, undefined);
+    assert.equal(m.by, bob.me.account);
+    assert.ok((await dev.messages(c)).some((x) => x.id === sent.id && x.kind === "retracted"));
+  }
+  // A late copy (a history hand-over) does not bring it back, and it cannot be reacted to.
+  await alice.mergeHistory({ messages: [{ ...sent, dir: "in", conv: bob.me.account }] });
+  assert.equal((await alice.store.message(sent.id)).kind, "retracted");
+  await assert.rejects(alice.react(bob.me.account, sent.id, "👍"), (x) => x.code === "no_message");
+
+  // A retract that comes before its message is kept out of sight, and hides the message when it comes.
+  const now = Math.floor(Date.now() / 1000);
+  await alice.applyRetract(bob.me.account, "early-1", bob.me.account, now);
+  assert.ok(!(await alice.messages(bob.me.account)).some((m) => m.id === "early-1"));
+  await alice.mergeHistory({ messages: [{ id: "early-1", conv: bob.me.account, dir: "in", time: now - 10, kind: "text", text: "kom sent" }] });
+  assert.equal((await alice.store.message("early-1")).kind, "retracted");
+  assert.ok((await alice.messages(bob.me.account)).some((m) => m.id === "early-1" && m.kind === "retracted"));
+  // ...but not when it was not the author's: a retract from Bob for an id of Alice's is dropped.
+  await alice.applyRetract(bob.me.account, "early-2", bob.me.account, now);
+  await alice.mergeHistory({ messages: [{ id: "early-2", conv: bob.me.account, dir: "out", time: now - 10, kind: "text", text: "mitt eget" }] });
+  assert.equal((await alice.store.message("early-2")).text, "mitt eget");
+
+  // Only within the window: an older message can no longer be taken back from everyone; a stale retract is ignored.
+  const old = { id: "old-own", conv: bob.me.account, dir: "out", time: now - 2 * 86400, at: Date.now(), kind: "text", text: "i förrgår" };
+  await alice.store.putMessage(old);
+  await assert.rejects(alice.retract(bob.me.account, old.id), (x) => x.code === "too_late");
+  await alice.applyRetract(bob.me.account, old.id, alice.me.account, now);
+  assert.equal((await alice.store.message(old.id)).text, "i förrgår");
+
+  // "Delete for me": gone on Alice's devices, Bob keeps his copy.
+  alice.lists.clear();
+  await alice.sendText(bob.me.account, "Bara för mig");
+  await until(() => find(bob, conv, "Bara för mig"));
+  await until(() => find(alice2, bob.me.account, "Bara för mig"));
+  const mine = await find(alice, bob.me.account, "Bara för mig");
+  await alice.deleteForMe(bob.me.account, mine.id);
+  assert.ok(!(await find(alice, bob.me.account, "Bara för mig")));
+  await until(async () => !(await find(alice2, bob.me.account, "Bara för mig")));
+  assert.ok(await find(bob, conv, "Bara för mig"));
+
+  // A file taken back is deleted with its content on the other side.
+  const bobGot = waitFor(bob, "file");
+  await alice.sendFile(bob.me.account, new File([noise(20_000)], "fel.png", { type: "image/png" }));
+  const { f } = await bobGot;
+  assert.ok(await bob.store.hasFile(f));
+  const fm = (await alice.messages(bob.me.account)).find((m) => m.file?.f === f);
+  await alice.retract(bob.me.account, fm.id);
+  assert.ok(!(await alice.store.hasFile(f)));
+  await until(async () => (await bob.store.message(fm.id))?.kind === "retracted");
+  assert.ok(!(await bob.store.hasFile(f)));
+});
+
 test("files go live to connected devices, wait for absent ones, and own devices federate later", async () => {
   const data = noise(150_000);
   const file = new File([data], "bild.png", { type: "image/png" });

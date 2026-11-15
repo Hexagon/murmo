@@ -176,6 +176,32 @@ try {
   await a.click(".msg .reaction");
   await b.waitForFunction(() => document.querySelector(".msg .reaction .n")?.textContent === "2", { timeout: 20000 });
   await b.screenshot({ path: `${shots}/b-6f-reactions.png` });
+  // "Ångra": a text waits above the composer and can be taken back before anything is sent.
+  const count = (pg, sel) => pg.evaluate((s) => document.querySelectorAll(s).length, sel);
+  const bobBefore = await count(b, ".msg");
+  await a.type(".composer textarea", "Oj, fel");
+  await a.keyboard.press("Enter");
+  await a.waitForSelector(".upload.held", { timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-6h-undo.png` });
+  await clickText(a, "Ångra");
+  await a.waitForFunction(() => document.querySelector(".composer textarea").value === "Oj, fel" && !document.querySelector(".upload.held"), { timeout: 5000 });
+  await sleep(6000);
+  if ((await count(b, ".msg")) !== bobBefore) throw new Error("a text taken back with Ångra was sent");
+  // Sent after all, then deleted for everyone: a placeholder on both sides.
+  await a.keyboard.press("Enter");
+  await b.waitForFunction((n) => document.querySelectorAll(".msg").length > n, { timeout: 20000 }, bobBefore);
+  const own = await a.$$(".msg.out");
+  const last = own[own.length - 1];
+  await last.hover();
+  await (await last.$(".more-btn")).click();
+  await a.waitForSelector("dialog .btn.danger", { timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-6i-delete-menu.png` });
+  await clickText(a, "Ta bort för alla");
+  await a.waitForFunction(() => [...document.querySelectorAll(".msg.retracted")].some((m) => m.textContent.includes("Du tog bort")), { timeout: 10000 });
+  await b.waitForFunction(() => [...document.querySelectorAll(".msg.retracted")].some((m) => m.textContent.includes("tog bort ett meddelande")), { timeout: 20000 });
+  if (await b.evaluate(() => [...document.querySelectorAll(".msg")].some((m) => m.textContent.includes("Oj, fel")))) throw new Error("retracted text still shown");
+  await b.screenshot({ path: `${shots}/b-6i-retracted.png` });
+  for (const pg of [a, b]) await pg.waitForFunction(() => !document.querySelector(".toast"), { timeout: 10000 });
   // GIPHY search: nothing is asked before typing; the warning is there; a tap saves into the collection.
   await a.click(".composer .gif-btn");
   await clickText(a, "Sök på GIPHY");

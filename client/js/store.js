@@ -205,6 +205,28 @@ export class Store {
     tx.objectStore("messages").put({ k, c, v });
     await done(tx);
   }
+  /** Replace a message by `m` (same id) and delete the file of the message it replaces, in one transaction. */
+  async replaceMessage(m, oldFile) {
+    const k = await this.tag("message", m.id);
+    const c = await this.tag("conv", m.conv);
+    const v = await p.encryptLocal(this.key, encode(m), `message:${k}`);
+    const fk = typeof oldFile === "string" ? await this.tag("file", oldFile) : null;
+    const tx = this.db.transaction(["messages", "files", "parts", "incoming"], "readwrite");
+    tx.objectStore("messages").put({ k, c, v });
+    if (fk) {
+      tx.objectStore("files").delete(fk);
+      tx.objectStore("parts").delete(partsOf(fk));
+      tx.objectStore("incoming").delete(partsOf(fk));
+    }
+    await done(tx);
+  }
+  /** Delete one message record (not its file). */
+  async deleteMessage(id) {
+    const k = await this.tag("message", id);
+    const tx = this.db.transaction("messages", "readwrite");
+    tx.objectStore("messages").delete(k);
+    await done(tx);
+  }
   /** Delete a whole conversation, with the files of its messages. */
   async deleteConversation(conv) {
     await this.pruneConversation(conv, Infinity);

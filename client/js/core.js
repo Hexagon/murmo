@@ -45,6 +45,14 @@ export const GIF_MAX_COUNT = 60;
 const gifFile = (id) => `gif:${id}`;
 /** Message kinds a reaction can be given to. */
 const REACTABLE = ["text", "file"];
+/** How long after sending a message can be taken back from everyone (seconds, DESIGN.md §6.6). */
+export const RETRACT_WINDOW = 24 * 3600;
+/** How long after a message arrived on this device a retraction is still taken (it may wait in the mailbox). */
+const RETRACT_LATEST = (14 * 86400 + RETRACT_WINDOW) * 1000;
+/** Records that stand in for a message that is gone: kept so that a late copy of it does not come back. */
+const TOMBSTONES = ["retracted", "deleted"];
+/** Whether a stored record is one the user does not see (a hidden tombstone). */
+const hidden = (m) => m.kind === "deleted" || (m.kind === "retracted" && m.pending);
 
 /** A reaction is one emoji (`""` takes one's reaction back). */
 export function validReaction(e) {
@@ -654,6 +662,7 @@ export class Messenger extends EventTarget {
       case "text":
         if (c?.state !== "accepted") return;
         this.queueReceipt(peer, m.id); // also for a copy we already have: the first receipt may have been lost
+        if (await this.superseded({ id: m.id, conv: peer, dir: "in", time: m.time, device: m.from.device })) return;
         if (await this.store.hasMessage(m.id)) return;
         await this.record({ id: m.id, conv: peer, dir: "in", time: m.time, kind: "text", text: String(m.body?.text ?? "").slice(0, TEXT_MAX), device: m.from.device });
         this.emit("incoming", { conv: peer, kind: "text" });
@@ -663,6 +672,9 @@ export class Messenger extends EventTarget {
         return;
       case "reaction":
         if (c?.state === "accepted") await this.applyReaction(peer, m.body?.id, peer, m.body?.e, m.time);
+        return;
+      case "retract":
+        if (c?.state === "accepted") await this.applyRetract(peer, m.body?.id, peer, m.time);
         return;
       case "file":
         if (c?.state !== "accepted") return;
@@ -698,6 +710,7 @@ export class Messenger extends EventTarget {
         return;
       }
       case "text":
+        if (await this.superseded({ id: m.id, conv, dir: "out", time: m.time, device: m.from.device })) return;
         if (await this.store.hasMessage(m.id)) return;
         await this.record({ id: m.id, conv, dir: "out", time: m.time, kind: "text", text: String(m.body?.text ?? ""), device: m.from.device, delivered: 0 });
         return;
@@ -705,6 +718,8 @@ export class Messenger extends EventTarget {
         await this.onFileMeta(m, conv, "out");
         return;
       case "sync": {
+        // "Delete for me" on another own device (DESIGN.md §6.6).
+        if (Array.isArray(m.body?.remove)) for (const id of m.body.remove.slice(0, RECEIPT_MAX)) await this.applyDelete(conv, id, m.time);
         const s = m.body?.contact;
         const c = s && this.contacts.get(s.account);
         if (c && ["accepted", "blocked", "declined"].includes(s.state)) {
@@ -726,6 +741,9 @@ export class Messenger extends EventTarget {
         return;
       case "reaction":
         await this.applyReaction(conv, m.body?.id, this.me.account, m.body?.e, m.time);
+        return;
+      case "retract":
+        await this.applyRetract(conv, m.body?.id, this.me.account, m.time);
         return;
       case "gifs":
         if (conv === this.me.account) await this.mergeGifs(m.body);
@@ -853,6 +871,11 @@ export class Messenger extends EventTarget {
     }
     for (const m of body?.messages ?? []) {
       if (typeof m?.id !== "string" || typeof m.conv !== "string") continue;
+      if (TOMBSTONES.includes(m.kind)) {
+        await this.mergeTombstone(m);
+        continue;
+      }
+      if (await this.superseded(m)) continue;
       if (await this.store.hasMessage(m.id)) continue;
       if (typeof m.time !== "number" || m.time < this.cutoff(m.conv)) continue;
       if (m.file) m.file.have = false;
@@ -955,6 +978,7 @@ export class Messenger extends EventTarget {
     m.file.missed = [...new Set(m.file.missed)];
     // Reactions may have come while the file was on its way; `m` is from before them.
     const cur = await this.store.message(m.id);
+    if (cur && TOMBSTONES.includes(cur.kind)) return; // taken back or deleted while it was on its way
     if (cur?.reactions) m.reactions = cur.reactions;
     await this.store.putMessage(m);
     const rest = this.pendingFiles.filter((x) => x.id !== m.id);
@@ -1005,6 +1029,7 @@ export class Messenger extends EventTarget {
     if (b.n !== Math.max(1, Math.ceil(b.size / p.CHUNK))) return;
     b.name = p.safeFileName(b.name);
     b.mime = p.safeMime(b.mime);
+    if (await this.superseded({ id: m.id, conv, dir, time: m.time, device: m.from.device })) return false;
     const fresh = !(await this.store.hasMessage(m.id));
     if (fresh) {
       const have = await this.store.hasFile(b.f);
@@ -1190,10 +1215,11 @@ export class Messenger extends EventTarget {
     // Complete, good or bad: the server may forget its queued copy.
     const good = t.next === t.meta.n && t.total === t.meta.size && p.b64(t.hash.digest()) === t.meta.sha256;
     if (!good) return this.dropTransfer(f, t, true);
+    const m = await this.store.message(t.message.id);
+    if (m && TOMBSTONES.includes(m.kind)) return this.dropTransfer(f, t, true); // taken back meanwhile
     await this.store.finishFile(f, t.meta.n, t.meta.size);
     await this.dropTransfer(f, t);
-    const m = await this.store.message(t.message.id);
-    if (m) {
+    if (m?.file) {
       m.file.have = true;
       await this.store.putMessage(m);
       if (m.dir === "in" && this.contacts.get(m.conv)?.state === "accepted") this.queueReceipt(m.conv, m.id);
@@ -1234,8 +1260,126 @@ export class Messenger extends EventTarget {
     return head ? p.imageSize(head) : null;
   }
 
+  /** The messages of a conversation as the user sees them (with "retracted" placeholders, without hidden records). */
   async messages(conv) {
-    return this.store.messages(conv);
+    return (await this.store.messages(conv)).filter((m) => !hidden(m));
+  }
+
+  // ── taking messages back (DESIGN.md §6.6) ─────────────────────────────────────────────────────────────────────
+
+  /** Who wrote a stored message. */
+  author(m) {
+    return m.dir === "out" ? this.me.account : m.conv;
+  }
+
+  /** Whether our message `m` can still be taken back from everyone. */
+  canRetract(m) {
+    return m?.dir === "out" && REACTABLE.includes(m.kind) && p.now() - m.time <= RETRACT_WINDOW
+      && this.contacts.get(m.conv)?.state === "accepted";
+  }
+
+  /**
+   * "Delete for everyone": our own text or file, within RETRACT_WINDOW of sending it. The other party's devices
+   * and our own replace it with a placeholder; devices that do not know `retract` (or a modified client) keep it.
+   */
+  async retract(conv, id) {
+    const c = this.contacts.get(conv);
+    if (c?.state !== "accepted") throw new ApiError(409, "not_accepted");
+    const m = await this.store.message(id);
+    if (!m || m.conv !== conv || m.dir !== "out" || !REACTABLE.includes(m.kind)) throw new ApiError(404, "no_message");
+    if (!this.canRetract(m)) throw new ApiError(409, "too_late");
+    const { time } = await this.send(conv, "retract", { id });
+    await this.applyRetract(conv, id, this.me.account, time);
+  }
+
+  /** Whether a retraction sent at `rt` may take back a message sent at `time` (both signed by the author). */
+  static retractable(time, rt) {
+    return Number.isSafeInteger(time) && Number.isSafeInteger(rt) && rt >= time - 300 && rt - time <= RETRACT_WINDOW;
+  }
+
+  /** Take back message `id` of `conv`, written by `who`, as told by a `retract` sent at `time`. */
+  async applyRetract(conv, id, who, time) {
+    if (typeof id !== "string" || id.length > 64 || !Number.isSafeInteger(time)) return;
+    const m = await this.store.message(id);
+    if (!m) {
+      // Not here (yet): a history hand-over may still bring it. Remembered, unseen, so that it does not show up.
+      if (time < this.cutoff(conv)) return;
+      const dir = who === this.me.account ? "out" : "in";
+      await this.store.putMessage({ id, conv, dir, kind: "retracted", by: who, time, rt: time, at: Date.now(), pending: true });
+      return;
+    }
+    if (m.conv !== conv || !REACTABLE.includes(m.kind) || this.author(m) !== who) return;
+    if (!Messenger.retractable(m.time, time)) return;
+    if (m.at && Date.now() - m.at > RETRACT_LATEST) return;
+    await this.tombstone(m, { kind: "retracted", by: who, rt: time });
+  }
+
+  /** Replace stored message `m` by a tombstone, with its file and anything still on its way for it. */
+  async tombstone(m, extra) {
+    const f = m.file?.f;
+    if (f) {
+      const t = this.files.get(f);
+      if (t) await this.dropTransfer(f, t);
+      if (this.pendingFiles.some((x) => x.id === m.id)) {
+        this.pendingFiles = this.pendingFiles.filter((x) => x.id !== m.id);
+        await this.store.setSecret("pendingFiles", this.pendingFiles);
+      }
+    }
+    const t = { id: m.id, conv: m.conv, dir: m.dir, time: m.time, at: m.at, device: m.device, ...extra };
+    await this.store.replaceMessage(t, f);
+    this.emit("messages", { conv: m.conv });
+  }
+
+  /**
+   * Whether a message arriving now (`rec`: id, conv, dir, time) must be ignored because it was taken back or deleted.
+   * A retraction that came before the message is made visible now; one that does not fit the message is dropped.
+   */
+  async superseded(rec) {
+    const t = await this.store.message(rec.id);
+    if (!t || !TOMBSTONES.includes(t.kind)) return false;
+    if (t.kind === "deleted" || !t.pending) return t.conv === rec.conv;
+    if (t.conv === rec.conv && t.by === this.author(rec) && Messenger.retractable(rec.time, t.rt)) {
+      await this.store.putMessage({ id: rec.id, conv: rec.conv, dir: rec.dir, time: rec.time, at: rec.at ?? Date.now(), device: rec.device, kind: "retracted", by: t.by, rt: t.rt });
+      this.emit("messages", { conv: rec.conv });
+      return true;
+    }
+    await this.store.deleteMessage(rec.id); // a retraction that did not belong to this message
+    return false;
+  }
+
+  /** A tombstone in a history hand-over from an own device. */
+  async mergeTombstone(m) {
+    if (!Number.isSafeInteger(m.time) || m.time < this.cutoff(m.conv)) return;
+    const cur = await this.store.message(m.id);
+    const t = { id: m.id, conv: m.conv, dir: m.dir === "out" ? "out" : "in", time: m.time, at: m.at, kind: m.kind };
+    if (m.kind === "retracted") Object.assign(t, { by: m.by, rt: m.rt }, m.pending ? { pending: true } : {});
+    if (!cur) return void (await this.store.putMessage(t));
+    if (cur.conv !== m.conv) return;
+    if (TOMBSTONES.includes(cur.kind)) {
+      if (cur.pending && !t.pending) await this.store.putMessage(t);
+      return;
+    }
+    if (t.kind === "retracted" && !t.pending && t.by === this.author(cur)) await this.tombstone(cur, { kind: "retracted", by: t.by, rt: t.rt });
+    else if (t.kind === "deleted") await this.tombstone(cur, { kind: "deleted" });
+  }
+
+  /** "Delete for me": gone from this device and our other devices; the other party keeps its copy. */
+  async deleteForMe(conv, id) {
+    const m = await this.store.message(id);
+    if (!m || m.conv !== conv || hidden(m)) throw new ApiError(404, "no_message");
+    await this.applyDelete(conv, id, p.now());
+    await this.sendOwn("sync", conv, { remove: [id] });
+  }
+
+  async applyDelete(conv, id, time) {
+    if (typeof id !== "string" || id.length > 64) return;
+    const m = await this.store.message(id);
+    if (!m) {
+      if (Number.isSafeInteger(time) && time >= this.cutoff(conv)) await this.store.putMessage({ id, conv, dir: "in", time, at: Date.now(), kind: "deleted" });
+      return;
+    }
+    if (m.conv !== conv || m.kind === "deleted") return;
+    await this.tombstone(m, { kind: "deleted" });
   }
 
   // ── reactions (DESIGN.md §6.5) ────────────────────────────────────────────────────────────────────────────────

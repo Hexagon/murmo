@@ -28,6 +28,12 @@ const imgNodes = new Map();
 const imgSizes = new Map();
 /** Outgoing files on their way: message id → share sent (0…1). */
 const sending = new Map();
+// Texts waiting for "Ångra" (holdForUndo): each entry sends its text now. When the page is hidden (another app on a
+// phone, a closed tab) they are sent at once rather than lost.
+const held = new Set();
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") for (const send of [...held]) send();
+});
 
 // ── tiny DOM helpers ────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -144,6 +150,7 @@ const MESSAGES = {
   giphy_failed: "Det gick inte att nå GIPHY.",
   bad_reaction: "Det går bara att reagera med en emoji.",
   no_message: "Meddelandet finns inte längre.",
+  too_late: "Meddelandet kan inte längre tas bort för alla (det går i 24 timmar). Du kan ta bort det för dig.",
 };
 
 function say(err) {
@@ -224,7 +231,9 @@ function dayLabel(t) {
 // ── settings of this browser, per account ───────────────────────────────────────────────────────────────────────
 
 // notify: on unless the user turns it off (the browser still asks for its permission, see askNotifications).
-const DEFAULTS = { notify: true, fileQueue: true, notifyPrompted: false };
+// undoSend: a text waits UNDO_SEND ms before it is encrypted and sent, and can be taken back in that time.
+const DEFAULTS = { notify: true, fileQueue: true, notifyPrompted: false, undoSend: true };
+const UNDO_SEND = 5000;
 
 function settings() {
   try {
@@ -328,6 +337,11 @@ const HELP = [
     "Sparar inte: meddelandehistorik, kontaktlistor, vem du har accepterat eller blockerat, IP-adresser i loggar.",
     "Ser i stunden: vilken enhet som skickar till vilka enheter, när och hur mycket. Det är ett krav för att leverera, men det skrivs inte ner.",
     "Den som känner till din identifierare kan se när dina enheter är anslutna (det behövs för att skicka filer direkt).",
+  ]],
+  ["Ångra och ta bort", [
+    "Med ”Ångra skickat” (på från början) väntar ett meddelande några sekunder innan det skickas. Ångrar du dig under tiden har ingen fått det – det är det enda sättet att vara helt säker.",
+    "”Ta bort för alla” går i 24 timmar och byter ut meddelandet mot en notering om att det togs bort, hos dig och mottagaren. Det kan inte nå det mottagaren redan sett eller sparat, och en enhet med en äldre eller ändrad version av Murmo kan behålla det. Bara den som skrev ett meddelande kan ta bort det för alla, och noteringen finns alltid kvar.",
+    "”Ta bort för mig” tar bort meddelandet på alla dina enheter. Den andra parten behåller sitt exemplar och får inte veta något.",
   ]],
   ["Filer", [
     "Filer krypteras med en egen nyckel som bara finns i det krypterade meddelandet om filen.",
@@ -1255,21 +1269,62 @@ function composer(c) {
     ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`;
     send.disabled = !ta.value.trim();
   };
+  const sendNow = async (text) => {
+    try {
+      await messenger.sendText(c.account, text);
+    } catch (x) {
+      if (!ta.value.trim()) {
+        ta.value = text;
+        grow();
+      }
+      toast(say(x));
+    }
+  };
   const submit = async () => {
     const text = ta.value.trim();
     if (!text) return;
     ta.value = "";
     grow();
-    try {
-      await messenger.sendText(c.account, text);
-    } catch (x) {
-      ta.value = text;
-      grow();
-      toast(say(x));
-    }
+    if (settings().undoSend) holdForUndo(text, sendNow, (back) => {
+      // Taken back before it was sent: nothing left this device. The text returns to an empty composer.
+      if (!ta.value.trim()) {
+        ta.value = back;
+        grow();
+        ta.focus();
+      } else toast("Meddelandet skickades inte.");
+    });
+    else await sendNow(text);
   };
   // Files on their way, one row each above the composer: name, how far it has come, then how it went.
   const uploads = h("div", { class: "uploads", role: "status", "aria-live": "polite" });
+  // "Ångra": a text waits a few seconds above the composer before it is encrypted and sent (DESIGN.md §6.6).
+  const holdForUndo = (text, go, undo) => {
+    let left = Math.round(UNDO_SEND / 1000);
+    const state = h("span", { class: "state", text: `Skickas om ${left} s` });
+    const fire = () => {
+      clearInterval(tick);
+      held.delete(fire);
+      row.remove();
+      go(text);
+    };
+    const back = h("button", {
+      type: "button", class: "btn small", text: "Ångra",
+      onclick: () => {
+        clearInterval(tick);
+        held.delete(fire);
+        row.remove();
+        undo(text);
+      },
+    });
+    const row = h("div", { class: "upload held" }, h("span", { class: "mark", "aria-hidden": "true", text: "…" }), h("span", { class: "name", dir: "auto", text }), state, back);
+    const tick = setInterval(() => {
+      left -= 1;
+      if (left <= 0) fire();
+      else state.textContent = `Skickas om ${left} s`;
+    }, 1000);
+    held.add(fire);
+    uploads.append(row);
+  };
   const upload = async (name, run) => {
     const bar = h("progress", { max: 1, value: 0 });
     const state = h("span", { class: "state", text: "Förbereder…" });
@@ -1687,7 +1742,50 @@ function showSending(id) {
   }
 }
 
+/** "Ta bort" under a message: for everyone (own, recent) or for me. */
+function moreButton(m) {
+  const btn = h("button", { type: "button", class: "react-btn more-btn", "aria-label": "Ta bort meddelandet", title: "Ta bort…", "aria-haspopup": "dialog" }, icon("more"));
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    messageMenu(m);
+  });
+  return btn;
+}
+
+function messageMenu(m) {
+  const forAll = m.kind !== "retracted" && messenger.canRetract(m);
+  const run = async (fn, done) => {
+    d.close();
+    try {
+      await fn();
+      toast(done);
+    } catch (x) {
+      toast(say(x));
+    }
+  };
+  const d = dialog(
+    h("h2", { text: m.kind === "retracted" ? "Ta bort platshållaren?" : "Ta bort meddelandet?" }),
+    forAll ? h("p", { class: "hint", text: `”Ta bort för alla” byter ut meddelandet mot ”Du tog bort det här meddelandet” på ${personName(m.conv)}s och dina enheter när de tar emot det. Har ${personName(m.conv)} redan sett det, sparat det eller använder en äldre version av Murmo kan det finnas kvar – det går inte att ta tillbaka det som redan visats.` }) : null,
+    !forAll && m.dir === "out" && m.kind !== "retracted" ? h("p", { class: "hint", text: "Det går att ta bort ett meddelande för alla i 24 timmar efter att det skickats. Det här kan bara tas bort för dig." }) : null,
+    h("p", { class: "hint", text: `”Ta bort för mig” tar bort det på alla dina enheter. ${personName(m.conv)} behåller sitt exemplar.` }),
+    h(
+      "div",
+      { class: "actions" },
+      h("button", { class: "btn", text: "Avbryt", onclick: () => d.close() }),
+      h("button", { class: "btn danger", text: "Ta bort för mig", onclick: () => run(() => messenger.deleteForMe(m.conv, m.id), "Borttaget för dig.") }),
+      forAll ? h("button", { class: "btn danger", text: "Ta bort för alla", onclick: () => run(() => messenger.retract(m.conv, m.id), "Borttaget för alla.") }) : null,
+    ),
+  );
+}
+
+function retractedView(m) {
+  const text = m.dir === "out" ? "Du tog bort det här meddelandet" : `${personName(m.conv)} tog bort ett meddelande`;
+  const meta = h("div", { class: "meta", text: clock(m.time) }, moreButton(m));
+  return h("div", { class: `msg ${m.dir} retracted` }, h("div", { class: "body", text }), meta);
+}
+
 function message(m) {
+  if (m.kind === "retracted") return retractedView(m);
   const body = m.kind === "file" ? fileView(m) : h("div", { class: emoji.emojiOnly(m.text) ? "body jumbo" : "body", dir: "auto", text: m.text ?? "" });
   const media = m.kind === "file" ? " media" : "";
   const meta = h("div", { class: "meta", text: clock(m.time) });
@@ -1712,6 +1810,7 @@ function message(m) {
   if (m.kind === "file" && m.file?.have && m.file.mime === "image/gif") meta.append(saveGifButton(m));
   const canReact = ["text", "file"].includes(m.kind) && messenger.contacts.get(m.conv)?.state === "accepted";
   if (canReact) meta.append(reactButton(m));
+  meta.append(moreButton(m));
   return h("div", { class: `msg ${m.dir}${media}` }, body, reactionsView(m, canReact), meta);
 }
 
@@ -2055,6 +2154,8 @@ function showAccountMenu() {
   });
   const queue = h("input", { type: "checkbox", checked: s.fileQueue, disabled: !info.file_queue });
   queue.addEventListener("change", () => setSetting("fileQueue", queue.checked));
+  const undo = h("input", { type: "checkbox", checked: s.undoSend });
+  undo.addEventListener("change", () => setSetting("undoSend", undo.checked));
   const d = dialog(
     h("h2", { text: messenger.handle }),
     h("p", { class: "hint", text: `Din identifierare${homeLabel(messenger.home) ? ` (från ${homeLabel(messenger.home)})` : ""}. Den som vill nå dig behöver den exakt – det går inte att söka efter användare.` }),
@@ -2075,6 +2176,12 @@ function showAccountMenu() {
           "Låt servern hålla filer åt mottagare som inte är anslutna",
           h("span", { class: "hint", style: "display:block", text: info.file_queue ? "Filen ligger krypterad på servern tills mottagarens enhet hämtat den, högst 14 dagar. Servern ser storlek och tidpunkt men inte innehåll eller namn. Av: filer går bara direkt mellan anslutna enheter och skickas annars när ni båda är anslutna." : "Avstängt på den här servern: filer går bara direkt mellan anslutna enheter." }),
         ),
+      ),
+      h(
+        "label",
+        { class: "check" },
+        undo,
+        h("span", {}, "Ångra skickat", h("span", { class: "hint", style: "display:block", text: `Ett meddelande väntar ${UNDO_SEND / 1000} sekunder innan det skickas och kan ångras under tiden. Det är det enda sättet att vara säker på att ingen fått det: ett skickat meddelande kan tas bort för alla, men den som redan sett det har sett det.` })),
       ),
       h("div", { class: "field", style: "margin:6px 0 0" }, h("label", { text: "Tema" }), themePicker()),
       h("button", { class: "btn danger", text: "Logga ut", onclick: () => { d.close(); logout(false); } }),
