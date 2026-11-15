@@ -141,6 +141,43 @@ try {
   await b.waitForFunction(() => [...document.querySelectorAll(".msg .filecard .fs")].some((e) => /50\s?000 × 50\s?000/.test(e.textContent)), { timeout: 20000 }); // the numbers are written the local way
   if ((await b.$$(".msg img.inline")).length !== 1) throw new Error("the oversized image was shown inline");
   if (!(await b.evaluate(() => window.__shownImg?.isConnected && window.__shownImg === document.querySelector(".msg img.inline")))) throw new Error("the picture was made again when the thread was drawn");
+  // A video is a card with a play button; played, it is shown in the conversation and goes on playing when the thread
+  // is drawn again. A video the browser cannot decode goes back to a card that says so.
+  const webm = await a.evaluate(async () => {
+    const c = Object.assign(document.createElement("canvas"), { width: 64, height: 48 });
+    const g = c.getContext("2d");
+    const rec = new MediaRecorder(c.captureStream(10), { mimeType: "video/webm" });
+    const parts = [];
+    rec.ondataavailable = (e) => parts.push(e.data);
+    const stopped = new Promise((r) => (rec.onstop = r));
+    rec.start();
+    for (let i = 0; i < 10; i++) {
+      g.fillStyle = `hsl(${i * 36} 80% 50%)`;
+      g.fillRect(0, 0, 64, 48);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    rec.stop();
+    await stopped;
+    const b = new Uint8Array(await new Blob(parts).arrayBuffer());
+    let s = "";
+    for (const x of b) s += String.fromCharCode(x);
+    return btoa(s);
+  });
+  fs.writeFileSync(`${shots}/klipp.webm`, Buffer.from(webm, "base64"));
+  fs.writeFileSync(`${shots}/trasig.mp4`, Buffer.alloc(4096, 7));
+  for (const name of ["klipp.webm", "trasig.mp4"]) {
+    const [chooser] = await Promise.all([a.waitForFileChooser(), a.click(".composer .icon-btn")]);
+    await chooser.accept([`${shots}/${name}`]);
+    await b.waitForFunction((n) => [...document.querySelectorAll(".msg .filecard .fn")].some((e) => e.textContent === n), { timeout: 20000 }, name);
+  }
+  const playOf = (name) => b.evaluateHandle((n) => [...document.querySelectorAll(".msg .filecard")].find((c) => c.querySelector(".fn")?.textContent === n)?.querySelector("button.ico.play"), name);
+  await (await playOf("klipp.webm")).click();
+  await b.waitForFunction(() => { const v = document.querySelector(".msg .videobox video"); return v && v.readyState >= 1 && v.duration > 0; }, { timeout: 10000 });
+  await b.evaluate(() => { window.__video = document.querySelector(".msg .videobox video"); });
+  await b.screenshot({ path: `${shots}/b-6v-video.png` });
+  await (await playOf("trasig.mp4")).click();
+  await b.waitForFunction(() => [...document.querySelectorAll(".msg .filecard .fs")].some((e) => /kan inte spelas upp här/.test(e.textContent)), { timeout: 10000 });
+  if (!(await b.evaluate(() => window.__video?.isConnected && window.__video === document.querySelector(".msg .videobox video")))) throw new Error("the video was made again when the thread was drawn");
   // Emoji: picked from the panel into the text, and a message of only emoji is shown larger.
   await a.click('.composer .icon-btn[aria-label="Emoji"]');
   await a.waitForSelector(".picker .emoji-grid .emoji", { visible: true, timeout: 5000 });

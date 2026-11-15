@@ -480,6 +480,14 @@ export function inlineImage(mime, size) {
   return IMAGE_TYPES.includes(mime) && size <= 25 * 1024 * 1024;
 }
 
+/** Video types offered for playing in the conversation (whether the browser can decode one is known only by trying). */
+export const VIDEO_TYPES = ["video/mp4", "video/webm", "video/ogg", "video/quicktime", "video/x-m4v", "video/3gpp"];
+
+/** Whether a file of this type can be played in the conversation instead of only saved. */
+export function inlineVideo(mime) {
+  return VIDEO_TYPES.includes(mime);
+}
+
 /** Whether bytes start like a GIF file ("GIF87a" or "GIF89a"), whatever type the sender claimed. */
 export function isGif(b) {
   if (!b || b.length < 6) return false;
