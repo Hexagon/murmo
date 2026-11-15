@@ -226,6 +226,8 @@ export default {
   "notify.noPush": "Las notificaciones están activadas mientras Murmo esté abierto en segundo plano. Este navegador o el servidor no admite push, así que una aplicación cerrada no se despierta.",
   "notify.on": "Las notificaciones están activadas, incluso con Murmo cerrado.",
   "notify.pushFailed": "Las notificaciones están activadas mientras Murmo esté abierto en segundo plano. No se pudo activar push ahora, así que una aplicación cerrada no se despierta.",
+  "notify.cannot": "Murmo no puede enviar notificaciones.",
+  "notify.askHint": "Haz clic para permitirlas.",
 
   // ── sidebar ──
   "side.conversations": "Conversaciones",

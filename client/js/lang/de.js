@@ -226,6 +226,8 @@ export default {
   "notify.noPush": "Benachrichtigungen sind an, solange Murmo im Hintergrund geöffnet ist. Dieser Browser oder der Server unterstützt kein Push, eine geschlossene App wird also nicht geweckt.",
   "notify.on": "Benachrichtigungen sind an, auch wenn Murmo geschlossen ist.",
   "notify.pushFailed": "Benachrichtigungen sind an, solange Murmo im Hintergrund geöffnet ist. Push ließ sich gerade nicht einschalten, eine geschlossene App wird also nicht geweckt.",
+  "notify.cannot": "Murmo kann keine Benachrichtigungen senden.",
+  "notify.askHint": "Klicke, um sie zu erlauben.",
 
   // ── sidebar ──
   "side.conversations": "Unterhaltungen",
