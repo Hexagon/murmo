@@ -1,6 +1,6 @@
-# mesg: threat model
+# Murmo: threat model
 
-What mesg protects, against whom, and what it accepts. It builds on rootcard's threat model
+What Murmo protects, against whom, and what it accepts. It builds on rootcard's threat model
 (`docs/THREAT_MODEL.md` in rootcard), whose identifiers appear as `rootcard T13`. Protocol details are in
 [DESIGN.md](DESIGN.md).
 
@@ -31,7 +31,7 @@ service.
 | X3 | Server operator or full server compromise | Everything stored, every connection, **serves the client code** |
 | X4 | Password thief | One user's password |
 | X5 | Device thief (offline) | A copy of a browser profile, without the user's OS session |
-| X6 | Malicious script in the page (XSS, malicious extension) | Run code in the mesg origin |
+| X6 | Malicious script in the page (XSS, malicious extension) | Run code in the Murmo origin |
 | X7 | Recovery-card thief | The recovery key |
 
 ## 3. Threats
@@ -51,7 +51,7 @@ service.
 | T11 | Enumerate users | X2 | No search; lookup needs the full handle; lookups rate limited per address | Tag brute force of a known username at the rate limit (rootcard AR7) |
 | T12 | Offline reading of a stolen browser profile | X5 | All local data, private keys included, encrypted under a key derived from a secret in the rootcard vault; the derived key lives in memory only | "Remember me" stores the derived key on the device (user's choice); a weak password lets someone with the profile *and* the vault guess |
 | T13 | Decrypt recorded traffic later with a stolen device | X3+X5 | Prekeys rotated weekly, private keys deleted after 21 days | Messages from the last three weeks; per-message forward secrecy in phase 2 |
-| T14 | Recovery-card thief | X7 | Out of mesg's hands: the thief can make a new instance, and a new device list | Contacts see a reset; rootcard AR3 |
+| T14 | Recovery-card thief | X7 | Out of Murmo's hands: the thief can make a new instance, and a new device list | Contacts see a reset; rootcard AR3 |
 | T15 | Malformed or huge input to the server | X2 | Size limits before parsing, rootcard's strict JSON reader, entry and device limits, per-connection limits | – |
 | T16 | Unauthenticated mailbox access | X2 | WebSocket requires a fresh challenge signed by a device present in the list | – |
 | T17 | Link-request spam to an account | X2 | Requires a fresh rootcard proof by the account key (the password), rate limited, at most 3 pending, kept 10 minutes | A password thief can annoy the owner (and is then visible) |
@@ -72,7 +72,7 @@ service.
 
 - **AR1: Web delivery.** Whoever serves the page can change it. The client is static, has no build step and no
   dependencies outside the vendored rootcard core, so it can be reviewed and pinned. A later phase adds a signed
-  release and an installable copy that is not served by the mesg server.
+  release and an installable copy that is not served by the Murmo server.
 - **AR2: TOFU without comparison.** Users who never compare safety codes get protection only against later changes.
 - **AR3: Metadata at send time.** The server sees which device sends to which devices when it happens. It does not
   store it.

@@ -41,7 +41,7 @@ pub fn json_body(data: &[u8]) {
     let _ = verify_list(ACCOUNT, &ACCOUNT_KEY, entries);
 }
 
-/// Small text parsers on the request path: query decoding, account ids, home origins, `MESG_TRUST_PROXY` and
+/// Small text parsers on the request path: query decoding, account ids, home origins, `MURMO_TRUST_PROXY` and
 /// `X-Forwarded-For`.
 pub fn http_text(data: &[u8]) {
     let Ok(s) = std::str::from_utf8(data) else {

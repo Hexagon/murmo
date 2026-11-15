@@ -20,7 +20,7 @@ pub type RcHost = Host<Identities, MemoryChallengeStore, MemorySessionStore>;
 /// Server configuration (from the environment, see `main.rs`).
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Public origin, such as `https://mesg.example`.
+    /// Public origin, such as `https://murmo.example`.
     pub origin: String,
     /// Address to bind.
     pub bind: String,
@@ -188,7 +188,7 @@ impl Hub {
 /// Windows at least this long survive a restart (see [`Limiter::save`]).
 pub const PERSIST_WINDOW: i64 = 600;
 
-/// Fixed-window counters. `scale` multiplies every limit (`MESG_LIMIT_SCALE`, for tests).
+/// Fixed-window counters. `scale` multiplies every limit (`MURMO_LIMIT_SCALE`, for tests).
 ///
 /// Keys are never kept as given: each is replaced by a keyed hash (HKDF-SHA-256 under a random secret kept in the
 /// database), so neither memory nor the database holds network addresses in the clear. Counters of windows of
@@ -268,7 +268,7 @@ impl Limiter {
     }
 
     fn hash(&self, key: &str) -> [u8; 16] {
-        let h = rootcard::crypto::hkdf(key.as_bytes(), &self.secret, b"mesg rate limit v1");
+        let h = rootcard::crypto::hkdf(key.as_bytes(), &self.secret, b"murmo rate limit v1");
         let mut out = [0u8; 16];
         out.copy_from_slice(&h[..16]);
         out
@@ -397,7 +397,7 @@ pub fn canonical_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
-/// The ranges `MESG_TRUST_PROXY=1` stands for: loopback and private networks, where a reverse proxy on the same
+/// The ranges `MURMO_TRUST_PROXY=1` stands for: loopback and private networks, where a reverse proxy on the same
 /// host or in the same container network connects from.
 pub const LOCAL_NETS: &[&str] = &[
     "127.0.0.0/8",
@@ -408,7 +408,7 @@ pub const LOCAL_NETS: &[&str] = &[
     "fc00::/7",
 ];
 
-/// Parse `MESG_TRUST_PROXY`: `0` or empty for none, `1` for [`LOCAL_NETS`], or a comma-separated list of addresses
+/// Parse `MURMO_TRUST_PROXY`: `0` or empty for none, `1` for [`LOCAL_NETS`], or a comma-separated list of addresses
 /// and ranges. Entries that do not parse are returned as errors.
 pub fn trusted_proxies(s: &str) -> Result<Vec<Net>, String> {
     let s = s.trim();
@@ -583,7 +583,7 @@ pub struct App {
     pub push: crate::push::Pusher,
 }
 
-/// The current state of an account as far as mesg is concerned.
+/// The current state of an account as far as murmo is concerned.
 pub struct Current {
     /// The rootcard base URL of the identity's home.
     pub home: String,

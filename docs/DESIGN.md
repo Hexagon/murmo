@@ -1,12 +1,16 @@
-# mesg: design
+# Murmo Secure Messenger: design
 
-mesg is a small web messenger with end-to-end encryption between browsers. Identity is a
-[rootcard](https://github.com/rootcard/rootcard) identity hosted by the mesg server itself. The server is a simple Rust
+Murmo is a small web messenger with end-to-end encryption between browsers. Identity is a
+[rootcard](https://github.com/rootcard/rootcard) identity hosted by the Murmo server itself. The server is a simple Rust
 program that stores as little as possible: identity data that rootcard needs, public device keys, and a mailbox of
 ciphertext that is deleted as soon as it is delivered.
 
 This document is the protocol and data model. Threats are in [THREAT_MODEL.md](THREAT_MODEL.md), phases in
 [PLAN.md](PLAN.md). Labels such as `[LGN-1]` refer to the rootcard specification.
+
+The project was called mesg before. Names that are part of signatures, key derivation or stored data keep that
+name, so that existing devices, messages and local data stay valid: the protocol labels (`mesg/…/v1`), the vault
+entry `app.mesg.localkey` and the IndexedDB databases (`mesg`, `mesg-<account>`).
 
 ---
 
@@ -32,7 +36,7 @@ This document is the protocol and data model. Threats are in [THREAT_MODEL.md](T
 ## 2. Components
 
 ```
- browser (client/)                      mesg-server (server/)                     browser
+ browser (client/)                      murmo-server (server/)                     browser
  ─────────────────                      ─────────────────────                     ───────
  rootcard login (vendored core) ──────► /id/…        rootcard home (rootcard-host) 
  device keys (WebCrypto, IndexedDB)     /api/v1/…    device lists, prekeys, link requests
@@ -41,13 +45,13 @@ This document is the protocol and data model. Threats are in [THREAT_MODEL.md](T
                                                      prekeys, mailbox (ciphertext + TTL)
 ```
 
-The server is one binary. `MESG_ORIGIN` (for example `https://mesg.example`) is its public origin; the rootcard base
-URL is `MESG_ORIGIN/id`, and `/.well-known/rootcard` points there ([HST-23]).
+The server is one binary. `MURMO_ORIGIN` (for example `https://murmo.example`) is its public origin; the rootcard base
+URL is `MURMO_ORIGIN/id`, and `/.well-known/rootcard` points there ([HST-23]).
 
 ## 3. Identity and login
 
-An identity is a rootcard identity at **this server's own home** (`MESG_ORIGIN/id`) or at **another allowed home**,
-such as rootcard.org (`MESG_REMOTE_HOMES`). The login screen asks where the identity lives: "this server", or a
+An identity is a rootcard identity at **this server's own home** (`MURMO_ORIGIN/id`) or at **another allowed home**,
+such as rootcard.org (`MURMO_REMOTE_HOMES`). The login screen asks where the identity lives: "this server", or a
 domain the user types, which the client resolves with the host pointer `/.well-known/rootcard` ([HST-23]).
 
 - **Register** (this server only): the browser makes the recovery key, the log, the vault and the profile, shows the
@@ -55,24 +59,24 @@ domain the user types, which the client resolves with the host pointer `/.well-k
   erased from memory. Identities elsewhere are created at their own home (for example on rootcard.org).
 - **Login** (any home, rootcard GETTING_STARTED §2.2): handle and password; the vault is fetched from the home with a
   lock proof and unlocked in the browser; the login is signed with the account key. The password never leaves the
-  browser, and for another home the mesg server never sees the login at all.
+  browser, and for another home the Murmo server never sees the login at all.
 - The unlocked account key stays in memory only while it is needed: to sign the genesis of a device list (§4.2) and
   to prove the identity when requesting a link (§4.3). It is overwritten afterwards.
-- High-power actions (password reset, moving, rotation) are never done in mesg. Users use rootcard's key tool.
+- High-power actions (password reset, moving, rotation) are never done in Murmo. Users use rootcard's key tool.
 
 ### 3.1 Identities from other homes
 
-- After logging in at another home, the client asks the mesg server to **connect** the identity
+- After logging in at another home, the client asks the Murmo server to **connect** the identity
   (`POST /api/v1/accounts/{account}/connect { home }`). The server fetches the log from that home, verifies it itself
   (`verify_log`: every event is signed by the recovery key), checks that the log names that home, and stores it. It
   refreshes the log every few minutes when the identity is used, never moves back to an older version and refuses
   forks ([VER-4]).
-- The server contacts **only allowlisted homes** (origins in `MESG_REMOTE_HOMES`; `*` allows any public https host
+- The server contacts **only allowlisted homes** (origins in `MURMO_REMOTE_HOMES`; `*` allows any public https host
   that is not an IP literal). Clients therefore cannot make the server fetch arbitrary addresses.
 - Clients never rely on the server's copy: they fetch every contact's log from the contact's own home and verify it.
   The page's CSP allows connections to this server and to the allowed homes only.
 - Proofs instead of sessions: a link request carries a rootcard **proof** by the account key (SPEC §14) for a
-  single-use challenge from the mesg server, addressed to the mesg origin. That works for every home, since the mesg
+  single-use challenge from the Murmo server, addressed to the Murmo origin. That works for every home, since the Murmo
   server cannot check another home's sessions.
 
 ## 4. Devices
@@ -203,7 +207,7 @@ come with the Double Ratchet in phase 2 (PLAN.md).
 ### 6.1 Starting
 
 A conversation starts only from an exact identifier `Name#TAG` (or `Name#TAG@host` to pick the home). The client asks
-the mesg server (`GET /api/v1/lookup?handle=…`), which answers only for identities it knows: its own and identities
+the Murmo server (`GET /api/v1/lookup?handle=…`), which answers only for identities it knows: its own and identities
 from other homes that have connected (§3.1). The full handle is required and lookups are rate limited. The client
 then fetches and verifies the identity's log from its home, verifies the device list, pins the account id and the
 head, and sends a `request` message with an optional short note (at most 500 characters).
@@ -257,7 +261,7 @@ No extra password. The rootcard password unlocks local encryption, but the **pri
 vault**:
 
 - The vault (private data `app.mesg.localkey`) holds one random 32-byte **local secret** per account, created at the
-  first mesg login. The vault is synced through the server, so every device of the account can get it after a
+  first Murmo login. The vault is synced through the server, so every device of the account can get it after a
   password login.
 - Each device derives its **local key** `HKDF(local secret, salt = random per-device salt, info = "mesg/local/v1")` and
   imports it as a non-extractable AES-256-GCM key, **in memory only**. A second key from the same secret
@@ -302,7 +306,7 @@ to this account's devices: the other party decides about their copies, and nothi
 
 Files go live between connected devices. For devices that are not connected the server may keep the encrypted
 chunks (the *file queue*), like the mailbox keeps envelopes; the sender can turn that off, and the operator can turn
-it off for the whole server (`MESG_FILE_QUEUE_MB=0`).
+it off for the whole server (`MURMO_FILE_QUEUE_MB=0`).
 
 The queue has four byte budgets, checked together when a chunk is queued and when a sender asks for room
 (`relay-space`, which also counts what it grants to one device against the totals for the next): per receiving device
@@ -388,7 +392,7 @@ secret in the database (HKDF-SHA-256, 128 bits), never by the address itself. Wi
 server does not reset them; nothing older than an hour is kept.
 
 Behind a reverse proxy, `X-Forwarded-For` is read only when the connection comes from a proxy listed in
-`MESG_TRUST_PROXY` (`1`: loopback and private networks). The hops are read from the right, skipping trusted proxies;
+`MURMO_TRUST_PROXY` (`1`: loopback and private networks). The hops are read from the right, skipping trusted proxies;
 the first other address is the client. Anything further left was written by the client and is ignored.
 
 ### 10.1 Notifications
@@ -396,7 +400,7 @@ the first other address is the client. Anything further left was written by the 
 A device is woken when something arrives while its page is frozen or closed, unless the user turns that off: the
 setting is on by default and the client asks for the browser's notification permission at the first click after login. Its service worker subscribes
 with the browser's push service (Web Push, VAPID key from `info.push_key`) and the page sends the endpoint URL
-(`push-sub`). The server accepts endpoints only on the push services in `MESG_PUSH_HOSTS` (no requests to arbitrary
+(`push-sub`). The server accepts endpoints only on the push services in `MURMO_PUSH_HOSTS` (no requests to arbitrary
 addresses).
 
 The sender marks recipients that should be notified (`notify: true` per recipient in `send`) for requests, texts and
@@ -425,4 +429,4 @@ never leaves the device.
 | VAPID key | signing push requests | while the server exists |
 | network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
 
-No access logs with addresses are written by default (`MESG_LOG=info` logs no addresses or account ids).
+No access logs with addresses are written by default (`MURMO_LOG=info` logs no addresses or account ids).

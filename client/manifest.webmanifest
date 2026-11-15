@@ -1,7 +1,7 @@
 {
-  "name": "mesg",
-  "short_name": "mesg",
-  "description": "Krypterade meddelanden med rootcard-identitet",
+  "name": "Murmo Secure Messenger",
+  "short_name": "Murmo",
+  "description": "Krypterade meddelanden med identitet från rootcard",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#faf9f5",

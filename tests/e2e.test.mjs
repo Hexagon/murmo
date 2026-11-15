@@ -1,4 +1,4 @@
-// End to end: the real server (target/debug/mesg-server) and the real client engine (client/js/core.js) in Node 22,
+// End to end: the real server (target/debug/murmo-server) and the real client engine (client/js/core.js) in Node 22,
 // with IndexedDB from fake-indexeddb. Covers registration, login, device genesis, message requests, text, linking a
 // second device with history hand-over, live file transfer, later federation between own devices, an identity whose
 // home is another rootcard server (a second server plays rootcard.org), and that the server keeps nothing once
@@ -23,8 +23,8 @@ import * as p from "../client/js/protocol.js";
 const PORT = 18000 + Math.floor(Math.random() * 1000);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 const OTHER = `http://127.0.0.1:${PORT + 1000}`; // another rootcard home, like rootcard.org
-const dir = mkdtempSync(join(tmpdir(), "mesg-e2e-"));
-const DB = join(dir, "mesg.sqlite"); // the mesg server's database
+const dir = mkdtempSync(join(tmpdir(), "murmo-e2e-"));
+const DB = join(dir, "murmo.sqlite"); // the murmo server's database
 let server, other, info;
 const api = new Api(ORIGIN);
 const otherApi = new Api(OTHER);
@@ -39,12 +39,12 @@ const pushService = createServer((req, res) => {
 });
 
 function start(origin, port, name, extra = {}) {
-  const bin = new URL("../target/debug/mesg-server", import.meta.url).pathname;
+  const bin = new URL("../target/debug/murmo-server", import.meta.url).pathname;
   assert.ok(existsSync(bin), "run `cargo build` first");
   return spawn(bin, [], {
     env: {
-      ...process.env, MESG_ORIGIN: origin, MESG_BIND: `127.0.0.1:${port}`, MESG_DB: join(dir, `${name}.sqlite`),
-      MESG_HOST_KEY_FILE: join(dir, `${name}.key`), MESG_CLIENT_DIR: "", MESG_LIMIT_SCALE: "10", ...extra,
+      ...process.env, MURMO_ORIGIN: origin, MURMO_BIND: `127.0.0.1:${port}`, MURMO_DB: join(dir, `${name}.sqlite`),
+      MURMO_HOST_KEY_FILE: join(dir, `${name}.key`), MURMO_CLIENT_DIR: "", MURMO_LIMIT_SCALE: "10", ...extra,
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -63,8 +63,8 @@ async function up(a) {
 
 before(async () => {
   await new Promise((r) => pushService.listen(PUSH_PORT, "127.0.0.1", r));
-  server = start(ORIGIN, PORT, "mesg", { MESG_REMOTE_HOMES: OTHER, MESG_PUSH_HOSTS: `http://127.0.0.1:${PUSH_PORT}` });
-  other = start(OTHER, PORT + 1000, "other", { MESG_REMOTE_HOMES: "" });
+  server = start(ORIGIN, PORT, "murmo", { MURMO_REMOTE_HOMES: OTHER, MURMO_PUSH_HOSTS: `http://127.0.0.1:${PUSH_PORT}` });
+  other = start(OTHER, PORT + 1000, "other", { MURMO_REMOTE_HOMES: "" });
   await up(api);
   await up(otherApi);
   info = await api.info();
@@ -333,9 +333,9 @@ test("a message to a device that is away wakes it with an empty push", async () 
 });
 
 test("an identity from another rootcard home (like rootcard.org) logs in and talks", async () => {
-  // Carol's identity lives at the other home; she never registers at the mesg server.
+  // Carol's identity lives at the other home; she never registers at the murmo server.
   const carolHandle = await register("Carol", PW, otherApi);
-  // Before she connects, the mesg server does not know her: no lookup by identifier.
+  // Before she connects, the murmo server does not know her: no lookup by identifier.
   await assert.rejects(api.lookup(carolHandle), (e) => e.code === "unknown_account");
   const carol = await device(carolHandle, PW, "carol1", undefined, otherApi.base);
   assert.equal(carol.home, otherApi.base);

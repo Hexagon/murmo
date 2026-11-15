@@ -104,8 +104,8 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
         .with("file_queue", app.cfg.file_queue > 0)
         .with("version", env!("CARGO_PKG_VERSION"))
         .with("source", env!("CARGO_PKG_REPOSITORY"));
-    if !env!("MESG_COMMIT").is_empty() {
-        m.insert("commit", env!("MESG_COMMIT").into());
+    if !env!("MURMO_COMMIT").is_empty() {
+        m.insert("commit", env!("MURMO_COMMIT").into());
     }
     if app.push.enabled() {
         m.insert("push_key", app.push.public.as_str().into());

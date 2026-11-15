@@ -71,7 +71,7 @@ test("file chunks and local encryption", async () => {
   assert.match(await p.safetyCode({ account: "A", head: "x" }, { account: "B", head: "y" }), /^(\d{4} ){11}\d{4}$/);
 });
 
-test("fixture for the Rust verifier", { skip: !process.env.MESG_WRITE_FIXTURE }, async () => {
+test("fixture for the Rust verifier", { skip: !process.env.MURMO_WRITE_FIXTURE }, async () => {
   const ak = await accountKey();
   const account = "A".repeat(52);
   const d1 = await device("one");

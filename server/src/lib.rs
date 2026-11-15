@@ -1,20 +1,23 @@
-//! mesg-server: a rootcard home and a blind mailbox for end-to-end encrypted messages. The binary (`main.rs`) only
+//! murmo-server: a rootcard home and a blind mailbox for end-to-end encrypted messages. The binary (`main.rs`) only
 //! calls [`run`]; the library exists so that the fuzz targets in `fuzz/` can reach the parsers (see [`fuzz`]).
 //!
 //! Configuration (environment):
 //!
 //! | Variable | Default | Meaning |
 //! |---|---|---|
-//! | `MESG_ORIGIN` | `http://127.0.0.1:8080` | public origin (https in production) |
-//! | `MESG_BIND` | `127.0.0.1:8080` | address to listen on |
-//! | `MESG_DB` | `mesg.sqlite` | SQLite database |
-//! | `MESG_HOST_KEY_FILE` | `mesg-host.key` | rootcard host key seed (created on first start, mode 0600) |
-//! | `MESG_CLIENT_DIR` | `client` | static client directory (empty: do not serve a client) |
-//! | `MESG_REALM` | `global` | rootcard realm for new identities |
-//! | `MESG_REMOTE_HOMES` | `https://rootcard.org` | other rootcard homes whose identities may log in (comma-separated origins; `*` for any public https host; empty for none) |
-//! | `MESG_REALMS` | `global` | realms accepted for identities from other homes (comma-separated) |
-//! | `MESG_TRUST_PROXY` | `0` | reverse proxies whose `X-Forwarded-For` is believed: `0` none, `1` loopback and private networks, or a comma-separated list of addresses and CIDR ranges |
-//! | `MESG_LIMIT_SCALE` | `1` | multiply every rate limit (tests only) |
+//! | `MURMO_ORIGIN` | `http://127.0.0.1:8080` | public origin (https in production) |
+//! | `MURMO_BIND` | `127.0.0.1:8080` | address to listen on |
+//! | `MURMO_DB` | `murmo.sqlite` | SQLite database |
+//! | `MURMO_HOST_KEY_FILE` | `murmo-host.key` | rootcard host key seed (created on first start, mode 0600) |
+//! | `MURMO_CLIENT_DIR` | `client` | static client directory (empty: do not serve a client) |
+//! | `MURMO_REALM` | `global` | rootcard realm for new identities |
+//! | `MURMO_REMOTE_HOMES` | `https://rootcard.org` | other rootcard homes whose identities may log in (comma-separated origins; `*` for any public https host; empty for none) |
+//! | `MURMO_REALMS` | `global` | realms accepted for identities from other homes (comma-separated) |
+//! | `MURMO_TRUST_PROXY` | `0` | reverse proxies whose `X-Forwarded-For` is believed: `0` none, `1` loopback and private networks, or a comma-separated list of addresses and CIDR ranges |
+//! | `MURMO_LIMIT_SCALE` | `1` | multiply every rate limit (tests only) |
+//!
+//! Each variable is also read under its old name, `MESG_…`, when the `MURMO_…` name is not set. The default files
+//! `murmo.sqlite` and `murmo-host.key` fall back to `mesg.sqlite` and `mesg-host.key` when only those exist.
 
 #![forbid(unsafe_code)]
 
@@ -78,8 +81,32 @@ impl FromRequestParts<Arc<App>> for ClientAddr {
     }
 }
 
+/// A setting from the environment. `MURMO_X` falls back to `MESG_X`, the name from before the project was renamed.
 fn env(name: &str, default: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| default.to_string())
+    std::env::var(name)
+        .or_else(|_| match name.strip_prefix("MURMO_") {
+            Some(rest) => std::env::var(format!("MESG_{rest}")),
+            None => Err(std::env::VarError::NotPresent),
+        })
+        .unwrap_or_else(|_| default.to_string())
+}
+
+/// A file setting whose default changed with the rename: when it is not set and the new default file does not
+/// exist but the old one does (`mesg.sqlite`, `mesg-host.key`), keep using the old file.
+fn file_env(name: &str, default: &str, old_default: &str) -> String {
+    let v = env(name, "");
+    if !v.is_empty() {
+        return v;
+    }
+    let (new, old) = (
+        std::path::Path::new(default),
+        std::path::Path::new(old_default),
+    );
+    if !new.exists() && old.exists() {
+        eprintln!("{name}: using {old_default} (the default before the rename to murmo)");
+        return old_default.to_string();
+    }
+    default.to_string()
 }
 
 fn list(s: &str) -> Vec<String> {
@@ -101,38 +128,38 @@ fn megabytes(name: &str, default: i64) -> i64 {
 
 fn config() -> Result<Config, String> {
     Ok(Config {
-        origin: env("MESG_ORIGIN", "http://127.0.0.1:8080")
+        origin: env("MURMO_ORIGIN", "http://127.0.0.1:8080")
             .trim_end_matches('/')
             .to_string(),
-        bind: env("MESG_BIND", "127.0.0.1:8080"),
-        db: env("MESG_DB", "mesg.sqlite"),
-        key_file: env("MESG_HOST_KEY_FILE", "mesg-host.key"),
-        client_dir: env("MESG_CLIENT_DIR", "client"),
-        realm: env("MESG_REALM", "global"),
-        realms: list(&env("MESG_REALMS", "global")),
-        remote_homes: list(&env("MESG_REMOTE_HOMES", "https://rootcard.org"))
+        bind: env("MURMO_BIND", "127.0.0.1:8080"),
+        db: file_env("MURMO_DB", "murmo.sqlite", "mesg.sqlite"),
+        key_file: file_env("MURMO_HOST_KEY_FILE", "murmo-host.key", "mesg-host.key"),
+        client_dir: env("MURMO_CLIENT_DIR", "client"),
+        realm: env("MURMO_REALM", "global"),
+        realms: list(&env("MURMO_REALMS", "global")),
+        remote_homes: list(&env("MURMO_REMOTE_HOMES", "https://rootcard.org"))
             .into_iter()
             .filter(|h| h != "*")
             .map(|h| h.trim_end_matches('/').to_ascii_lowercase())
             .collect(),
-        any_home: list(&env("MESG_REMOTE_HOMES", "https://rootcard.org"))
+        any_home: list(&env("MURMO_REMOTE_HOMES", "https://rootcard.org"))
             .iter()
             .any(|h| h == "*"),
-        trust_proxy: app::trusted_proxies(&env("MESG_TRUST_PROXY", "0"))
-            .map_err(|e| format!("MESG_TRUST_PROXY: {e}"))?,
-        limit_scale: env("MESG_LIMIT_SCALE", "1").parse().unwrap_or(1),
-        file_queue: megabytes("MESG_FILE_QUEUE_MB", 150),
-        file_queue_total: megabytes("MESG_FILE_QUEUE_TOTAL_MB", 2048),
-        file_queue_sender: megabytes("MESG_FILE_QUEUE_SENDER_MB", 50),
-        file_queue_account: megabytes("MESG_FILE_QUEUE_ACCOUNT_MB", 300),
+        trust_proxy: app::trusted_proxies(&env("MURMO_TRUST_PROXY", "0"))
+            .map_err(|e| format!("MURMO_TRUST_PROXY: {e}"))?,
+        limit_scale: env("MURMO_LIMIT_SCALE", "1").parse().unwrap_or(1),
+        file_queue: megabytes("MURMO_FILE_QUEUE_MB", 150),
+        file_queue_total: megabytes("MURMO_FILE_QUEUE_TOTAL_MB", 2048),
+        file_queue_sender: megabytes("MURMO_FILE_QUEUE_SENDER_MB", 50),
+        file_queue_account: megabytes("MURMO_FILE_QUEUE_ACCOUNT_MB", 300),
         push_hosts: list(&env(
-            "MESG_PUSH_HOSTS",
+            "MURMO_PUSH_HOSTS",
             "fcm.googleapis.com,updates.push.services.mozilla.com,*.push.apple.com,*.notify.windows.com",
         ))
         .into_iter()
         .map(|h| h.trim_end_matches('/').to_ascii_lowercase())
         .collect(),
-        push_contact: env("MESG_PUSH_CONTACT", "")
+        push_contact: env("MURMO_PUSH_CONTACT", "")
             .chars()
             .filter(|c| c.is_ascii_graphic() && *c != '"' && *c != '\\')
             .collect(),
@@ -294,7 +321,7 @@ pub fn build(
 /// Run the server with the configuration from the environment until Ctrl-C or SIGTERM.
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = config()?;
-    rootcard::check_base_url(&cfg.origin).map_err(|e| format!("MESG_ORIGIN: {e}"))?;
+    rootcard::check_base_url(&cfg.origin).map_err(|e| format!("MURMO_ORIGIN: {e}"))?;
     let seed = host_key(&cfg.key_file)?;
     let app = build(&cfg, db::Db::open(&cfg.db)?, seed)?;
     let sweeper = app.clone();
@@ -314,7 +341,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
-    eprintln!("mesg-server for {} on {}", cfg.origin, cfg.bind);
+    eprintln!("murmo-server for {} on {}", cfg.origin, cfg.bind);
     let last = app.clone();
     axum::serve(
         listener,

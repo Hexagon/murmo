@@ -1,10 +1,14 @@
-# mesg
+# Murmo Secure Messenger
 
-A small web messenger with end-to-end encryption between browsers. Identity is [rootcard](https://rootcard.org): an
-identity at the mesg server's own rootcard home, or at another home such as rootcard.org. The server is one Rust
-binary that stores as little as possible.
+A small web messenger with end-to-end encryption between browsers, **built on [rootcard](https://rootcard.org) for
+identity**.
 
-> **Status: early.** mesg 0.1 is a working first version built on rootcard 0.3.4 (pre-1.0, not externally reviewed).
+You need no phone number or e-mail address: you log in with a rootcard identity, one at the Murmo server's own
+rootcard home, or at another home such as rootcard.org. rootcard gives the identity a verifiable log of keys, an
+encrypted vault and a recovery card, and Murmo roots its device lists, and with them the end-to-end encryption, in
+that log rather than in trust in the server. The server is one Rust binary that stores as little as possible.
+
+> **Status: early.** Murmo 0.1 is a working first version built on rootcard 0.3.4 (pre-1.0, not externally reviewed).
 > Neither has had a security review. Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) before trusting it with anything.
 
 ## What it does
@@ -53,31 +57,34 @@ Configuration (environment):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MESG_ORIGIN` | `http://127.0.0.1:8080` | public origin; must be `https://` except on loopback |
-| `MESG_BIND` | `127.0.0.1:8080` | listen address (put a TLS reverse proxy in front) |
-| `MESG_DB` | `mesg.sqlite` | SQLite database |
-| `MESG_HOST_KEY_FILE` | `mesg-host.key` | rootcard host key, created on first start (back it up, keep it secret) |
-| `MESG_CLIENT_DIR` | `client` | static client to serve (empty: none) |
-| `MESG_REALM` | `global` | rootcard realm for identities registered here |
-| `MESG_REMOTE_HOMES` | `https://rootcard.org` | other homes whose identities may log in (comma-separated origins, `*` for any https host, empty for none) |
-| `MESG_REALMS` | `global` | realms accepted from other homes |
-| `MESG_TRUST_PROXY` | `0` | proxies whose `X-Forwarded-For` is believed: `0` none, `1` loopback and private networks, or a list of addresses and CIDR ranges (`10.1.2.3,fd00::/8`) |
-| `MESG_FILE_QUEUE_MB` | `150` | encrypted file chunks kept per device that is away (`0`: files only go live) |
-| `MESG_FILE_QUEUE_TOTAL_MB` | `2048` | file chunks kept in total |
-| `MESG_FILE_QUEUE_SENDER_MB` | `50` | file chunks one account may queue for one device of another account |
-| `MESG_FILE_QUEUE_ACCOUNT_MB` | `300` | file chunks one account may queue in total |
-| `MESG_PUSH_HOSTS` | the push services of Chrome, Firefox, Safari, Edge | push-service hosts accepted for notifications (`*.` for subdomains, empty: no push) |
-| `MESG_PUSH_CONTACT` | `MESG_ORIGIN` | contact sent to push services (`mailto:` or `https:` URL) |
+| `MURMO_ORIGIN` | `http://127.0.0.1:8080` | public origin; must be `https://` except on loopback |
+| `MURMO_BIND` | `127.0.0.1:8080` | listen address (put a TLS reverse proxy in front) |
+| `MURMO_DB` | `murmo.sqlite` | SQLite database |
+| `MURMO_HOST_KEY_FILE` | `murmo-host.key` | rootcard host key, created on first start (back it up, keep it secret) |
+| `MURMO_CLIENT_DIR` | `client` | static client to serve (empty: none) |
+| `MURMO_REALM` | `global` | rootcard realm for identities registered here |
+| `MURMO_REMOTE_HOMES` | `https://rootcard.org` | other homes whose identities may log in (comma-separated origins, `*` for any https host, empty for none) |
+| `MURMO_REALMS` | `global` | realms accepted from other homes |
+| `MURMO_TRUST_PROXY` | `0` | proxies whose `X-Forwarded-For` is believed: `0` none, `1` loopback and private networks, or a list of addresses and CIDR ranges (`10.1.2.3,fd00::/8`) |
+| `MURMO_FILE_QUEUE_MB` | `150` | encrypted file chunks kept per device that is away (`0`: files only go live) |
+| `MURMO_FILE_QUEUE_TOTAL_MB` | `2048` | file chunks kept in total |
+| `MURMO_FILE_QUEUE_SENDER_MB` | `50` | file chunks one account may queue for one device of another account |
+| `MURMO_FILE_QUEUE_ACCOUNT_MB` | `300` | file chunks one account may queue in total |
+| `MURMO_PUSH_HOSTS` | the push services of Chrome, Firefox, Safari, Edge | push-service hosts accepted for notifications (`*.` for subdomains, empty: no push) |
+| `MURMO_PUSH_CONTACT` | `MURMO_ORIGIN` | contact sent to push services (`mailto:` or `https:` URL) |
 
-The version shown in the app ("Säkerhet och integritet") is the commit the server was built from: `MESG_COMMIT` or
+Murmo was called mesg before. The old variable names (`MESG_…`) still work when the new ones are not set, and an
+existing `mesg.sqlite` / `mesg-host.key` is used when the new default files do not exist yet.
+
+The version shown in the app ("Säkerhet och integritet") is the commit the server was built from: `MURMO_COMMIT` or
 `GITHUB_SHA` at build time, otherwise `git rev-parse HEAD`.
 
-The `MESG_ORIGIN` goes into users' signed rootcard logs as their home address: choose it once.
+The `MURMO_ORIGIN` goes into users' signed rootcard logs as their home address: choose it once.
 
 ## Layout
 
 ```
-server/        mesg-server (Rust): rootcard home (rootcard-host), device lists, link requests, WebSocket mailbox,
+server/        murmo-server (Rust): rootcard home (rootcard-host), device lists, link requests, WebSocket mailbox,
                live relay, remote homes, rate limits, security headers
 client/        the web client: plain ES modules, no build step, no dependencies besides the vendored rootcard core
   js/protocol.js   device lists, prekeys, envelopes, signatures, codes, file chunks (pure, also runs in Node)
@@ -94,7 +101,7 @@ tests/         protocol tests, end-to-end test (two servers, real client engine)
 cargo test                    # server unit tests, incl. a device list made by the JS client
 cargo build && npm ci && npm test        # protocol tests + end to end against two running servers
 # Browser smoke test (headless Chrome, fails on any console error such as a CSP violation):
-MESG_ORIGIN=http://127.0.0.1:18100 MESG_BIND=127.0.0.1:18100 MESG_LIMIT_SCALE=10 cargo run &
+MURMO_ORIGIN=http://127.0.0.1:18100 MURMO_BIND=127.0.0.1:18100 MURMO_LIMIT_SCALE=10 cargo run &
 CHROME=/path/to/chrome npm run test:ui
 # Fuzzing (nightly, cargo install cargo-fuzz): json_body, http_text, ws_frame
 cd fuzz && cargo +nightly fuzz run ws_frame
