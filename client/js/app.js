@@ -350,6 +350,7 @@ function languagePicker(redraw) {
       onchange: () => {
         i18n.setLanguage(select.value || null);
         i18n.translatePage();
+        updateTitle(); // translatePage resets the title; put the count back
         redraw();
       },
     },
@@ -966,6 +967,18 @@ addEventListener("online", wake);
 
 const unread = new Set(); // conversations with something new since the page was last looked at
 
+/**
+ * The tab title: "(N) Murmo" while anything waits — unread conversations and pending requests, counted once each —
+ * and the page's own title otherwise. Only the count leaves the tab, never who or what.
+ */
+function updateTitle() {
+  let n = 0;
+  for (const c of messenger?.contactList() ?? []) {
+    if (c.state === "incoming" || (c.state === "accepted" && unread.has(c.account))) n++;
+  }
+  document.title = n ? `(${n}) Murmo` : tr("page.title");
+}
+
 function onIncoming({ conv, kind }) {
   const looking = document.visibilityState === "visible" && document.hasFocus();
   if (looking && conv === current) return;
@@ -1173,6 +1186,7 @@ function convItem(c) {
 }
 
 function renderSidebar() {
+  updateTitle();
   if (!ui.sideList || !messenger) return;
   ui.filesBtn?.setAttribute("aria-pressed", String(!!filesView && !filesView.conv));
   updateBell();
@@ -3741,6 +3755,8 @@ async function logout(forget) {
   messenger = null;
   current = null;
   ui.sideList = null;
+  unread.clear();
+  updateTitle();
   if (session) await id.logout(api, session.home, session.token);
   session = null;
   if (account) {

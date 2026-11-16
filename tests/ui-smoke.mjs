@@ -101,17 +101,21 @@ try {
   await a.screenshot({ path: `${shots}/a-5-requested.png` });
   // Bob sees the request and accepts.
   await b.waitForFunction(() => [...document.querySelectorAll(".side-head")].some((x) => x.textContent === "Förfrågningar"), { timeout: 20000 });
+  // The tab title counts what waits (the Omarchy bar reads it for its badge): one request, and nothing once answered.
+  await b.waitForFunction(() => document.title === "(1) Murmo", { timeout: 5000 });
   await b.click(".conv");
   await sleep(500);
   await b.screenshot({ path: `${shots}/b-5-request.png` });
   await clickText(b, "Acceptera");
   await b.waitForSelector(".composer textarea", { timeout: 20000 });
+  await b.waitForFunction(() => !document.title.startsWith("("), { timeout: 5000 });
   // Alice's open conversation turns into a chat by itself once Bob accepts (no reload).
   await a.waitForSelector(".composer textarea", { timeout: 20000 });
   await b.type(".composer textarea", "Hej Alice! Kul att höras.\nAndra raden.");
   await b.keyboard.press("Enter");
   // Alice opens the conversation and replies; sends an image.
   await a.waitForFunction(() => !document.querySelector(".badge.muted"), { timeout: 20000 });
+
   await a.click(".conv");
   await a.waitForSelector(".composer textarea", { timeout: 20000 });
   await a.type(".composer textarea", "Hej! Här är en bild:");
@@ -452,7 +456,8 @@ try {
   await a.waitForFunction(() => document.querySelectorAll(".side-list .conv.hit").length === 1 && document.querySelector(".side-list .conv.hit mark")?.textContent === "Andra rad", { timeout: 5000 });
   await a.screenshot({ path: `${shots}/a-7b-search.png` });
   await a.evaluate(() => { const s = document.querySelector(".main .scroll"); s.scrollTop = s.scrollHeight; });
-  await a.click(".side-list .conv.hit");
+  // Clicked in the page: the result list may be drawn again (a message event) between finding the hit and the click.
+  await a.waitForFunction(() => { const hit = document.querySelector(".side-list .conv.hit"); hit?.click(); return !!hit; }, { timeout: 5000 });
   await a.waitForFunction(() => {
     const m = document.querySelector(".msg.found");
     if (!m || !m.textContent.includes("Andra raden.")) return false;
