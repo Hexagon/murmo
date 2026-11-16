@@ -26,6 +26,10 @@
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --radius: 14px;
+  /* code in messages (§6.10): every colour at least 4.5:1 against --code-bg */
+  --code-bg: #f6f8f9;
+  --tk-k: #7a3e9d; --tk-s: #24704b; --tk-c: #5f6b73; --tk-n: #9a4a00; --tk-l: #1d5c6e; --tk-t: #0b6587;
+  --tk-f: #3949a3; --tk-a: #8a4b00; --tk-v: #b3261e; --tk-tag: #1d5c6e; --tk-add: #24704b; --tk-del: #b3261e;
 }
 
 /* The dark colours twice, alike: once for "automatic" when the system is dark, once for the "dark" choice. */
@@ -47,6 +51,9 @@
     --ok: #7fc59b;
     --focus: #5fb4c466;
     --shadow: 0 1px 2px #00000040, 0 4px 16px #00000033;
+  --code-bg: #0e161b;
+  --tk-k: #c9a0ec; --tk-s: #8fd0a1; --tk-c: #8d9ba3; --tk-n: #f0b07a; --tk-l: #7cc4d1; --tk-t: #7ec3e3;
+  --tk-f: #a8b6ff; --tk-a: #e6c07b; --tk-v: #f2867e; --tk-tag: #7cc4d1; --tk-add: #8fd0a1; --tk-del: #f2867e;
   }
 }
 
@@ -69,6 +76,9 @@
   --ok: #7fc59b;
   --focus: #5fb4c466;
   --shadow: 0 1px 2px #00000040, 0 4px 16px #00000033;
+  --code-bg: #0e161b;
+  --tk-k: #c9a0ec; --tk-s: #8fd0a1; --tk-c: #8d9ba3; --tk-n: #f0b07a; --tk-l: #7cc4d1; --tk-t: #7ec3e3;
+  --tk-f: #a8b6ff; --tk-a: #e6c07b; --tk-v: #f2867e; --tk-tag: #7cc4d1; --tk-add: #8fd0a1; --tk-del: #f2867e;
 }
 
 /* ── base ─────────────────────────────────────────────────────────────────────────────────────────────────────── */
@@ -260,6 +270,25 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .msg .meta .delivery { display: inline-flex; vertical-align: -3px; margin-left: 4px; color: var(--muted); }
 .msg .meta .delivery.ok { color: var(--ok); }
 .msg .meta .edited { color: var(--faint); }
+
+/* code (§6.10): inline code in the line, blocks on their own with a label and a copy button; code scrolls sideways */
+.msg code { font-family: var(--mono); font-size: .9em; }
+.msg code.ic { background: var(--code-bg); border: 1px solid var(--line); border-radius: 5px; padding: 0 .3em; unicode-bidi: isolate; }
+.msg .body.rich { display: block; }
+.msg > .body.rich + .meta { float: none; display: block; text-align: right; margin: 2px 0 -2px; }
+.codeblock { display: block; margin: 6px 0; border: 1px solid var(--line); border-radius: 10px; background: var(--code-bg); overflow: hidden; white-space: normal; }
+.codeblock:first-child { margin-top: 2px; }
+.cb-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 10px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.cb-lang { color: var(--muted); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cb-copy { font-size: 12px; text-decoration: none; }
+.cb-copy:hover { text-decoration: underline; }
+.codeblock pre { margin: 0; padding: 8px 10px; overflow-x: auto; white-space: pre; tab-size: 4; line-height: 1.45; font-size: 13px; text-align: left; }
+.codeblock pre:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.codeblock pre code { font-size: inherit; }
+.tk-k { color: var(--tk-k); } .tk-s { color: var(--tk-s); } .tk-c { color: var(--tk-c); font-style: italic; }
+.tk-n { color: var(--tk-n); } .tk-l { color: var(--tk-l); } .tk-t { color: var(--tk-t); } .tk-f { color: var(--tk-f); }
+.tk-a { color: var(--tk-a); } .tk-v { color: var(--tk-v); } .tk-tag { color: var(--tk-tag); }
+.tk-add { color: var(--tk-add); } .tk-del { color: var(--tk-del); } .tk-meta { color: var(--tk-c); font-weight: 600; }
 
 /* pictures and files */
 .msg .frame { position: relative; }

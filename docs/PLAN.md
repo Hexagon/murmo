@@ -46,6 +46,8 @@ Open, in order of priority:
 - [x] Faster file relay: chunks as binary WebSocket frames (1.0× instead of 1.78× the file); a device that asks for
       a file grants the sender a budget of its own (`relay-grant`); queued chunks have a budget of their own; the
       file queue counts a file's real size (`DESIGN.md` §10.2, §13.8)
+- [x] Code in messages: inline code and fenced blocks with colours for common languages, nothing else of Markdown
+      (`DESIGN.md` §6.10)
 - [ ] Signed, reproducible client release with published hashes; installable copy not served by the server
 - [ ] History from contacts after every device is lost: a contact sends its copy of a conversation on request,
       shown as the contact's copy (`DESIGN.md` §7.1, option 3)

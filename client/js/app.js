@@ -5,6 +5,7 @@ import { Api, ApiError } from "./api.js";
 import * as id from "./identity.js";
 import { EPHEMERAL_TTLS, GIF_MAX_BYTES, GIF_MAX_COUNT, Messenger, Store, setupDevice, validRetention } from "./core.js";
 import * as emoji from "./emoji.js";
+import * as code from "./code.js";
 import * as giphy from "./giphy.js";
 import { accounts } from "./store.js";
 import * as notify from "./notify.js";
@@ -1671,7 +1672,13 @@ function composer(c) {
     if (canHover()) ta.focus();
   };
   ta.addEventListener("input", grow);
-  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } });
+  ta.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+    // Inside an open code block (```), Enter is a new line; Ctrl+Enter or ⌘+Enter still sends (DESIGN.md §6.10).
+    if (!(e.ctrlKey || e.metaKey) && code.inFence(ta.value.slice(0, ta.selectionStart ?? ta.value.length))) return;
+    e.preventDefault();
+    submit();
+  });
   ta.addEventListener("paste", (e) => {
     const fs = [...(e.clipboardData?.files ?? [])];
     if (fs.length) { e.preventDefault(); sendFiles(fs); }
@@ -2341,9 +2348,52 @@ function retractedView(m) {
   return h("div", { class: `msg ${m.dir} retracted` }, h("div", { class: "body", text }), meta);
 }
 
+// ── code in messages (DESIGN.md §6.10) ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * A text message's body. Without backticks it is one text node, as always; otherwise `code.parse` cuts it into text,
+ * inline code and blocks, and each piece becomes text nodes inside fixed elements: nothing from the text becomes
+ * markup, a URL or a class other than code.CLASSES.
+ */
+function textBody(text) {
+  const parts = code.parse(text);
+  if (parts.length === 1 && parts[0].type === "text") return h("div", { class: emoji.emojiOnly(text) ? "body jumbo" : "body", dir: "auto", text });
+  const rich = parts.some((x) => x.type === "block");
+  return h(
+    "div",
+    { class: rich ? "body rich" : "body", dir: "auto" },
+    parts.map((x) => (x.type === "text" ? x.text : x.type === "code" ? h("code", { class: "ic", text: x.text }) : codeBlock(x))),
+  );
+}
+
+/** A fenced block: its language (if any), a copy button, and the code, coloured when the language is known. */
+function codeBlock(b) {
+  const name = code.label(b.lang, b.label);
+  const tokens = code.highlight(b.lang, b.text).map(([c, s]) => (c && code.CLASSES.has(c) ? h("span", { class: `tk-${c}`, text: s }) : s));
+  return h(
+    "div",
+    { class: "codeblock", role: "group", "aria-label": name ? tr("code.blockNamed", { name }) : tr("code.block") },
+    h(
+      "div",
+      { class: "cb-head" },
+      h("span", { class: "cb-lang", text: name }),
+      h("button", { class: "link cb-copy", type: "button", text: tr("common.copy"), title: tr("code.copyTitle"), onclick: () => copyCode(b.text) }),
+    ),
+    // Code reads left to right whatever the text around it; the block scrolls sideways rather than wrapping.
+    h("pre", { dir: "ltr", tabindex: "0" }, h("code", {}, tokens)),
+  );
+}
+
+function copyCode(text) {
+  const done = () => toast(tr("code.copied"));
+  const failed = () => toast(tr("code.copyFailed"));
+  if (!navigator.clipboard) return failed();
+  navigator.clipboard.writeText(text).then(done, failed);
+}
+
 function message(m) {
   if (m.kind === "retracted") return retractedView(m);
-  const body = m.file ? fileView(m) : h("div", { class: emoji.emojiOnly(m.text) ? "body jumbo" : "body", dir: "auto", text: m.text ?? "" });
+  const body = m.file ? fileView(m) : textBody(m.text ?? "");
   const media = m.file ? " media" : "";
   const meta = h("div", { class: "meta" }, timeView(m.time));
   if (m.kind === "ephemeral") meta.append(fuseView(m));
