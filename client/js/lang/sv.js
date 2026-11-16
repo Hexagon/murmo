@@ -266,6 +266,7 @@ export default {
   "conv.safety": "Säkerhetskod",
   "conv.more": "Fler val",
   "conv.devicesChanged": "{handle} har ändrat sina enheter. Säkerhetskoden har ändrats.",
+  "conv.dismiss": "Stäng",
   "conv.requested": "Förfrågan skickad. Du kan skriva när {handle} har accepterat.",
   "conv.blocked": "Blockerad. ",
   "conv.unblock": "Häv blockering",
@@ -275,6 +276,7 @@ export default {
   "conv.decline": "Neka",
   "conv.block": "Blockera",
   "conv.empty": "Inga meddelanden ännu.",
+  "conv.older": "Visa äldre meddelanden",
 
   // ── new conversation ──
   "new.notePlaceholder": "Hej, det är jag!",

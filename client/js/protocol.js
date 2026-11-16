@@ -47,26 +47,56 @@ export const MAX_PARTS = chunkCount(MAX_FILE);
  */
 export const MAX_INLINE = 100 * 1024 * 1024;
 /**
- * Bytes a file of `size` bytes takes in the server's file queue, per device: the encrypted chunks as sent (base64
- * and framing), an upper bound. The unit of `relay-space` and of `file_queue_limits` in `/api/v1/info`.
+ * Bytes a file of `size` bytes takes in the server's file queue, per device, as it is sent: an upper bound. The unit
+ * of `relay-space` and of `file_queue_limits` in `/api/v1/info`.
+ * - `binary` (binary relay frames, DESIGN.md §10.2): the server keeps each chunk's payload, the ciphertext with
+ *   its tag and at most 73 bytes of id and indices: about 1.0× the file.
+ * - text frames: the ciphertext is base64url inside canonical JSON that is base64url again, so 16/9 (1.78×) of the
+ *   file, plus the JSON and the tag per chunk.
  */
-export const queuedBytes = (size) => Math.ceil(size * 1.4) + chunkCount(size) * 256;
+export const queuedBytes = (size, binary = false) =>
+  binary ? size + chunkCount(size) * 96 : Math.ceil((size * 16) / 9) + chunkCount(size) * 256;
 /** The largest file (at most MAX_FILE) whose queued bytes fit in `limit`; -1 if not even an empty one does. */
-export function largestQueued(limit) {
-  if (!(limit >= queuedBytes(0))) return -1;
+export function largestQueued(limit, binary = false) {
+  if (!(limit >= queuedBytes(0, binary))) return -1;
   let lo = 0;
   let hi = MAX_FILE;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    if (queuedBytes(mid) <= limit) lo = mid;
+    if (queuedBytes(mid, binary) <= limit) lo = mid;
     else hi = mid - 1;
   }
   return lo;
 }
 export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 
-export const b64 = rc.base64urlEncode;
-export const unb64 = rc.base64urlDecode;
+// Unpadded base64url, with the browser's own `Uint8Array.prototype.toBase64` / `Uint8Array.fromBase64` where it
+// has them, and `btoa` / `atob` otherwise: both much faster than a loop in JS. Decoding is as strict as rootcard's
+// (`bad_base64` for other characters, a length of 4k + 1, padding, or unused bits that are not zero).
+const NATIVE_B64 = typeof Uint8Array.prototype.toBase64 === "function" && typeof Uint8Array.fromBase64 === "function";
+const B64URL = /^[A-Za-z0-9_-]*$/;
+const B64_LAST = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+export function b64(bytes) {
+  if (NATIVE_B64) return bytes.toBase64({ alphabet: "base64url", omitPadding: true });
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export function unb64(text) {
+  if (typeof text !== "string" || text.length % 4 === 1 || !B64URL.test(text)) throw new rc.RootcardError("bad_base64");
+  const rest = text.length % 4;
+  if (rest) {
+    const v = B64_LAST.indexOf(text[text.length - 1]);
+    if ((rest === 2 && v & 0x0f) || (rest === 3 && v & 0x03)) throw new rc.RootcardError("bad_base64");
+  }
+  if (NATIVE_B64) return Uint8Array.fromBase64(text, { alphabet: "base64url" });
+  const bin = atob(text.replace(/-/g, "+").replace(/_/g, "/"));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
 export const now = () => Math.floor(Date.now() / 1000);
 export const random = (n) => globalThis.crypto.getRandomValues(new Uint8Array(n));
 export const utf8 = (s) => enc.encode(s);
@@ -455,20 +485,113 @@ async function fileCryptoKey(raw, usage) {
   return subtle.importKey("raw", raw, "AES-GCM", false, [usage]);
 }
 
-/** Encrypt chunk `i` of `n`; returns the packed relay payload. */
-export async function encryptChunk(fileKeyRaw, f, i, n, bytes) {
+/** Encrypt chunk `i` of `n`: `{ f, i, n, ct }`, sent as a binary payload (chunkPayload) or as text (packChunk). */
+export async function sealChunk(fileKeyRaw, f, i, n, bytes) {
   const key = await fileCryptoKey(fileKeyRaw, "encrypt");
   const ct = new Uint8Array(
     await subtle.encrypt({ name: "AES-GCM", iv: chunkNonce(i), additionalData: utf8(`${f}:${i}:${n}`) }, key, bytes),
   );
-  return pack({ k: "chunk", f, i, n, c: b64(ct) });
+  return { f, i, n, ct };
 }
 
+/** A sealed chunk as the text relay payload `{ k: "chunk", f, i, n, c }`. */
+export const packChunk = (c) => pack({ k: "chunk", f: c.f, i: c.i, n: c.n, c: b64(c.ct) });
+
+/** Encrypt chunk `i` of `n`; returns the packed (text) relay payload. */
+export async function encryptChunk(fileKeyRaw, f, i, n, bytes) {
+  return packChunk(await sealChunk(fileKeyRaw, f, i, n, bytes));
+}
+
+/** Decrypt a chunk `{ f, i, n, ct }` (or `{ ..., c }`, the ciphertext as base64url). */
 export async function decryptChunk(fileKeyRaw, p) {
   const key = await fileCryptoKey(fileKeyRaw, "decrypt");
+  const ct = p.ct ?? unb64(p.c);
   return new Uint8Array(
-    await subtle.decrypt({ name: "AES-GCM", iv: chunkNonce(p.i), additionalData: utf8(`${p.f}:${p.i}:${p.n}`) }, key, unb64(p.c)),
+    await subtle.decrypt({ name: "AES-GCM", iv: chunkNonce(p.i), additionalData: utf8(`${p.f}:${p.i}:${p.n}`) }, key, ct),
   );
+}
+
+// ── binary relay frames (DESIGN.md §10.2) ───────────────────────────────────────────────────────────────────────
+
+/** Binary frame types. */
+export const BIN_RELAY = 0x01;
+export const BIN_DELIVER = 0x02;
+/** The largest payload of a binary frame (the server's MAX_RELAY_BIN). */
+export const MAX_RELAY_BIN = 64 * 1024;
+const ASCII_ID = /^[\x21-\x7e]{1,64}$/;
+
+/**
+ * The payload of a binary chunk frame: `f` (1 byte length, then the ASCII id), `i` and `n` (4 bytes each,
+ * big-endian), then the ciphertext. `null` when the id cannot be put there (the chunk then goes as text).
+ */
+export function chunkPayload(c) {
+  if (!ASCII_ID.test(c.f)) return null;
+  const out = new Uint8Array(1 + c.f.length + 8 + c.ct.length);
+  out[0] = c.f.length;
+  for (let j = 0; j < c.f.length; j++) out[1 + j] = c.f.charCodeAt(j);
+  const v = new DataView(out.buffer);
+  v.setUint32(1 + c.f.length, c.i);
+  v.setUint32(5 + c.f.length, c.n);
+  out.set(c.ct, 9 + c.f.length);
+  return out.length > MAX_RELAY_BIN ? null : out;
+}
+
+/** The inverse of chunkPayload: `{ k: "chunk", f, i, n, ct }`, or null when it is malformed. */
+export function parseChunkPayload(b) {
+  if (!(b instanceof Uint8Array) || b.length < 1) return null;
+  const len = b[0];
+  if (len < 1 || len > 64 || b.length < 1 + len + 8) return null;
+  let f = "";
+  for (let j = 0; j < len; j++) f += String.fromCharCode(b[1 + j]);
+  if (!ASCII_ID.test(f)) return null;
+  const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  return { k: "chunk", f, i: v.getUint32(1 + len), n: v.getUint32(5 + len), ct: b.subarray(9 + len) };
+}
+
+/**
+ * A binary relay frame from this device: type, flags (bit 0: `store`), the number of recipients, their device ids
+ * (16 bytes each), `ref` (8 bytes), `ttl` (4 bytes, seconds, 0: none), then the payload. `null` when a device id
+ * is not 16 bytes of base64url, or there are too many recipients (the chunk then goes as text).
+ */
+export function relayFrame(to, payload, { store = false, ttl = 0, ref }) {
+  if (!to.length || to.length > 24 || !(ref instanceof Uint8Array) || ref.length !== 8) return null;
+  const ids = [];
+  for (const d of to) {
+    let raw;
+    try {
+      raw = unb64(d);
+    } catch {
+      return null;
+    }
+    if (raw.length !== 16) return null;
+    ids.push(raw);
+  }
+  const head = 3 + 16 * ids.length + 8 + 4;
+  const out = new Uint8Array(head + payload.length);
+  out[0] = BIN_RELAY;
+  out[1] = store ? 1 : 0;
+  out[2] = ids.length;
+  ids.forEach((x, j) => out.set(x, 3 + 16 * j));
+  out.set(ref, 3 + 16 * ids.length);
+  new DataView(out.buffer).setUint32(3 + 16 * ids.length + 8, store && ttl > 0 ? Math.min(ttl, 0xffffffff) : 0);
+  out.set(payload, head);
+  return out;
+}
+
+/**
+ * A binary frame from the server: `{ from, account, id, payload }` (`id`: the queue id, absent when it came live),
+ * or null when it is not one.
+ */
+export function parseDelivered(buf) {
+  const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  if (b.length < 1 + 16 + 1 || b[0] !== BIN_DELIVER) return null;
+  const alen = b[17];
+  if (b.length < 18 + alen + 8) return null;
+  let account = "";
+  for (let j = 0; j < alen; j++) account += String.fromCharCode(b[18 + j]);
+  const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const id = Number(v.getBigInt64(18 + alen));
+  return { from: b64(b.subarray(1, 17)), account, id: id > 0 ? id : undefined, payload: b.subarray(18 + alen + 8) };
 }
 
 /**

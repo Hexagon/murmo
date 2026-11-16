@@ -10,9 +10,25 @@ const HEARTBEAT = 25_000;
 const PONG_WAIT = 8_000;
 const CONNECT_WAIT = 15_000;
 const SEND_WAIT = 12_000;
-// The server's relay budgets in bytes of chunk text per minute (sent again in "ready"): per sending device, counted
-// once per recipient device, and per recipient device for the sending account (server/src/ws.rs).
-const RELAY_DEFAULT = { bytes: 384 * 1024 * 1024, peer: 96 * 1024 * 1024, window: 60 };
+// The server's relay budgets per minute (sent again in "ready", server/src/ws.rs), in bytes of chunks as sent (text,
+// or the payload of binary frames):
+// - live, to connected devices: `bytes` per sending device (once per recipient), `peer` per recipient device for
+//   the sending account;
+// - `granted`: per sending device, to devices that granted it more (they asked for the file; 0: no grants);
+// - `store`: per sending account, into the file queue (absent: an older server, which counts queued chunks as live);
+// - `frames` per device in all, `slow_frames` of them to anything but granted devices.
+// `grant` is the largest grant, `binary` whether the server takes binary frames.
+const RELAY_DEFAULT = {
+  bytes: 384 * 1024 * 1024,
+  peer: 96 * 1024 * 1024,
+  granted: 0,
+  store: 0,
+  frames: 3000,
+  slowFrames: 3000,
+  grant: 0,
+  binary: false,
+  window: 60,
+};
 // Stay this far under them, so that a paced transfer does not run into a limit.
 const RELAY_MARGIN = 0.9;
 
@@ -32,8 +48,11 @@ export class Socket extends EventTarget {
     this.beat = null;
     this.lastFrame = 0;
     this.relayLimits = RELAY_DEFAULT;
-    this.relayLog = []; // { at, len, to } of relay frames sent within the window
+    this.relayLog = []; // { at, len, live, granted, stored } of relay frames sent within the window
     this.relayPause = 0; // no relay before this time (ms) after a "rate_limited"
+    this.grants = new Map(); // device → { bytes, until (ms) }: what that device lets this one stream to it
+    this.textOnly = new Set(); // devices the server said take no binary frames (older clients)
+    this.caps = ["bin"]; // what this connection takes beyond JSON frames (told in "auth")
   }
 
   connect() {
@@ -48,8 +67,11 @@ export class Socket extends EventTarget {
       return;
     }
     this.ws = ws;
+    ws.binaryType = "arraybuffer";
     ws.onmessage = (ev) => {
-      if (this.ws === ws) this.onFrame(ev.data);
+      if (this.ws !== ws) return;
+      if (typeof ev.data === "string") this.onFrame(ev.data);
+      else this.onBinary(ev.data);
     };
     ws.onclose = () => this.dropped(ws);
     ws.onerror = () => {};
@@ -164,12 +186,14 @@ export class Socket extends EventTarget {
       case "challenge": {
         const ws = this.ws;
         const a = await this.auth(f.nonce);
-        if (this.ws === ws) ws.send(JSON.stringify({ t: "auth", ...a }));
+        // `caps`: this connection takes binary relay frames (servers that do not know it ignore it).
+        if (this.ws === ws) ws.send(JSON.stringify({ t: "auth", ...a, caps: this.caps }));
         return;
       }
       case "ready":
         this.ready = true;
         this.relayLimits = relayLimits(f.relay);
+        this.textOnly.clear();
         this.backoff = 1000;
         clearTimeout(this.ws.connectTimer);
         clearInterval(this.beat);
@@ -178,6 +202,17 @@ export class Socket extends EventTarget {
         for (const w of [...this.readyWaiters]) w(true);
         return;
       case "pong":
+        return;
+      case "relay-grant":
+        // A device of a contact or of this account asked for a file and lets this device stream it faster.
+        if (typeof f.to === "string" && Number.isSafeInteger(f.bytes) && Number.isSafeInteger(f.ttl)) {
+          if (f.bytes > 0) this.grants.set(f.to, { bytes: f.bytes, until: Date.now() + Math.min(f.ttl, 3600) * 1000 });
+          else this.grants.delete(f.to);
+        }
+        return;
+      case "relay-missed":
+        for (const d of Array.isArray(f.text) ? f.text : []) if (typeof d === "string") this.textOnly.add(d);
+        this.dispatchEvent(new CustomEvent(f.t, { detail: f }));
         return;
       case "sent":
       case "presence":
@@ -282,44 +317,146 @@ export class Socket extends EventTarget {
     await this.call(frame, ref);
   }
 
+  /**
+   * A binary frame: a file chunk, dispatched as a "relay" event `{ from, account, id?, chunk }` with the chunk as
+   * `{ k: "chunk", f, i, n, ct }` (`chunk: null` when the payload is malformed).
+   */
+  onBinary(data) {
+    this.lastFrame = Date.now();
+    const d = p.parseDelivered(data);
+    if (!d) return;
+    const detail = { from: d.from, account: d.account, chunk: p.parseChunkPayload(d.payload) };
+    if (d.id) detail.id = d.id;
+    this.dispatchEvent(new CustomEvent("relay", { detail }));
+  }
+
   /** `store`: the server keeps the chunk for devices that are not connected. Misses come as "relay-missed". */
-  relay(to, data, { store = false, ref, ttl = 0 } = {}) {
+  relay(to, data, { store = false, ref, ttl = 0, stored } = {}) {
     const frame = { t: "relay", to, data };
     if (store) frame.store = true;
     if (store && ttl > 0) frame.ttl = ttl; // queued chunks kept no longer (disappearing pictures)
     if (ref) frame.ref = ref;
+    const routes = this.routes(to, data.length, stored);
     this.send(frame);
-    const now = Date.now();
-    while (this.relayLog.length && this.relayLog[0].at <= now - this.relayLimits.window * 1000) this.relayLog.shift();
-    this.relayLog.push({ at: now, len: data.length, to: [...new Set(to)] });
+    this.logRelay(routes, data.length);
   }
 
   /**
-   * Wait until `len` bytes of relay text to `to` fit in the server's budgets: what was sent in the last window
-   * (sliding, so the server's fixed windows are never exceeded either), with a margin, and no earlier than a
-   * "rate_limited" said.
+   * Send a sealed chunk `{ f, i, n, ct }` (p.sealChunk) to `to`, paced to the server's budgets: as a binary frame
+   * where the server takes them, as text to devices that do not (and to all on an older server). `stored`: the
+   * devices it is queued for (they are away), which the server counts against the queue's budget. `stop()` is
+   * asked before each frame; it returns false when it said to stop. `ref` is 8 random bytes as base64url, so that
+   * it fits a binary frame.
    */
-  async pace(to, len) {
+  async sendChunk(to, chunk, { store = false, ref, ttl = 0, stored = new Set(), stop = () => false } = {}) {
     to = [...new Set(to)];
-    const { bytes, peer, window } = this.relayLimits;
+    const frames = [];
+    const payload = this.relayLimits.binary ? p.chunkPayload(chunk) : null;
+    const bin = payload ? to.filter((d) => !this.textOnly.has(d)) : [];
+    const data = payload && bin.length ? p.relayFrame(bin, payload, { store, ttl, ref: p.unb64(ref) }) : null;
+    if (data) frames.push({ to: bin, data, len: payload.length });
+    const text = data ? to.filter((d) => this.textOnly.has(d)) : to;
+    if (text.length) {
+      const packed = p.packChunk(chunk);
+      frames.push({ to: text, data: packed, len: packed.length });
+    }
+    for (const fr of frames) {
+      await this.pace(fr.to, fr.len, stored);
+      await this.drain();
+      if (stop()) return false;
+      if (typeof fr.data === "string") {
+        this.relay(fr.to, fr.data, { store, ref, ttl, stored });
+      } else {
+        if (!this.ready) throw new Error("offline");
+        const routes = this.routes(fr.to, fr.len, stored);
+        this.ws.send(fr.data);
+        this.logRelay(routes, fr.len);
+      }
+    }
+    return true;
+  }
+
+  /**
+   * How the server counts a chunk of `len` bytes to each of `to`: devices that granted this one at least `len` more,
+   * devices it is queued for (`stored`, on a server with a queue budget), and the rest, which go live.
+   */
+  routes(to, len, stored = new Set()) {
+    const r = { live: [], granted: [], stored: 0 };
+    const now = Date.now();
+    for (const d of new Set(to)) {
+      const g = this.grants.get(d);
+      if (stored.has(d) && this.relayLimits.store > 0) r.stored++;
+      else if (this.relayLimits.granted > 0 && g && g.until > now && g.bytes >= len) r.granted.push(d);
+      else r.live.push(d);
+    }
+    return r;
+  }
+
+  logRelay(routes, len) {
+    const now = Date.now();
+    for (const d of routes.granted) {
+      const g = this.grants.get(d);
+      if (g) g.bytes -= len;
+    }
+    while (this.relayLog.length && this.relayLog[0].at <= now - this.relayLimits.window * 1000) this.relayLog.shift();
+    this.relayLog.push({ at: now, len, ...routes });
+  }
+
+  /**
+   * Wait until a chunk of `len` bytes to `to` fits in the server's budgets: what was sent in the last window
+   * (sliding, so the server's fixed windows are never exceeded either), with a margin, and no earlier than a
+   * "rate_limited" said. Each route has its own budgets (see RELAY_DEFAULT).
+   */
+  async pace(to, len, stored = new Set()) {
+    const L = this.relayLimits;
+    const m = RELAY_MARGIN;
     for (;;) {
       const now = Date.now();
-      const since = now - window * 1000;
+      const since = now - L.window * 1000;
       while (this.relayLog.length && this.relayLog[0].at <= since) this.relayLog.shift();
       let wait = this.relayPause - now;
       if (wait <= 0) {
-        let total = len * to.length;
-        const per = new Map(to.map((d) => [d, len]));
-        for (const e of this.relayLog) {
-          total += e.len * e.to.length;
-          for (const d of e.to) if (per.has(d)) per.set(d, per.get(d) + e.len);
+        const next = this.routes(to, len, stored);
+        let live = 0;
+        let granted = 0;
+        let store = 0;
+        let slow = 0;
+        const per = new Map(next.live.map((d) => [d, 0]));
+        for (const e of [...this.relayLog, { ...next, len }]) {
+          live += e.len * e.live.length;
+          granted += e.len * e.granted.length;
+          store += e.len * e.stored;
+          if (e.live.length || e.stored) slow++;
+          for (const d of e.live) if (per.has(d)) per.set(d, per.get(d) + e.len);
         }
-        const over = total > bytes * RELAY_MARGIN || [...per.values()].some((n) => n > peer * RELAY_MARGIN);
+        const over =
+          live > L.bytes * m ||
+          [...per.values()].some((n) => n > L.peer * m) ||
+          granted > L.granted * m ||
+          store > L.store * m ||
+          this.relayLog.length + 1 > L.frames * m ||
+          slow > L.slowFrames * m;
         // Nothing left to wait for: one frame larger than the whole budget is sent anyway (and refused).
         if (!over || !this.relayLog.length) return;
         wait = this.relayLog[0].at - since;
       }
       await new Promise((r) => setTimeout(r, Math.max(wait, 20)));
+    }
+  }
+
+  /**
+   * Let device `from` stream up to `bytes` more to this device for a while, beyond the live budgets (this device
+   * asked it for a file). Resolves false when the server does not offer grants or refused.
+   */
+  async grant(from, bytes) {
+    const max = this.relayLimits.grant;
+    if (!(max > 0) || !this.ready) return false;
+    const ref = p.b64(p.random(12));
+    try {
+      await this.call({ t: "relay-grant", from, bytes: Math.max(0, Math.min(Math.ceil(bytes), max)), ref }, ref, 10000);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -332,14 +469,25 @@ export class Socket extends EventTarget {
   }
 
   /** Wait until the socket's buffer drains below `limit` bytes (back-pressure for file transfers). */
-  async drain(limit = 2 * 1024 * 1024) {
-    while (this.ws && this.ws.bufferedAmount > limit) await new Promise((r) => setTimeout(r, 20));
+  async drain(limit = 4 * 1024 * 1024) {
+    while (this.ws && this.ws.bufferedAmount > limit) await new Promise((r) => setTimeout(r, 10));
   }
 }
 
 /** The relay budgets from "ready", or the defaults for a server that does not send them. */
-function relayLimits(r) {
+export function relayLimits(r) {
   const ok = (n) => Number.isSafeInteger(n) && n > 0;
+  const opt = (n, d) => (Number.isSafeInteger(n) && n >= 0 ? n : d);
   if (!r || !ok(r.bytes) || !ok(r.peer) || !ok(r.window) || r.window > 3600) return RELAY_DEFAULT;
-  return { bytes: r.bytes, peer: r.peer, window: r.window };
+  return {
+    bytes: r.bytes,
+    peer: r.peer,
+    granted: opt(r.granted, 0),
+    store: opt(r.store, 0),
+    frames: ok(r.frames) ? r.frames : RELAY_DEFAULT.frames,
+    slowFrames: ok(r.slow_frames) ? r.slow_frames : RELAY_DEFAULT.slowFrames,
+    grant: opt(r.grant, 0),
+    binary: r.binary === 1,
+    window: r.window,
+  };
 }

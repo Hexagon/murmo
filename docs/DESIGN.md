@@ -538,6 +538,14 @@ conversation: images up to 25 MiB, videos up to 100 MiB (`MAX_INLINE`). Larger f
 where the browser has `showSaveFilePicker` they are written to the chosen file part by part; elsewhere they are
 handed to the browser as a `Blob` (Chromium keeps large ones on disk, other browsers may hold them in memory).
 
+**Showing a long conversation.** A conversation opens with its newest 50 messages; the next 50 older ones are drawn
+when the user scrolls near the top (or taps *Show older messages*), with what is on the screen kept in place, and a
+search hit further back widens the window to it. A picture is put together from its parts only when it comes near
+the screen; its size is read from the header first, so it has its place before it loads. The records of a
+conversation are still all read and decrypted (the order is inside the encryption, so IndexedDB cannot give the newest
+first without storing times in the clear), but side by side, and a record whose ciphertext is unchanged is not
+decrypted again while the store is open.
+
 **Retention per conversation.** A contact record can carry `retention` (seconds; 0 or absent: keep). Messages of
 that conversation sent before *now − retention* are deleted from IndexedDB together with their files: when the
 setting changes, every minute while the app runs, and at start. A message that is already older when it arrives (from
@@ -558,13 +566,15 @@ The queue has four byte budgets, checked together when a chunk is queued and whe
 real contacts, nor the whole server. Chunks to the sender's own devices count against its account budget only.
 A file that does not fit is sent live later, when both devices are connected.
 
-`/api/v1/info` advertises the budgets as `file_queue_limits: { file, device, sender, account }`, in bytes of queued
-chunk text (the encrypted chunks as sent, larger than the file): `device`, `sender` and `account` are the first
+`/api/v1/info` advertises the budgets as `file_queue_limits: { file, device, sender, account }`, in queued bytes
+(the encrypted chunks as sent: the payload of binary frames, or the text of JSON frames, §10.2): `device`, `sender` and `account` are the first
 three budgets above, and `file` is the most one file can take for one device of another account, the smallest of
 the four. They are upper bounds for a sender to compare a file against; whether it fits right now, with other
 files queued, is still answered by `relay-space`. Without a file queue the field is absent.
 The client compares a file against `file` before it sends it (a file of `size` bytes is counted as
-`ceil(size × 1.4) + 256 × chunks` queued bytes): one that can never fit is not offered to the queue, its row above
+`size + 96 × chunks` queued bytes with binary frames, and `ceil(size × 16/9) + 256 × chunks` as text: the
+ciphertext is base64url inside JSON that is base64url again. Clients before this counted `1.4 ×`, so the server could
+grant room in `relay-space` that the file then overran, and the transfer was refused partway): one that can never fit is not offered to the queue, its row above
 the composer says so before the transfer starts, and account settings show the largest file the queue takes.
 
 1. The sender picks a file (at most 1 GiB, `MAX_FILE`: files are read, stored and sent part by part, so the limit
@@ -610,8 +620,13 @@ can take it too, or fetch it from that one (step 5). The receipt is sent when th
 message says *waiting for the recipient* until then. The sender's own other devices are not pushed the file either,
 and fetch it with step 5. A file below the limit behaves as before.
 
-Relay frames carry `{ k: "chunk", f, i, n, c }` or `{ k: "file-req", f }` as base64url canonical JSON. Chunks are
-authenticated by the file key from the signed `file` message and the final hash, so the relay needs no extra signature.
+Relay frames carry `{ k: "chunk", f, i, n, c }` or `{ k: "file-req", f }` as base64url canonical JSON, or a chunk as
+a binary frame (§10.2). Chunks are authenticated by the file key from the signed `file` message and the final hash,
+so the relay needs no extra signature.
+
+A device that asks for a file (*Ta emot* for an `ask` file, or step 5 from its own devices) first grants the device it
+asks a budget of its own (`relay-grant`, §10.2): the file then comes as fast as the connections allow instead of
+within the budget for chunks nobody asked for.
 
 ### 9.1 Emoji
 
@@ -688,12 +703,15 @@ WebSocket frames (JSON):
 |---|---|
 | server → client | `{ t: "challenge", nonce }` |
 | client → server | `{ t: "auth", account, device, sig }` with `sig` over `frame("mesg/ws-auth/v1", canonical({account, device, nonce, origin}))` |
-| server → client | `{ t: "ready", relay: { bytes, peer, window } }` (the relay budgets below) then queued `{ t: "msg", id, env }` frames |
+| client → server | `auth` may carry `caps: ["bin"]`: the connection takes binary relay frames (§10.2) |
+| server → client | `{ t: "ready", relay: { bytes, peer, granted, store, frames, slow_frames, grant, binary, window } }` (the relay budgets below and in §10.2) then queued `{ t: "msg", id, env }` frames |
 | client → server | `{ t: "send", id, to: [{ device, env }] }` → `{ t: "sent", id }` |
 | client → server | `{ t: "ack", ids: [...] }` (deletes) |
 | client → server | `{ t: "prekey", prekey }` |
 | client → server | `{ t: "presence", devices, ref }` → `{ t: "presence", online, ref }` |
-| client → server | `{ t: "relay", to, data, ref }` → forwarded as `{ t: "relay", from, account, data }` to connected devices only; `{ t: "relay-missed", devices, ref }` for the rest |
+| client → server | `{ t: "relay", to, data, ref }` → forwarded as `{ t: "relay", from, account, data }` to connected devices only; `{ t: "relay-missed", devices, text?, ref }` for the rest (`text`: connected devices that take no binary frames, for a binary chunk) |
+| client → server | binary relay frame (§10.2): the same, with the chunk as bytes |
+| client → server | `{ t: "relay-grant", from, bytes, ref }` → `{ t: "ok", ref }`; the device `from` is told `{ t: "relay-grant", to, bytes, ttl }` (§10.2) |
 | server → client | queued file chunks `{ t: "relay", id, from, account, data }`, a few at a time after the envelopes |
 | client → server | `{ t: "relay", to, data, ref, store: true, ttl? }`: as above, and chunks for devices that are not connected are queued (for `ttl` seconds when given, at most 14 days) |
 | client → server | `{ t: "relay-space", devices, bytes, ref }` → `{ t: "relay-space", ok, ref }` (room in the file queue) |
@@ -708,13 +726,21 @@ WebSocket frames (JSON):
 Limits (v0): envelope ≤ 64 KiB, ≤ 24 recipients per send, ≤ 2 000 queued envelopes per device, mailbox TTL 14 days,
 60 sends per minute per device, 20 lookups per minute and 5 link requests per hour per network address.
 
-Relay (live file chunks and the file queue): at most 3 000 frames per minute per device, and bytes of chunk text per
-minute: 384 MiB per sending device, counted once for each recipient device (a chunk to five devices counts five
-times), and 96 MiB per sending account into any one recipient device, whichever of the account's devices sends. A
-frame that would go over either budget is refused whole, with `{ t: "error", error: "rate_limited", id: ref, retry }`
-(`retry`: seconds), and counts nothing. The budgets are announced in `ready`; the client paces a transfer to stay
-under 90 % of them over any sliding minute, and a transfer whose chunk is refused anyway stops and is offered again
-later, like one whose connection broke.
+Relay (live file chunks and the file queue): bytes per minute (of chunk text, or of a binary frame's payload), with a
+budget per route; each chunk is counted once for each recipient device it goes to, by where it goes:
+- **live**, to a connected device that did not ask for it: 384 MiB per sending device and 96 MiB per sending account
+  into any one recipient device, whichever of the account's devices sends;
+- **granted**, to a connected device that granted the sending device more (§10.2): 1 GiB per sending device
+  (`MURMO_RELAY_GRANTED_MB`), within what the grant has left;
+- **queued**, into the file queue for a device that is away: 128 MiB per sending account (`MURMO_RELAY_STORE_MB`),
+  besides the queue's own limits (§9);
+- to a device that is neither connected nor queued for: nothing (it is only listed in `relay-missed`).
+
+At most 24 000 relay frames per minute per device, of which 3 000 may go live without a grant or into the queue. A
+frame that would go over any of its budgets is refused whole, with `{ t: "error", error: "rate_limited", id: ref,
+retry }` (`retry`: seconds), and counts nothing. The budgets are announced in `ready`; the client paces a transfer
+to stay under 90 % of them over any sliding minute, and a transfer whose chunk is refused anyway stops and is offered
+again later, like one whose connection broke.
 
 Rate limits count per IPv4 address and per IPv6 /64. Counters are keyed by a hash of the address under a random
 secret in the database (HKDF-SHA-256, 128 bits), never by the address itself. Windows of ten minutes or more
@@ -744,6 +770,60 @@ service reports as gone (404/410) is deleted.
 While the page runs in the background (not frozen), it shows the notification itself with the sender's handle, which
 never leaves the device.
 
+### 10.2 File relay: binary frames and grants
+
+**Binary frames.** File chunks go as binary WebSocket frames; everything else, `file-req` included, stays JSON text.
+A JSON chunk is base64url ciphertext inside canonical JSON that is base64url again: 1.78× the file, all of it
+counted against the relay budgets and the file queue, and decoded twice by the receiver. A binary chunk is 1.0×, and
+its ciphertext goes to `crypto.subtle` without decoding. The server still forwards bytes it cannot read.
+
+*Client → server* (all integers big-endian):
+
+| Bytes | Field |
+|---|---|
+| 1 | frame type `0x01`; any other value is refused (`bad_relay`) |
+| 1 | flags: bit 0 `store`; other bits must be 0 |
+| 1 | `k`, the number of recipient devices (1–24) |
+| 16 × k | recipient device ids, raw (a device id is base64url of 16 bytes) |
+| 8 | `ref`, random; echoed as base64url in `relay-missed` and `error` frames |
+| 4 | `ttl` in seconds, 0 for none (only with `store`) |
+| rest | payload, 1 to 64 KiB: `f` (1 byte length, 1–64, then the ASCII id), `i` (4), `n` (4), the AES-GCM ciphertext |
+
+*Server → client:* type `0x02`, the sending device id (16 bytes), the sending account (1 byte length, then the id),
+the queue id (8 bytes; 0 when live), then the payload unchanged.
+
+- A connection takes binary frames only when it said so in `auth` (`caps: ["bin"]`); to one that did not, the server
+  delivers nothing and lists the device in `relay-missed` under `devices` and `text`. The sender then sends that
+  device text frames, and the file is offered again (§9, step 3). The server never turns a binary chunk into text: it
+  would have to build the client's payload format. The server announces `binary: 1` in `ready`; a client sends binary
+  frames only to such a server, and text otherwise.
+- The server reads fixed offsets with checked bounds and refuses a frame that is truncated, has `k = 0` or `k > 24`,
+  sets unknown flags, or has an empty or larger payload. A binary frame before `auth` closes the connection, as any
+  unexpected frame does. `from` and `account` come from the authenticated connection, never from the frame.
+  Duplicates are dropped, and the budgets are charged all or nothing, as for JSON frames. The fuzz target `ws_binary`
+  runs in CI.
+- The file queue keeps a binary chunk as a `BLOB` in the same column as text chunks, and delivers each in the form it
+  came in. A queued binary chunk is held back from a connection that takes no binary frames (it stays until it
+  expires); older pages last only until the next reload.
+- The receiver's checks are those of JSON chunks (§9, step 4); only the decoding in front of them changed. No
+  `permessage-deflate`: ciphertext does not compress.
+
+**Grants.** The live budgets are there because nobody asked for those chunks. When a device asks for a file
+(`file-req`), it first tells the server it wants it: `{ t: "relay-grant", from, bytes }` lets the device `from` send it
+up to `bytes` (at most 2 GiB, the client asks for the file's size as text) in the next 30 minutes, and `bytes: 0` takes
+it back. The server tells `from`, if it is connected, so that it can pace for the larger budget. While a grant has
+room for a chunk, the chunk is counted against it and the granted budget (1 GiB per minute per sending device) instead
+of the live ones. A grant is between two devices: the sending account's other devices, and other senders, are still
+on the live budgets.
+- It cannot be used to flood anyone: only the receiving device can grant, and only for chunks to itself. The granted
+  budget bounds what one sending device costs the server in bandwidth.
+- Grants are in memory, at most 16 per receiving device (a new one replaces the oldest), and gone on a restart; the
+  transfer then falls back to the live budgets.
+- The server learns that a device asked another for something, and roughly how large. It could already see that from
+  the `file-req` frame's timing and the stream of chunks that followed.
+- Measured end to end (two Node clients against a release build with the default budgets, one machine): a 120 MiB
+  `ask` file took 125 s as text on the live budget, and 6.2 s as binary frames on a grant.
+
 ## 11. Data the server stores
 
 | Data | Why | Retention |
@@ -755,6 +835,7 @@ never leaves the device.
 | link requests | linking | memory only, 10 minutes |
 | relay frames (file chunks) | live transfer | not stored when the recipient device is connected |
 | queued file chunks (ciphertext) | files for devices that are away (sender's choice) | until acknowledged, at most 14 days (a disappearing picture's: its unread limit) |
+| relay grants (receiving device, sending device, bytes left), in memory | a faster transfer of a file the receiving device asked for (§10.2) | used up, taken back, 30 minutes, or a restart |
 | push endpoint per device | notifications (the user's choice) | until turned off, logged out, or reported gone |
 | VAPID key | signing push requests | while the server exists |
 | network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
@@ -788,4 +869,196 @@ What clients from before emoji, reactions, the shared GIF collection and code fo
 | `` `inline code` `` and ```` ``` ```` blocks in a text (§6.10) | the text with its backticks, as written; nothing is lost |
 | `gifs` to an own older device | dropped; that device has no collection until it is updated, and then gets only GIFs saved after that. The bytes are pulled with `file-req` (§9.2), so no chunks are pushed to it; a `file-req` for `gif:…` sent to an older device finds no file message and is ignored |
 
+| a file chunk as a binary frame (§10.2) | not sent to it: an older page does not ask for binary frames in `auth`, so the server lists it in `relay-missed` (`text`), and the sender sends it text frames and offers the file again. A binary chunk queued while it was away stays queued until it expires; such pages last only until the next reload |
+| `relay-grant` | not sent by older devices, so a file they ask for comes on the live budgets as before; an older sender ignores the server's note and paces for the live budgets, which still leaves the transfer within the grant |
+
 An older device sends nothing new, so a newer device has nothing to handle from it.
+
+## 13. Ideas, not decided
+
+Ideas kept here so they are not forgotten. None of them is built or promised, and none is part of the protocol above
+until it is moved into its section (and into [PLAN.md](PLAN.md)). Each says why it could matter, how it could fit what
+exists, and what has to be decided first. They must keep §1: the server stays blind, learns no social graph and
+stores no more than it does now, unless an idea says otherwise and that is accepted.
+
+### 13.1 Recovery and identity
+
+**Remote wipe.** Partly there: a removed device that starts and connects finds itself missing from the list
+(`unknown_device`), deletes its local store and forgets the account on the login screen (`logout(true)` in `app.js`),
+and contacts stop encrypting to it (§4.4). What is missing:
+- The owner learns nothing. The device could, before deleting, send a last message signed with its device key to the
+  own devices ("wiped at …"); the server would have to let a just-removed device send this one message, or the
+  device signs it and the server keeps it with the removal. Shown in the device list.
+- A device that is never started again is never wiped. "Remember me" (T12) stores the derived key, so such a profile
+  is readable offline. Nothing helps against that except not remembering; the removal dialog should say so.
+- A device can be removed only by a device; the paper key could also remove one (today it can only add).
+- Decide: is a "wipe" different from a removal (for example: remove and say "stolen", which also suggests a new paper
+  key and rotating the password), or is removal enough with better wording?
+
+**Proofs of linked accounts.** rootcard already has proofs (SPEC §14, `prove`, `verifyProof` and
+`statementChallenge` in the vendored core): the account key (or recovery key) signs a challenge for a named
+recipient, checked against the newest log. Murmo uses this only to ask for a link (§4.3). It could also let users:
+- show statements such as "I am @alice on example.social" or "I control example.com", signed by the account key and
+  published where the other account lives (a post, a `/.well-known` file), so someone who trusts that account can
+  reach `Alice#3F9C` without any search (§1.3 holds: the user hands out the link, Murmo looks nothing up);
+- answer a contact's or a website's challenge ("prove you are Alice#3F9C") from the app.
+- Decide: are statements shown inside Murmo (on a contact's card, re-checked against their log), and how is a statement
+  taken back? Does a proof made with the account key survive a reset with the recovery card (a new instance)?
+
+**Social recovery of the paper key.** The paper key (§4.5) split k-of-n (Shamir, for example 3 of 5) among chosen
+contacts, each share sent end to end and kept by their devices. With every device lost, the user logs in with the
+password, asks the guardians (by identifier, a message request they already accept), and k shares rebuild the paper.
+The paper alone is worth nothing without the password (§4.5), so guardians who join forces still cannot add a device.
+- Decide: how does a guardian know the request really comes from the user and not from someone with the password?
+  (A call or meeting, a safety code read out, a delay with notice to the old devices.) What happens to shares when a
+  guardian loses their devices or the paper key is replaced (new shares to all)?
+
+**Verify in person with a QR code.** Each screen shows a QR with the identifier, the device-list head and the safety
+code (§6.3); scanning each other's codes accepts the request in both directions and marks the contact "verified in
+person". Breaks if the head changes later, as the safety code does today.
+- Decide: camera access in the browser (a permission, and a QR decoder in the client: a dependency or own code).
+
+**Identity timeline.** The rootcard log and the device list drawn as a history: instance created, devices added and by
+which device, paper key made or used, devices removed. A device nobody recognises stands out as an event. Only
+showing what is already verified.
+
+### 13.2 Fewer unwanted messages
+
+**Aliases you can throw away.** Hand out `Alice-bike#81C2` instead of the real identifier, for a sale, a conference
+badge, a dating profile. Requests to the alias land in their own list; turning it off stops them, and the real
+identifier was never shown.
+- Could be a separate rootcard identity per alias, owned by the same devices (heavy: logs, vaults), or a name the
+  server maps to the account (the server then learns which aliases belong together: weaker than §1 today).
+- Decide: which of the two, how a contact who later should know the real identity is moved over, and the limits.
+
+### 13.3 Calm messaging
+
+Murmo already has no typing indicator, no read receipts and no "online" status. The idea is to make calm the point:
+- **Intent when sending:** *no rush* (never notifies), normal, *urgent* (notifies even in quiet hours). Inside the
+  encryption; the server sees only `notify` as today (§2). Urgent limited per contact so it is not abused.
+- **Delivery windows / quiet hours:** notifications batched on the user's own devices ("at 08:00 and 17:00"). The
+  push is still empty; only when the device shows a notification changes.
+- **Shared availability:** "usually answers in the evening", sent end to end to accepted contacts, instead of presence.
+- **Waiting for my reply:** a list of conversations where the last message is from the other side and asked for an
+  answer, instead of unread counters.
+- **Letters / time capsules:** a message that opens on a date. Up to the queue's 14 days the content could be sent
+  at once and its key later from a sender's device; beyond that it waits on the sender's devices.
+- Decide: whether intents are a new kind (§12: lost on older devices) or a field older devices ignore.
+
+### 13.4 Privacy
+
+**What the server knows about me.** A page that shows, for the logged-in account, what the server holds right now
+(§11): device list and prekeys, number and size of queued envelopes and file chunks per device, push endpoints,
+rootcard data, with a delete button where deleting is safe (push endpoints, queued chunks this account sent).
+Needs an authenticated `/api/v1/me` that reports counts and sizes, never more than the server already has.
+
+**Duress password.** A second password, set on a device, that opens an empty profile, or deletes that device's local
+data, instead of the real one. Local only: the vault and rootcard know nothing of it.
+- Decide: an empty decoy is easy to tell apart from a used account; deleting is irreversible. Also what the duress
+  login does with the server session (a real login would show on the user's other devices).
+
+**Sealed sender and padding.** The server knows which device sends to which devices and when (AR3). The sender
+could be hidden inside the envelope (the server only checks a delivery token per conversation instead of the sending
+device), and envelopes padded to a few size buckets.
+- Decide: rate limits and quotas today are per sending account (§9); they need another anchor (tokens issued per
+  accepted contact, anonymous credentials).
+
+**One-time secrets.** A text (a password, a door code) that can be opened once, is not kept in history, not handed to
+new devices and not forwarded; the sender sees when it was opened. Built on `ephemeral` (§6.8) with "open once"
+instead of a timer.
+
+### 13.5 Inside a conversation
+
+- **Shared objects:** a list (shopping, packing), a poll, a shared note, live location with a hard end. Kept as
+  small CRDTs whose updates are messages, so the server sees ordinary envelopes. Becomes much more useful with groups.
+- **Voice messages, transcribed on the device** (Web Speech, or a speech model in WASM/WebGPU, never a cloud service).
+- **Translation and "catch me up" summaries on the device** with the browser's built-in translation and summary APIs
+  where they exist, off where they do not. Nothing leaves the device; the app must say what the browser does with it.
+- **Calls** over WebRTC, signalling inside envelopes, the DTLS fingerprint bound to the device keys and shown next to
+  the safety code. Decide: a TURN server reveals both parties' addresses to its operator; is it offered, and by whom?
+
+### 13.6 Murmo outside the app
+
+**"Contact me securely" widget.** A few lines of HTML a journalist, lawyer or project puts on their site: the visitor
+writes, the message is encrypted in their browser with a key made on the spot to the owner's devices, and arrives as a
+message request (§6), with a one-time link for the visitor to read the answer. Like a small SecureDrop.
+- Decide: abuse (anonymous senders, so rate limits and maybe a proof of work), whether senders without an account fit
+  the device-list model, and that the widget's script must be served by Murmo, not copied (AR1).
+
+**Alerts and bots.** `protocol.js` already runs in Node: a small CLI or HTTP sidecar (`murmo-send "backup failed"`)
+for self-hosters who want encrypted alerts on their phone, and bots that are rootcard identities asking to be
+contacts like anyone else. Decide: where a bot keeps its device key, and whether bots are marked as bots.
+
+**An AI assistant (Claude) as a contact.** A worked plan for one such bot: an assistant that can read and send
+messages in Murmo through tools (MCP). Nothing here is built.
+
+*What already works.* The client engine runs headless: `tests/e2e.test.mjs` drives `core.js` in Node 22 against the
+real server through registration, login, device setup, requests, acceptance and text (`id.login` → `setupDevice` →
+`new Messenger(…)` → `request`, `sendText`, `messages`). The server accepts WebSockets without an `Origin` header
+(`ws.rs`: not a browser, the device signs for one of the server's origins). So no protocol change is needed.
+
+*Shape.*
+
+```
+assistant ──MCP tools──► murmo-bot (Node, long-running) ──HTTPS/WebSocket──► Murmo server ──► contacts' devices
+                         its own rootcard identity, e.g. Claude#7K2Q
+                         one device in its own device list
+                         encrypted local store on disk
+```
+
+1. **Its own identity, never a device of the user's account.** The bot registers as an ordinary identity
+   (`Claude#XXXX`); its owner keeps the recovery card offline. It reaches people only with a `request` they accept
+   (§6.2), like anyone else. Linking it as a device of the user's own account is possible but rejected: it could
+   then write as the user and would receive the whole history (§4.3, §7), against §4 and §8.
+2. **A long-running sidecar** on a machine the owner controls (next to the Murmo server, or the owner's computer as a
+   local MCP server). It must stay connected to receive replies, send receipts and rotate prekeys (§5.2: replaced
+   every 7 days, private keys kept 21 days, mailbox 14 days). An ephemeral cloud container is a poor home: its device
+   key is lost each time, every run would be a new device to link, and the list allows only 8 devices and 32 entries
+   (§4.1).
+3. **A small MCP server** around `Messenger`, with few tools: `list_contacts`, `read_messages(contact)`,
+   `send_message(contact, text)`, `request_contact(handle, note)`. Files, reactions and edits later, if at all.
+
+*What has to be built.*
+
+| Part | Work |
+|---|---|
+| Persistent store | `Store` uses IndexedDB; the tests use `fake-indexeddb`, which is in memory only, so the device key would be lost on restart. Either an IndexedDB shim on disk, or a file-backed store with the same interface. Records are already encrypted with the local key (§8), so the files reveal nothing more than the browser's database does. |
+| Unlocking at start | The local key comes from the local secret in the rootcard vault, which the password unlocks. Either the password is given at each start (a secret of the sidecar), or "remember me" (`store.remember`) keeps the key on disk, protected only by file permissions. |
+| Updates | The web client reloads when the server's `build` changes; the sidecar runs a pinned commit and must be updated and restarted by its owner. §12 keeps this safe, but kinds it does not know are dropped. |
+| MCP layer and a test | A few hundred lines; an e2e test in which the bot requests a contact, is accepted, sends, and receives a reply. |
+
+*Trust and safety, to settle before building.*
+
+- **The end of "end to end" is a third party.** Encryption reaches the bot; the plaintext then goes to the model
+  provider. This must be a new row in [THREAT_MODEL.md](THREAT_MODEL.md), and contacts must be able to see it: this is
+  the case for deciding that **bots are marked** (for example a flag in the profile or the device entry, shown with
+  the request and next to the safety code).
+- **Prompt injection.** Incoming messages are untrusted input to the assistant. The sidecar sends only to accepted
+  contacts (the engine already refuses others with `not_accepted`); sending should need the owner's confirmation or an
+  allowlist of contacts; message text is passed to the assistant as data, never as instructions.
+- **A leak costs the bot, not the user.** A stolen bot device can speak only as the bot. Replacing it is a new device
+  that contacts see (the safety code changes), and any device of the bot can `remove` it (§4.4).
+- Limits are no obstacle: 60 sends per minute per device, 64 KiB per envelope (§10).
+
+*Order of work.* 1) decide marking and add the threat-model row; 2) file-backed `Store` with tests; 3) the sidecar
+(login, unlock, `Messenger`, reconnects) under `tools/murmo-bot/`; 4) the MCP tools with confirmation before sending;
+5) an e2e test against the real server.
+
+### 13.7 Trusting the client
+
+**Check the served client.** Extend the "signed, reproducible client" item in [PLAN.md](PLAN.md): the installed app
+compares the served files' hashes with a list signed by a release key (for example published in a rootcard log)
+before running them, and warns otherwise. It answers AR1, the objection to every web messenger that the server can
+serve other code. Decide: how a service worker can reliably hold back a page it does not trust, and how the release
+key is replaced.
+
+### 13.8 Faster file relay
+
+Built: binary chunk frames, grants for files the recipient asked for, and a budget of its own for the file queue
+(§10, §10.2). What is left of the plan:
+- **Receiver batching:** write arriving parts to IndexedDB a few at a time (as the sender reads them with
+  `PART_BATCH`) instead of one transaction per chunk; in the measurement in §10.2 this, and hashing, is now the limit.
+- **A larger chunk size** (for example 256 KiB), for fewer frames, transactions and round trips. Older clients refuse
+  a chunk larger than 48 KiB, so it needs a `chunk` field in the `file` message and a §12 row.
+- **A larger live budget** for files that are pushed (below `ASK_ABOVE`)? It is now 1.78× more file per minute than
+  before, since binary chunks are counted by their payload (T31).
