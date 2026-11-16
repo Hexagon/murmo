@@ -26,6 +26,9 @@ function giphy(req) {
   }
   return req.respond({ status: 200, headers: cors, contentType: "image/gif", body: GIF_2X2 });
 }
+/** Whether the app sees a mouse (`hover: hover`) or a touch screen. Headless Chrome reports no hover, and CDP cannot
+ * emulate it, so the page's matchMedia answers that one query from a flag (set up in `page`). */
+const hover = (pg, on) => pg.evaluate((v) => { window.__hover = v; }, on);
 async function page(name, languages = null) {
   const ctx = await browser.createBrowserContext();
   const pg = await ctx.newPage();
@@ -33,6 +36,12 @@ async function page(name, languages = null) {
   if (languages) await pg.evaluateOnNewDocument((l) => Object.defineProperty(navigator, "languages", { get: () => l }), languages);
   else await pg.evaluateOnNewDocument(() => localStorage.setItem("murmo-lang", "sv"));
   await pg.setViewport({ width: 1280, height: 800 });
+  // Headless Chrome reports no hover, which the app takes for a touch screen (Enter would not send): act as a mouse.
+  await pg.evaluateOnNewDocument(() => {
+    window.__hover = true;
+    const real = window.matchMedia.bind(window);
+    window.matchMedia = (q) => (q === "(hover: hover)" ? { matches: window.__hover, media: q } : real(q));
+  });
   await pg.setRequestInterception(true);
   pg.on("request", (req) => (/\.giphy\.com$/.test(new URL(req.url()).hostname) ? giphy(req) : req.continue()));
   pg.on("console", (m) => { if (["error", "warning"].includes(m.type())) problems.push(`${name} console ${m.type()}: ${m.text()}`); });
@@ -121,6 +130,15 @@ try {
   await a.type(".composer textarea", "```");
   await a.keyboard.press("Enter");
   if (await value()) throw new Error("Enter after the closing fence did not send");
+  // On a touch screen there is no Shift+Enter: Enter is always a new line and the send button sends.
+  await hover(a, false);
+  await a.type(".composer textarea", "Rad ett");
+  await a.keyboard.press("Enter");
+  await a.type(".composer textarea", "rad två");
+  if ((await value()) !== "Rad ett\nrad två") throw new Error(`Enter on a touch screen: ${JSON.stringify(await value())}`);
+  await a.click(".composer .send");
+  await a.waitForFunction(() => !document.querySelector(".composer textarea").value, { timeout: 5000 });
+  await hover(a, true);
   await b.waitForSelector(".msg .codeblock", { timeout: 20000 });
   const shown = await b.evaluate(() => {
     const m = [...document.querySelectorAll(".msg")].find((x) => x.querySelector(".codeblock"));

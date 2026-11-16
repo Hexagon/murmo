@@ -441,8 +441,9 @@ An older client shows the backticks as they are (§12), and search, editing and 
   and random text, and check that the tokens join to exactly the source and that only the fixed classes come out
   (`tests/code.test.mjs`).
 - **Composer.** Enter sends, except inside an open block (an unclosed ```` ``` ```` fence before the cursor): there it starts a new line,
-  so a block can be typed as it reads. Ctrl+Enter (⌘+Enter) sends anyway. Enter while an input method is composing
-  text no longer sends.
+  so a block can be typed as it reads. On a touch screen (no `hover: hover`), where the keyboard has no Shift+Enter,
+  Enter is always a new line and the send button sends; the keyboard shows a return key (`enterkeyhint`). Ctrl+Enter
+  (⌘+Enter) sends anyway. Enter while an input method is composing text no longer sends.
 
 ## 7. Multi-device history
 
