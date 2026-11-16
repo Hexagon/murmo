@@ -73,7 +73,7 @@ social recovery of the paper key, QR verification, identity timeline, aliases, c
 knows about me", duress password, sealed sender, one-time secrets, shared objects, voice, on-device translation,
 calls, a contact widget, alerts and bots (with a worked plan for an AI assistant as a contact), checking the served
 client, what is left of the faster file relay (receiver batching, larger chunks, §13.8), and a view of all shared
-files (§13.9).
+files with removal from one device to free room (§13.9).
 
 ## Open questions
 
