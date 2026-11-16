@@ -1540,7 +1540,8 @@ function remainingLabel(ms) {
 
 function composer(c) {
   const name = splitHandle(c.handle)[0];
-  const ta = h("textarea", { rows: 1 });
+  // On a touch screen the keyboard shows a return key, not "send": Enter makes a new line there (see keydown below).
+  const ta = h("textarea", { rows: 1, enterkeyhint: canHover() ? "send" : "enter" });
   // The timer stays on for this conversation until it is turned off (kept on this device only).
   let ttl = messenger.timer(c.account);
   const file = h("input", { type: "file", class: "hidden", multiple: true });
@@ -1674,8 +1675,9 @@ function composer(c) {
   ta.addEventListener("input", grow);
   ta.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
-    // Inside an open code block (```), Enter is a new line; Ctrl+Enter or ⌘+Enter still sends (DESIGN.md §6.10).
-    if (!(e.ctrlKey || e.metaKey) && code.inFence(ta.value.slice(0, ta.selectionStart ?? ta.value.length))) return;
+    // On a touch screen (no Shift+Enter there) and inside an open code block (```), Enter is a new line and the send
+    // button sends; Ctrl+Enter or ⌘+Enter still sends (DESIGN.md §6.10).
+    if (!(e.ctrlKey || e.metaKey) && (!canHover() || code.inFence(ta.value.slice(0, ta.selectionStart ?? ta.value.length)))) return;
     e.preventDefault();
     submit();
   });
