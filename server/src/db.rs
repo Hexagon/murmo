@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS mailbox (
   id      INTEGER PRIMARY KEY AUTOINCREMENT,
   device  TEXT NOT NULL,
   env     TEXT NOT NULL,
-  expires INTEGER NOT NULL
+  expires INTEGER NOT NULL,
+  origin  TEXT
 );
 CREATE INDEX IF NOT EXISTS mailbox_device ON mailbox (device, id);
 CREATE TABLE IF NOT EXISTS remote_ids (
@@ -163,6 +164,15 @@ impl Db {
     pub fn open(path: &str) -> rusqlite::Result<Db> {
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
+        // Envelopes from other servers (federation) remember the server; databases from before have no column.
+        let has_origin: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mailbox') WHERE name = 'origin'",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has_origin {
+            conn.execute_batch("ALTER TABLE mailbox ADD COLUMN origin TEXT")?;
+        }
         Ok(Db(Arc::new(Mutex::new(conn))))
     }
 
@@ -406,13 +416,15 @@ impl Db {
 
     // ── mailbox ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// Queue an envelope; `None` if the device's queue is full.
+    /// Queue an envelope; `None` if the device's queue is full. `origin` is the server it came from when that is not
+    /// this one (federation).
     pub fn enqueue(
         &self,
         device: &str,
         env: &str,
         expires: i64,
         max_queue: i64,
+        origin: Option<&str>,
     ) -> Result<Option<i64>, StoreError> {
         let mut c = self.conn()?;
         let tx = c.transaction().map_err(store_err)?;
@@ -427,8 +439,8 @@ impl Db {
             return Ok(None);
         }
         tx.execute(
-            "INSERT INTO mailbox (device, env, expires) VALUES (?1, ?2, ?3)",
-            params![device, env, expires],
+            "INSERT INTO mailbox (device, env, expires, origin) VALUES (?1, ?2, ?3, ?4)",
+            params![device, env, expires, origin],
         )
         .map_err(store_err)?;
         let id = tx.last_insert_rowid();
@@ -436,23 +448,24 @@ impl Db {
         Ok(Some(id))
     }
 
-    /// Queued envelopes of a device after `after`, oldest first, that have not expired at `now`.
+    /// Queued envelopes of a device after `after`, oldest first, that have not expired at `now`: id, envelope and
+    /// the server it came from when that is not this one.
     pub fn queued(
         &self,
         device: &str,
         after: i64,
         limit: i64,
         now: i64,
-    ) -> Result<Vec<(i64, String)>, StoreError> {
+    ) -> Result<Vec<(i64, String, Option<String>)>, StoreError> {
         let c = self.conn()?;
         let mut st = c
             .prepare(
-                "SELECT id, env FROM mailbox WHERE device = ?1 AND id > ?2 AND expires >= ?3 ORDER BY id LIMIT ?4",
+                "SELECT id, env, origin FROM mailbox WHERE device = ?1 AND id > ?2 AND expires >= ?3 ORDER BY id LIMIT ?4",
             )
             .map_err(store_err)?;
         let rows = st
             .query_map(params![device, after, now, limit], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .map_err(store_err)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(store_err)
@@ -1091,14 +1104,14 @@ mod tests {
     #[test]
     fn queued_hides_expired_envelopes() {
         let db = db();
-        db.enqueue("b1", "old", 100, 10).expect("enqueue");
-        db.enqueue("b1", "new", 200, 10).expect("enqueue");
+        db.enqueue("b1", "old", 100, 10, None).expect("enqueue");
+        db.enqueue("b1", "new", 200, 10, None).expect("enqueue");
         // Before the purge sweep runs, the expired envelope is still stored but not handed out.
         let queued = db.queued("b1", 0, 10, 150).expect("queued");
         assert_eq!(
             queued
                 .iter()
-                .map(|(_, env)| env.as_str())
+                .map(|(_, env, _)| env.as_str())
                 .collect::<Vec<_>>(),
             vec!["new"]
         );

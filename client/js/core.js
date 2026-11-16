@@ -9,7 +9,7 @@ import * as rc from "../vendor/rootcard/src/index.js";
 import * as p from "./protocol.js";
 import { PART_BATCH, Store } from "./store.js";
 import { Socket } from "./net.js";
-import { fetchState, lookup, proveToServer } from "./identity.js";
+import { fetchState, isServerOrigin, lookup, proveToServer, stateFromEvents } from "./identity.js";
 import { ApiError } from "./api.js";
 import { emojiOnly } from "./emoji.js";
 
@@ -207,6 +207,12 @@ export class Messenger extends EventTarget {
     this.realms = realms;
     this.lists = new Map(); // account → { state, list, prekeys: Map, at }
     this.contacts = new Map();
+    this.servers = new Map(); // account → origin of its Murmo server, for accounts on another server that are not contacts yet
+    // Other Murmo servers, asked by ours over the logged-in connection (federation, DESIGN.md §14.2).
+    this.remote = {
+      lookup: (server, handle) => this.ws.remote({ t: "remote-lookup", server, handle }),
+      devices: (server, account, fresh = false) => this.ws.remote({ t: "remote-devices", server, account, fresh }),
+    };
     this.prekeys = new Map(); // id → { privateKey, publicRaw, time }
     this.files = new Map(); // f → transfer state, see fileState()
     this.freed = new Set(); // files removed from this device to free room, not to be taken again unasked (§13.9)
@@ -306,13 +312,31 @@ export class Messenger extends EventTarget {
 
   // ── device lists ──────────────────────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * The Murmo server an account uses, when it is not this one (federation): a contact's, or the server a message from
+   * an account that is not a contact yet came through. Null for this server.
+   */
+  serverOf(account) {
+    if (account === this.me.account) return null;
+    const s = this.contacts.get(account)?.server ?? this.servers.get(account);
+    return isServerOrigin(s) ? s : null;
+  }
+
   /** The verified device list of an account with verified prekeys; cached for a minute. */
   async list(account, fresh = false) {
     const c = this.lists.get(account);
     if (c && !fresh && Date.now() - c.at < LIST_TTL) return c;
-    // The server says where the identity lives; its log is fetched from there and verified here.
-    const r = await this.api.devices(account);
-    const state = await fetchState(this.api, r.home, this.realms, account);
+    const server = this.serverOf(account);
+    let r, state;
+    if (server) {
+      // On another server: ours fetches the list and the log from there; both are verified here as always.
+      r = await this.remote.devices(server, account, fresh);
+      state = await stateFromEvents(r.events, this.realms, account);
+    } else {
+      // The server says where the identity lives; its log is fetched from there and verified here.
+      r = await this.api.devices(account);
+      state = await fetchState(this.api, r.home, this.realms, account);
+    }
     const list = r.entries.length
       ? await p.verifyDevices(account, state.instance.account_key, r.entries)
       : { entries: [], present: [], head: "" };
@@ -326,7 +350,7 @@ export class Messenger extends EventTarget {
         // a prekey that does not verify is ignored
       }
     }
-    const entry = { state, list, prekeys, home: r.home, at: Date.now() };
+    const entry = { state, list, prekeys, home: r.home, server, at: Date.now() };
     this.lists.set(account, entry);
     if (account !== this.me.account) await this.checkPinned(account, list);
     return entry;
@@ -349,6 +373,21 @@ export class Messenger extends EventTarget {
       if (changed) c.devicesChanged = p.now();
       await this.saveContact(c);
     }
+  }
+
+  /**
+   * A sender's device, looked up on the server the envelope came through (`via`, null for this one). An account is
+   * on one server for us: one that is a contact (or our own) must keep coming through the same server.
+   */
+  async lookupDeviceVia(account, id, via) {
+    if (account === this.me.account) return via ? undefined : this.lookupDevice(account, id);
+    const c = this.contacts.get(account);
+    if (c && (isServerOrigin(c.server) ? c.server : null) !== via) return undefined;
+    if (!c) {
+      if (via) this.servers.set(account, via);
+      else this.servers.delete(account);
+    }
+    return this.lookupDevice(account, id);
   }
 
   async lookupDevice(account, id) {
@@ -410,9 +449,12 @@ export class Messenger extends EventTarget {
     if (this.contacts.get(account)?.state !== "accepted") throw new ApiError(409, "not_accepted");
   }
 
-  /** Bring a contact's handle and home up to date from its verified rootcard state. */
+  /**
+   * Bring a contact's handle and home up to date from its verified rootcard state. A contact on another Murmo server
+   * (`c.server`) is shown with that server: `Name#TAG@host`.
+   */
   static fromState(c, state) {
-    c.handle = state.handle;
+    c.handle = isServerOrigin(c.server) ? `${state.handle}@${new URL(c.server).host}` : state.handle;
     c.home = state.instance.home.url;
     c.updated = p.now();
   }
@@ -423,18 +465,25 @@ export class Messenger extends EventTarget {
 
   /** Start a conversation with an exact identifier (`Name#TAG`): a message request (DESIGN.md §6.1). */
   async request(handle, note = "") {
-    const state = await lookup(this.api, this.realms, handle);
+    const { state, server } = await lookup(this.api, this.realms, handle, this.remote);
     if (state.account === this.me.account) throw new ApiError(400, "self");
     const existing = this.contacts.get(state.account);
     if (existing?.state === "accepted") return existing;
+    // An account that is known on another server than the one now asked for: a different device list.
+    if (existing && (existing.server ?? null) !== server) throw new ApiError(409, "other_server");
+    if (server) this.servers.set(state.account, server);
+    else this.servers.delete(state.account);
     const l = await this.list(state.account, true);
     if (l.list.present.length === 0) throw new ApiError(409, "no_devices");
     const c = existing ?? { account: state.account, handle: state.handle, created: p.now() };
+    if (server) c.server = server;
     Messenger.fromState(c, state);
     c.state = existing?.state === "incoming" ? "accepted" : "outgoing";
     c.pinned = { head: l.list.head, length: l.list.entries.length };
     await this.saveContact(c);
     const body = { note: String(note).slice(0, NOTE_MAX) };
+    // Our other devices learn from it where the contact is (the contact itself ignores it).
+    if (server) body.server = server;
     const kind = c.state === "accepted" ? "accept" : "request";
     const { id, time } = await this.send(c.account, kind, body);
     if (body.note) await this.record({ id, conv: c.account, dir: "out", time, kind: "text", text: body.note, delivered: 0 });
@@ -519,6 +568,7 @@ export class Messenger extends EventTarget {
         this.device.privateKey,
       );
       const item = { device: t.device, env: await p.seal(t.device, t.prekey, bytes) };
+      if (t.server) item.server = t.server; // a device on another Murmo server: ours hands it over
       if (t.account !== this.me.account && NOTIFY_KINDS.includes(kind)) item.notify = true;
       if (ttl) item.ttl = ttl;
       to.push(item);
@@ -548,7 +598,9 @@ export class Messenger extends EventTarget {
     const c = this.contacts.get(account);
     if (c?.fork) throw new ApiError(409, "fork");
     const l = await this.list(account);
-    return l.list.present.filter((d) => l.prekeys.has(d.id)).map((d) => ({ account, device: d.id, prekey: l.prekeys.get(d.id) }));
+    return l.list.present
+      .filter((d) => l.prekeys.has(d.id))
+      .map((d) => ({ account, device: d.id, prekey: l.prekeys.get(d.id), server: l.server }));
   }
 
   /** A message to the other party and to our own other devices; `id` may be chosen beforehand. */
@@ -789,7 +841,8 @@ export class Messenger extends EventTarget {
     let m;
     try {
       const plain = await p.open(this.me.device, this.prekeys, f.env);
-      m = await p.verifyMessage(plain, this.me, (a, d) => this.lookupDevice(a, d));
+      const via = isServerOrigin(f.server) ? f.server : null;
+      m = await p.verifyMessage(plain, this.me, (a, d) => this.lookupDeviceVia(a, d, via));
     } catch {
       this.ws.ack([f.id]); // undecryptable or forged: drop it
       return;
@@ -823,6 +876,8 @@ export class Messenger extends EventTarget {
           c.state = "accepted";
         } else {
           c = { account: peer, handle: state.handle, created: p.now(), state: "incoming", note };
+          const server = this.serverOf(peer);
+          if (server) c.server = server;
         }
         Messenger.fromState(c, state);
         await this.saveContact(c);
@@ -892,8 +947,12 @@ export class Messenger extends EventTarget {
     switch (m.kind) {
       case "request": {
         if (conv === this.me.account) return;
+        const known = this.contacts.get(conv);
+        // A request to a contact on another server says which (from our own device, so it is trusted as ours).
+        if (!known && isServerOrigin(m.body?.server)) this.servers.set(conv, m.body.server);
         const state = (await this.list(conv, true)).state;
-        const c = this.contacts.get(conv) ?? { account: conv, handle: state.handle, created: p.now() };
+        const c = known ?? { account: conv, handle: state.handle, created: p.now() };
+        if (!known && isServerOrigin(m.body?.server)) c.server = m.body.server;
         if (c.state !== "accepted") c.state = c.state === "incoming" ? "accepted" : "outgoing";
         Messenger.fromState(c, state);
         await this.saveContact(c);
@@ -1110,6 +1169,8 @@ export class Messenger extends EventTarget {
    */
   async sendFile(conv, file, progress = null, ttl = 0) {
     this.requireAccepted(conv);
+    // Files go through the server's relay, which does not reach other servers yet (DESIGN.md §14).
+    if (this.serverOf(conv)) throw new ApiError(400, "remote_files");
     if (file.size > p.MAX_FILE) throw new ApiError(413, "too_large");
     if (ttl && !EPHEMERAL_TTLS.includes(ttl)) throw new ApiError(400, "bad_ttl");
     if (ttl && !p.inlineImage(p.safeMime(file.type), file.size)) throw new ApiError(400, "ephemeral_files");

@@ -5,12 +5,14 @@ use crate::app::{App, PUSH_QUEUE, Push, now, random, text};
 use crate::db::{ChunkData, QueuedData};
 use crate::devices::{verify_prekey, verify_ws_auth};
 use crate::error::ApiError;
+use crate::federation::Outgoing;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, header};
 use axum::response::{IntoResponse, Response};
 use rootcard::encoding::base64url_encode;
 use rootcard::json::{Map, Value, parse_limited};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -231,13 +233,14 @@ async fn session(
         if batch.is_empty() {
             break;
         }
-        for (id, env) in batch {
+        for (id, env, origin) in batch {
             after = id;
-            socket
-                .send(frame(
-                    Map::new().with("t", "msg").with("id", id).with("env", env),
-                ))
-                .await?;
+            let mut m = Map::new().with("t", "msg").with("id", id).with("env", env);
+            if let Some(o) = origin {
+                // From a device on another server (federation): the client looks the sender up there.
+                m.insert("server", o.into());
+            }
+            socket.send(frame(m)).await?;
         }
     }
     for r in app.links.pending(&me.account) {
@@ -344,6 +347,7 @@ fn handle(app: &Arc<App>, me: &Authed, m: &Map) -> Option<Message> {
         Some("relay-space") => relay_space(app, me, m),
         Some("relay-grant") => relay_grant(app, me, m),
         Some("presence") => presence(app, me, m),
+        Some("remote-lookup" | "remote-devices") => remote(app, me, m),
         Some("seen") => seen(app, me, m),
         Some("push-sub") => push_sub(app, me, m),
         Some("ping") => Ok(Some(frame(Map::new().with("t", "pong")))),
@@ -391,6 +395,7 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
         return Err(ApiError::new(400, "bad_field"));
     }
     let mut failed: Vec<Value> = Vec::new();
+    let mut remote: HashMap<String, Vec<Outgoing>> = HashMap::new();
     let now = now();
     for r in to {
         let o = r.as_object().ok_or(ApiError::new(400, "bad_field"))?;
@@ -411,12 +416,25 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
             .get("env")
             .and_then(Value::as_str)
             .ok_or(ApiError::new(400, "bad_field"))?;
-        if env.len() > MAX_ENVELOPE
-            || !env
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        check_envelope(env)?;
+        // A device on another Murmo server (federation): handed to that server below.
+        if let Some(server) = o.get("server").and_then(Value::as_str)
+            && !app.is_origin(server)
         {
-            return Err(ApiError::new(400, "bad_envelope"));
+            if device.len() > 64 || !crate::federation::allowed(app, server) {
+                failed.push(device.into());
+            } else {
+                remote
+                    .entry(server.to_string())
+                    .or_default()
+                    .push(Outgoing {
+                        device: device.to_string(),
+                        env: env.to_string(),
+                        ttl: o.get("ttl").map(|_| ttl),
+                        notify: o.get("notify").and_then(Value::as_bool) == Some(true),
+                    });
+            }
+            continue;
         }
         if !app.db.device_known(device).map_err(ApiError::internal)? {
             failed.push(device.into());
@@ -424,7 +442,7 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
         }
         match app
             .db
-            .enqueue(device, env, expires, MAX_QUEUE)
+            .enqueue(device, env, expires, MAX_QUEUE, None)
             .map_err(ApiError::internal)?
         {
             Some(mid) => {
@@ -438,12 +456,96 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
             None => failed.push(device.into()),
         }
     }
-    Ok(Some(frame(
-        Map::new()
+    if remote.is_empty() {
+        return Ok(Some(frame(
+            Map::new()
+                .with("t", "sent")
+                .with("id", id)
+                .with("failed", Value::Array(failed)),
+        )));
+    }
+    // Envelopes for other servers go there first; `sent` follows when they have answered.
+    let (app, device, id) = (app.clone(), me.device.clone(), id.to_string());
+    tokio::spawn(async move {
+        for (server, msgs) in remote {
+            for d in crate::federation::deliver(&app, &server, msgs).await {
+                failed.push(d.into());
+            }
+        }
+        let sent = Map::new()
             .with("t", "sent")
             .with("id", id)
-            .with("failed", Value::Array(failed)),
-    )))
+            .with("failed", Value::Array(failed));
+        app.hub.to_device(&device, Push::Text(text(&sent.into())));
+    });
+    Ok(None)
+}
+
+/// `{ t: "remote-lookup", server, handle, ref }` or `{ t: "remote-devices", server, account, fresh?, ref }`: this server
+/// asks another one for one of its own users (federation, DESIGN.md §14.2). Answered `{ t: "remote", ref, value }`
+/// when the other server has answered, or with an error. Only devices of accounts on this server can ask, so the
+/// server is never a proxy for anyone else.
+fn remote(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
+    let r = m
+        .get("ref")
+        .and_then(Value::as_str)
+        .filter(|r| !r.is_empty() && r.len() <= 64)
+        .ok_or(ApiError::new(400, "bad_field"))?
+        .to_string();
+    let field = |k: &str| {
+        m.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| s.len() <= 256)
+            .map(str::to_string)
+            .ok_or(ApiError::new(400, "bad_field"))
+    };
+    let server = field("server")?;
+    let lookup = m.get("t").and_then(Value::as_str) == Some("remote-lookup");
+    let (what, arg) = if lookup {
+        app.limits
+            .check(format!("remote-lookup:{}", me.device), 20, 60)?;
+        ("lookup", field("handle")?)
+    } else {
+        app.limits
+            .check(format!("remote-devices:{}", me.device), 240, 60)?;
+        ("devices", field("account")?)
+    };
+    let fresh = m.get("fresh").and_then(Value::as_bool) == Some(true);
+    let (app, device) = (app.clone(), me.device.clone());
+    tokio::spawn(async move {
+        let answer = if what == "lookup" {
+            crate::federation::lookup(&app, &server, &arg).await
+        } else {
+            crate::federation::devices(&app, &server, &arg, fresh).await
+        };
+        let reply = match answer {
+            Ok(value) => text(
+                &Map::new()
+                    .with("t", "remote")
+                    .with("ref", r.as_str())
+                    .with("value", value)
+                    .into(),
+            ),
+            Err(e) => match error_reply(&e, Some(&r)) {
+                Message::Text(t) => t.to_string(),
+                _ => return,
+            },
+        };
+        app.hub.to_device(&device, Push::Text(reply));
+    });
+    Ok(None)
+}
+
+/// An envelope as sent: base64url text of at most `MAX_ENVELOPE` bytes.
+pub fn check_envelope(env: &str) -> Result<(), ApiError> {
+    if env.len() > MAX_ENVELOPE
+        || !env
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(ApiError::new(400, "bad_envelope"));
+    }
+    Ok(())
 }
 
 fn ack(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
@@ -1019,6 +1121,8 @@ mod tests {
             giphy_rating: "pg-13".into(),
             beta: true,
             demo: false,
+            federation: crate::federation::Policy::Off,
+            federation_block: Vec::new(),
             push_contact: String::new(),
         };
         let db = crate::db::Db::open(":memory:").expect("database");

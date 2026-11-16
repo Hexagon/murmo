@@ -19,6 +19,8 @@
 //! | `MURMO_GIPHY_KEY` | empty | GIPHY API key: lets browsers search GIPHY directly for their GIF collection (empty: no search) |
 //! | `MURMO_GIPHY_RATING` | `pg-13` | GIPHY content rating for searches (`g`, `pg`, `pg-13`, `r`) |
 //! | `MURMO_BETA` | `1` | mark the service as an open beta in the client (`0`: no mark) |
+//! | `MURMO_FEDERATION` | `open` | other Murmo servers to exchange messages with: `open` (any public https server), `off`, or a comma-separated list of origins |
+//! | `MURMO_FEDERATION_BLOCK` | empty | servers never to exchange messages with (comma-separated origins) |
 //! | `MURMO_DEMO` | `0` | mark this server as a demo whose data may be wiped at any time (`1`), as murmo.org |
 //!
 //! Each variable is also read under its old name, `MESG_…`, when the `MURMO_…` name is not set. The default files
@@ -31,6 +33,7 @@ pub mod app;
 pub mod db;
 pub mod devices;
 pub mod error;
+pub mod federation;
 pub mod push;
 pub mod rc;
 pub mod remote;
@@ -195,6 +198,11 @@ fn config() -> Result<Config, String> {
         },
         beta: env("MURMO_BETA", "1") != "0",
         demo: env("MURMO_DEMO", "0") == "1",
+        federation: federation::Policy::parse(&env("MURMO_FEDERATION", "open")),
+        federation_block: list(&env("MURMO_FEDERATION_BLOCK", ""))
+            .into_iter()
+            .map(|o| o.trim_end_matches('/').to_ascii_lowercase())
+            .collect(),
     })
 }
 
@@ -311,8 +319,15 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/info", get(api::info))
         .route("/api/v1/challenge", post(api::challenge))
         .route("/api/v1/lookup", get(api::lookup))
+        .route("/api/v1/accounts/{account}/log", get(api::get_log))
         .route("/api/v1/ws", get(ws::upgrade))
-        .layer(DefaultBodyLimit::max(api::MAX_BODY));
+        .layer(DefaultBodyLimit::max(api::MAX_BODY))
+        // After the general limit, so that this route alone takes a full send.
+        .route(
+            "/api/v1/federation/deliver",
+            post(federation::post_deliver)
+                .layer(DefaultBodyLimit::max(federation::MAX_DELIVER_BODY)),
+        );
     if !app.cfg.client_dir.is_empty() {
         r = r.fallback_service(ServeDir::new(&app.cfg.client_dir));
     }
@@ -367,6 +382,7 @@ pub fn build(
         links: Links::default(),
         limits,
         challenges: Challenges::default(),
+        fed: federation::Federation::new(&seed),
     }))
 }
 
@@ -393,6 +409,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             sweeper.links.sweep();
             sweeper.limits.sweep();
             sweeper.hub.sweep_grants();
+            sweeper.fed.sweep();
             if let Err(e) = sweeper.limits.save() {
                 eprintln!("rate limits: {e}");
             }

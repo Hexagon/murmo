@@ -70,6 +70,10 @@ pub struct Config {
     pub beta: bool,
     /// Whether the client marks this server as a demo, whose data may be wiped at any time.
     pub demo: bool,
+    /// Which other Murmo servers this one exchanges envelopes with (`MURMO_FEDERATION`).
+    pub federation: crate::federation::Policy,
+    /// Servers it never exchanges envelopes with (`MURMO_FEDERATION_BLOCK`), as origins.
+    pub federation_block: Vec<String>,
 }
 
 /// The hosts a browser talks to for GIPHY search (the API and its media), allowed by the CSP only when a key is set.
@@ -750,6 +754,8 @@ pub struct App {
     pub challenges: Challenges,
     /// Web Push wake-ups.
     pub push: crate::push::Pusher,
+    /// Federation with other Murmo servers.
+    pub fed: crate::federation::Federation,
 }
 
 /// The current state of an account as far as murmo is concerned.

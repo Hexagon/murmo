@@ -30,6 +30,8 @@ Set in the environment:
 | `MURMO_GIPHY_KEY` | empty | GIPHY API key; lets users search GIPHY to fill their GIF collection, directly from the browser (empty: no search). A beta key allows 100 searches an hour for the whole server |
 | `MURMO_GIPHY_RATING` | `pg-13` | GIPHY content rating for searches (`g`, `pg`, `pg-13`, `r`) |
 | `MURMO_BETA` | `1` | mark the service as an open beta in the client (`0`: no mark) |
+| `MURMO_FEDERATION` | `open` | other Murmo servers this one exchanges messages with: `open` (any public https server with a domain name), `off`, or a comma-separated list of origins (DESIGN.md §14) |
+| `MURMO_FEDERATION_BLOCK` | empty | servers never to exchange messages with (comma-separated origins) |
 | `MURMO_DEMO` | `0` | mark this server as a demo (`1`): a "Demo" mark, a notice on the login screen and a section in the terms saying that identities, messages and files may be wiped at any time, with a link to running one's own server. murmo.org runs with it |
 
 Murmo was called mesg before. The old variable names (`MESG_…`) still work when the new ones are not set, and an
@@ -39,6 +41,39 @@ The version shown in the app ("Säkerhet och integritet") is the commit the serv
 `GITHUB_SHA` at build time, otherwise `git rev-parse HEAD`.
 
 The `MURMO_ORIGIN` goes into users' signed rootcard logs as their home address: choose it once.
+
+## Federation
+
+Murmo servers exchange messages with each other: a user on your server writes to `Name#TAG@other.example`, and your
+server delivers the encrypted envelopes there ([DESIGN.md §14](DESIGN.md#14-federation)). Nothing needs to be set up
+for it: the server signs its deliveries with a key derived from `murmo-host.key` and publishes it in `/api/v1/info`.
+Your server must be reachable at `MURMO_ORIGIN` over https from the other servers, and it makes outgoing https
+requests to them.
+
+- `MURMO_FEDERATION=open` (the default): any public https server. Block abusive ones with `MURMO_FEDERATION_BLOCK`.
+- A list of origins, for a group of servers that know each other (a family's, a club's).
+- `off`: a private island, as before federation.
+
+Files and GIFs do not go between servers yet; users are told so when they try.
+
+## Upgrading to the federation release
+
+What changes for a server that ran an earlier version, and for its users:
+
+- **The database** gets a column for the server an envelope came from (`mailbox.origin`), added at the first start.
+  Envelopes waiting in mailboxes are kept. Nothing else is migrated, and no new file needs a backup.
+- **Federation is on** (`open`) after the update. Users can be reached from other servers by anyone who knows their
+  exact identifier, as a message request that they must accept; nobody can search for them. If your server was meant
+  to be private, set `MURMO_FEDERATION=off` (or a list) before you start the new version.
+- **Users** see their identifier as `Name#TAG@your.host`, and that is what "Kopiera identifierare" copies. The short
+  form still works on your server, and the old form for identities from rootcard.org (`Name#TAG@rootcard.org`) still
+  means what it meant.
+- **Existing contacts and conversations** stay as they are: a contact without a server is on this server.
+- **Pages opened before the update** do not know about other servers. Until they are reloaded (the app offers it when
+  the build changes), a message from another server is lost on that device, and a contact on another server added from
+  another own device does not work there. Ask users to reload open tabs and installed apps after the update.
+- **The terms** ("Villkor och integritet") are new, dated, and apply from the day they took effect; existing users see
+  them under the login, in the help and in the settings.
 
 ## Terms, privacy and the open beta
 

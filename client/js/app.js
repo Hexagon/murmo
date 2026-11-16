@@ -181,8 +181,23 @@ function busy(btn, text) {
   };
 }
 
+/**
+ * The identifier others use to reach this account from another Murmo server: `Name#TAG@this.server` (federation).
+ * Null when this server does not exchange messages with others.
+ */
+function fullAddress() {
+  return info?.federation ? `${messenger.handle.split("@")[0]}@${location.host}` : null;
+}
+
+/** Copy the identifier: the full address when there is federation (it works on this server too). */
 function copyHandle() {
-  return navigator.clipboard?.writeText(messenger.handle).then(() => toast(tr("common.handleCopied")));
+  return navigator.clipboard?.writeText(fullAddress() ?? messenger.handle).then(() => toast(tr("common.handleCopied")));
+}
+
+/** "From another Murmo server: Name#TAG@host", or null. */
+function addressHint() {
+  const a = fullAddress();
+  return a ? h("div", { class: "hint", text: tr("fed.address", { address: a }) }) : null;
 }
 
 function say(err) {
@@ -432,6 +447,7 @@ const TERMS_DATE = Date.UTC(2026, 10, 16) / 1000;
 const termSections = () => [
   ...(isDemo() ? [["terms.demo", 2]] : []),
   ["terms.fed", 3],
+  ["terms.data", 3],
   ["terms.beta", 3],
   ["terms.warranty", 3],
   ["terms.use", 4],
@@ -1579,7 +1595,7 @@ function renderWelcome() {
         "div",
         { class: "welcome-inner" },
         form,
-        h("div", { class: "card mine" }, h("div", {}, h("div", { class: "hint", text: tr("new.mine") }), h("strong", { text: messenger.handle })), h("button", { class: "btn small", text: tr("common.copy"), onclick: copyHandle })),
+        h("div", { class: "card mine" }, h("div", {}, h("div", { class: "hint", text: tr("new.mine") }), h("strong", { text: messenger.handle }), addressHint()), h("button", { class: "btn small", text: tr("common.copy"), onclick: copyHandle })),
         offer,
         singleDeviceReminder(),
         about(),
@@ -3649,6 +3665,7 @@ function showAccountMenu() {
   const d = dialog(
     h("h2", { text: messenger.handle }),
     h("p", { class: "hint", text: homeLabel(messenger.home) ? tr("acct.yourHandleFrom", { home: homeLabel(messenger.home) }) : tr("acct.yourHandle") }),
+    addressHint(),
     h(
       "div",
       { style: "display:flex;flex-direction:column;gap:8px" },

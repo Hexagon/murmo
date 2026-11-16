@@ -876,6 +876,8 @@ on the live budgets.
 | push endpoint per device | notifications (the user's choice) | until turned off, logged out, or reported gone |
 | VAPID key | signing push requests | while the server exists |
 | network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
+| the sending server of an envelope from another server (§14) | the recipient looks the sender up there | with the envelope |
+| other servers' federation keys, nonces of their deliveries, device lists fetched from them, in memory | federation (§14) | an hour, 10 minutes, 20 seconds |
 
 No access logs with addresses are written by default (`MURMO_LOG=info` logs no addresses or account ids).
 
@@ -910,6 +912,16 @@ What clients from before emoji, reactions, the shared GIF collection and code fo
 | `relay-grant` | not sent by older devices, so a file they ask for comes on the live budgets as before; an older sender ignores the server's note and paces for the live budgets, which still leaves the transfer within the grant |
 
 An older device sends nothing new, so a newer device has nothing to handle from it.
+
+Federation (§14) and devices from before it:
+- A device whose page was opened before federation drops envelopes that came from another server (it looks the sender
+  up on its own server and does not find it) and acknowledges them: such a message is lost on that device only.
+- It ignores `server` in a request to a contact on another server that another own device sent, and stores the contact
+  as if it were on this server; after the reload that contact does not work on that device (`unknown_account`) until
+  it is removed and asked again. Both last only until the page is reloaded, which the client offers when the build
+  changes.
+- An older client sends the full address `Name#TAG@this.host` as it is; the server's lookup treats its own host as
+  itself, so it still finds the account.
 
 ## 13. Ideas, not decided
 
@@ -1109,3 +1121,109 @@ Built: the files view and removing files from one device (§9.4). What is left o
 - **First frames of videos** on their tiles: the video would have to be put together to draw one.
 - **"Keep it only on this computer":** removing a file from all own devices but one. It needs a new `sync` kind and a
   §12 row, so it waits until removing on one device has been used.
+
+## 14. Federation
+
+Anyone can run a Murmo server, and servers hand each other envelopes, so that people on different servers can write to
+each other. There is no central server: murmo.org is a demo (`MURMO_DEMO=1`), like any other server.
+
+### 14.1 Addresses and where an account is
+
+Every account has **one Murmo server for a contact**: the one its device list and mailbox are on. For the people on
+the same server nothing changes: `Name#TAG`. Someone on another server is written **`Name#TAG@host`**, where `host` is
+that Murmo server (https; plain http only on loopback, for development). The client shows contacts on other servers so
+(`c.handle`), stores the server's origin (`c.server`) and copies the user's own identifier as the full address
+`Name#TAG@this.host` when the server takes part in federation (it works on this server as well).
+
+`Name#TAG@host` is resolved in this order, which keeps what it meant before federation:
+1. `host` is this server: an identity that uses this server.
+2. An identity from the rootcard home `host` (such as rootcard.org) that uses this server (§3.1).
+3. An account on the Murmo server at `host`.
+
+An identity from rootcard.org that uses two Murmo servers has two device lists; a contact knows it on one of them, the
+one it was found on or whose messages came first. A message from an account that a contact knows on another server is
+dropped (`lookupDeviceVia`), and `request` refuses it (`other_server`).
+
+### 14.2 The client talks to its own server only
+
+The client never contacts another Murmo server; its own server does, on the client's behalf. This keeps the user's
+network address from every server they write to, and the page's CSP as it was. It is asked over the logged-in
+WebSocket only, so a server answers for devices of its own accounts and is never a proxy for anyone else:
+
+| Frame | Answer |
+|---|---|
+| `{ t: "remote-lookup", server, handle, ref }` | `{ t: "remote", ref, value: { account, home, handle, server } }`: the exact identifier on `server` |
+| `{ t: "remote-devices", server, account, fresh?, ref }` | `{ t: "remote", ref, value }`: the device list and prekeys of the account on `server`, with the identity's log (`events`) as that server has it |
+
+Errors come as `{ t: "error", error, id: ref }`. Both are limited per device (20 and 240 a minute).
+
+The client verifies the log (`stateFromEvents`: self-certifying, so it does not matter who carried it) and the device
+list against the account key the log names, and pins the head, exactly as for an account on its own server (§4, §5.3).
+A server in the middle can withhold or delay a list, never forge one. Answers of `remote-devices` are reused for 20
+seconds for other requests, since all users of a server share its address, and so its rate limits, at the other
+server; `fresh` (a device not seen yet, a list that changed) always asks.
+
+Every server answers for its own accounts with what it already published: `/api/v1/lookup`,
+`/api/v1/accounts/{account}/devices`, and now `GET /api/v1/accounts/{account}/log` (the newest log it has, its own or
+one it fetched from another home).
+
+### 14.3 Delivery between servers
+
+In `send`, a recipient on another server carries `server` (its origin). The sending server groups them by server and
+POSTs to each:
+
+```
+POST {server}/api/v1/federation/deliver
+{ req: { v: 1, from, to, time, nonce, msgs: [{ device, env, ttl?, notify? }] }, sig }
+```
+
+`sig` is Ed25519 over `frame("murmo/federation/v1", canonical(req))` by the sending server's **federation key**,
+derived from its host key (`HKDF(host seed, "murmo", "murmo/federation-key/v1")`), so there is nothing new to keep or
+back up. It is published in `/api/v1/info` as `federation.key`. The receiving server:
+- refuses servers outside its policy (§14.4), deliveries not addressed `to` itself, times more than 5 minutes off and
+  nonces it has seen;
+- fetches the sender's key from `{from}/api/v1/info` (that origin must list itself in `origins`), over https: TLS is
+  what ties the key to the name. Keys are cached for an hour and fetched again once when a signature does not verify
+  (a new host key);
+- limits envelopes per sending server (6 000 a minute), per receiving device (600 a minute) and requests per address;
+- queues each envelope for a device it knows, with the same limits as its own (`MAX_QUEUE`, `MAILBOX_TTL`, `ttl`), and
+  remembers the sending server with it (`mailbox.origin`). The device gets `{ t: "msg", id, env, server }`, and is
+  woken by push when `notify` is set;
+- answers `{ failed }`: unknown devices and full mailboxes. The sending server adds them to `failed` in `sent`, which
+  it sends when every server has answered (at most 10 seconds each).
+
+**No relaying.** A server sends deliveries only for envelopes from authenticated devices of its own accounts, and
+queues received envelopes only for devices that have a prekey on it, which only its own accounts' devices upload; it
+never passes a received envelope on. So a server cannot be used between two accounts that are both elsewhere.
+
+A receiving client looks the sender's device up on `server` (and on its own server when `server` is absent). Everything
+that goes in envelopes therefore works between servers: requests, texts, receipts, reactions, edits, taking back,
+disappearing messages and history between own devices (which are always on one server).
+
+### 14.4 Policy
+
+`MURMO_FEDERATION` is `open` (the default: any public https origin with a domain name, never an IP literal, `localhost`
+or `.local`/`.internal`), `off`, or a list of origins; `MURMO_FEDERATION_BLOCK` lists origins never to talk to. The
+policy decides both what the server fetches for its clients and what it accepts. A server with `off` publishes no
+federation key, and other servers then refuse it as `federation_refused` rather than reporting an unknown account.
+
+### 14.5 What each server learns
+
+| | Sender's server | Recipient's server |
+|---|---|---|
+| content | nothing (E2E) | nothing (E2E) |
+| who sends | the account and device, as for local messages | only the sending **server** |
+| who receives | the recipient's devices, and their server | the devices, as for local messages |
+| when and how much | yes, in the moment | yes, in the moment; ciphertext queued until fetched |
+
+Lookups and device lists of the recipient are asked by the sender's server, so the recipient's server sees which
+accounts on it are looked up by users of that server (not by whom).
+
+### 14.6 Not yet across servers
+
+- **Files** (live relay, the file queue, grants) and **GIFs**, which are files: refused with `remote_files` for a
+  contact on another server. Servers have their own file limits (`file_queue_limits`, relay budgets); a transfer
+  between servers will have to keep within the smaller of both.
+- **Presence**: devices on another server are not asked, so they count as away.
+- The `devices` notice: a change of a contact's list on another server is learned from the heads in its next message
+  (§5.3), as T3 already allows.

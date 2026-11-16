@@ -6,7 +6,7 @@
 
 <p align="center">
   End-to-end encrypted messaging in the browser, with no phone number and no e-mail address.<br>
-  <strong><a href="https://murmo.org">Try it at murmo.org</a></strong> ·
+  <strong><a href="https://murmo.org">Try the demo at murmo.org</a></strong> ·
   <a href="docs/DESIGN.md">Design</a> ·
   <a href="docs/THREAT_MODEL.md">Threat model</a> ·
   <a href="docs/HOSTING.md">Hosting</a> ·
@@ -27,6 +27,8 @@ as little as possible.
 
 ## Features
 
+- **Federated.** Anyone can run a server, private or open; people on different servers write to each other as
+  `Name#TAG@server`. [murmo.org](https://murmo.org) is a demo server to try it on.
 - **No phone number, no search.** Log in with a rootcard identity, created here or at another home such as
   rootcard.org. The password never leaves the browser.
 - **Message requests.** A stranger's first message is a request; block and decline are local decisions.
@@ -53,7 +55,8 @@ cargo run --release
 ```
 
 For a public server, put a TLS reverse proxy in front and set `MURMO_ORIGIN=https://your.domain` (choose it once: it
-goes into users' signed identity logs). All settings, and how to move to a new domain, are in
+goes into users' signed identity logs). Your server exchanges messages with other Murmo servers by default; make it
+private with `MURMO_FEDERATION=off` or a list of servers. All settings, and how to move to a new domain, are in
 [docs/HOSTING.md](docs/HOSTING.md).
 
 ## Development

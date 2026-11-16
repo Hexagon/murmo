@@ -66,7 +66,10 @@ Open, in order of priority:
 ## Phase 3: beyond one server
 
 - [x] Identities whose rootcard home is another host (logs fetched from allowlisted homes)
-- [ ] Server-to-server delivery (contacts on other Murmo servers)
+- [x] Server-to-server delivery (contacts on other Murmo servers): `Name#TAG@host`, signed deliveries, open, listed or
+      no federation, terms for a federated service, murmo.org as a demo (`DESIGN.md` §14)
+- [ ] Files between servers, within the smaller of both servers' file limits (`DESIGN.md` §14.6)
+- [ ] Presence for devices on other servers
 
 ## Ideas, not decided
 

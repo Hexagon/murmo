@@ -5,6 +5,7 @@
 // that is being set up instead of failing at once.
 
 import * as p from "./protocol.js";
+import { ApiError } from "./api.js";
 
 const HEARTBEAT = 25_000;
 const PONG_WAIT = 8_000;
@@ -215,6 +216,7 @@ export class Socket extends EventTarget {
         this.dispatchEvent(new CustomEvent(f.t, { detail: f }));
         return;
       case "sent":
+      case "remote":
       case "presence":
       case "seen":
       case "prekey-ok":
@@ -278,6 +280,19 @@ export class Socket extends EventTarget {
         reject(e);
       }
     });
+  }
+
+  /**
+   * Ask this server to ask another Murmo server (federation): `remote-lookup` or `remote-devices`. Only over this
+   * authenticated connection, so the server answers for its own users only. Returns the other server's answer.
+   */
+  async remote(frame) {
+    const ref = p.b64(p.random(12));
+    try {
+      return (await this.call({ ...frame, ref }, ref)).value;
+    } catch (e) {
+      throw new ApiError(502, e?.message ?? "server_error");
+    }
   }
 
   async sendEnvelopes(to) {
