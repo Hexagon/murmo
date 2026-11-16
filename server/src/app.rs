@@ -3,7 +3,7 @@
 use crate::db::{Db, Identities};
 use crate::devices::{Device, DeviceList, verify_list};
 use crate::error::ApiError;
-use rootcard::json::{Value, canonical};
+use rootcard::json::{Map, Value, canonical};
 use rootcard::keys::{KeyType, format_key};
 use rootcard_host::Host;
 use rootcard_host::store::{IdentityStore, MemoryChallengeStore, MemorySessionStore};
@@ -170,6 +170,13 @@ impl Hub {
     ) -> u64 {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut g) = self.conns.lock() {
+            // The same device connected again (another tab or window of the same browser profile): the newer one
+            // takes over, and the older one is told, so that it does not connect again and push this one out in
+            // turn. Its connection then ends (its sender is dropped below).
+            if let Some(old) = g.get(device) {
+                let note = Map::new().with("t", "error").with("error", "replaced");
+                let _ = old.tx.try_send(Push::Text(text(&note.into())));
+            }
             g.insert(
                 device.to_string(),
                 Conn {

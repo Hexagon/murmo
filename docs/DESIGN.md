@@ -608,6 +608,16 @@ the composer says so before the transfer starts, and account settings show the l
 5. **Later federation between one account's devices:** a device that has the metadata but not the content can ask its
    own connected devices (`file-req` over the relay). A device that has the file streams it back the same way. Only
    devices in the account's own verified device list are served.
+6. **Asking the sender again.** A live chunk can be lost after the server took it: to a page whose connection had
+   died without the server noticing yet (a frozen background tab), or one that had no room for it at that moment.
+   The server counts it as delivered, so the sender would not send it again, and if every device of the recipient
+   missed it, step 5 finds nobody. So every device remembers the files it has the message of but not the content
+   (`wantedFiles`, an encrypted secret) and asks for one that has had no part for 45 seconds (`FILE_STALL`): its own
+   connected devices and one connected device of the contact (the one that sent it, if it is there), then again
+   after 1 minute, 5 and 30 minutes, 2 and 12 hours, for at most `FILE_RETRY` (14 days). *Hämta filen* does the same
+   at once. The sender streams any file it sent in that conversation to a verified device of the contact that asks,
+   one stream per file and device at a time and at most once a minute (`SERVE_AGAIN`). A large file (`ask`) is not
+   asked for on its own: it waits for *Ta emot*.
 
 **Large files are taken, not pushed.** A file over 50 MiB (`ASK_ABOVE`) is not streamed or queued to any device,
 since a phone on mobile data should not download hundreds of megabytes because a contact sent them. Its `file` message
@@ -779,6 +789,13 @@ retry }` (`retry`: seconds), and counts nothing. The budgets are announced in `r
 to stay under 90 % of them over any sliding minute, and a transfer whose chunk is refused anyway stops and is offered
 again later, like one whose connection broke.
 
+**One connection per device.** The server keeps one connection per device; a new one from the same device (another
+tab or window of the same browser profile, which share the device's stored keys) takes over, and the older one is
+told `{ t: "error", error: "replaced" }` before its connection ends. That page stops connecting (otherwise the two
+would push each other out in turn, and messages and file chunks would land in whichever page happened to be
+connected, with the other page's view never told) and says that Murmo is open elsewhere, with *Använd här*, which
+reloads it and so takes the connection back.
+
 Rate limits count per IPv4 address and per IPv6 /64. Counters are keyed by a hash of the address under a random
 secret in the database (HKDF-SHA-256, 128 bits), never by the address itself. Windows of ten minutes or more
 (registration, link requests, vault fetches, `connect`) are saved every minute and on shutdown, so restarting the
@@ -912,6 +929,13 @@ What clients from before emoji, reactions, the shared GIF collection and code fo
 | `relay-grant` | not sent by older devices, so a file they ask for comes on the live budgets as before; an older sender ignores the server's note and paces for the live budgets, which still leaves the transfer within the grant |
 
 An older device sends nothing new, so a newer device has nothing to handle from it.
+
+Asking the sender again (§9 step 6) and one connection per device (§10):
+- An older sending device serves `file-req` only for `ask` files: a newer recipient's request for a pushed file is
+  ignored until the sender is updated; the recipient keeps asking with the waits above, and its own devices still
+  answer.
+- An older page that is replaced does not know `replaced` and connects again, pushing the newer page out, which then
+  stops and says so: the older page keeps the connection until it is reloaded, and the two do not alternate.
 
 Federation (§14) and devices from before it:
 - A device whose page was opened before federation drops envelopes that came from another server (it looks the sender

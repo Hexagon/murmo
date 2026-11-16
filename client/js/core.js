@@ -26,6 +26,13 @@ export const EPHEMERAL_WAIT = 7 * 24 * 3600;
 /** A file nobody could take is offered again for this long (the mailbox lifetime). */
 const FILE_RETRY = 14 * 24 * 3600;
 const FILE_RETRY_EVERY = 60_000;
+// An incoming file that has not come whole, with no part for this long, is asked for: from the sender and from the
+// own other devices (a live chunk can be lost on the way, for example to a page whose connection had died without
+// the server noticing yet). Then again after these waits, as long as FILE_RETRY.
+const FILE_STALL = 45_000;
+const FILE_ASK_AGAIN = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3600_000, 12 * 3600_000];
+// One file is streamed to one device that asks for it at most this often.
+const SERVE_AGAIN = 60_000;
 // Chunks that come before their `file` message wait in IndexedDB, within these limits (bytes): per sender account
 // and for all senders. More is not taken (a queued chunk is then not acknowledged, so it comes again later).
 const EARLY_SENDER = 16 * 1024 * 1024;
@@ -197,6 +204,8 @@ export class Messenger extends EventTarget {
     this.queueLimit = queueLimit;
     this.askAbove = () => p.ASK_ABOVE; // files larger than this wait for the recipient to take them
     this.pendingFiles = []; // [{ conv, id, time }] files some device has not been given yet
+    this.wantedFiles = []; // [{ conv, id, f, since, at, tries }] files this device has the message of but not the content
+    this.served = new Map(); // `file device` → when it was last streamed to that device on request
     this.missed = new Map(); // f → Set(device): "relay-missed" during a transfer
     this.refused = new Set(); // refs of transfers of which the server refused a chunk
     this.api = api;
@@ -238,6 +247,7 @@ export class Messenger extends EventTarget {
     }
     for (const c of await this.store.contacts()) this.contacts.set(c.account, c);
     this.pendingFiles = (await this.store.secret("pendingFiles")) ?? [];
+    this.wantedFiles = (await this.store.secret("wantedFiles")) ?? [];
     this.freed = new Set((await this.store.secret("freedFiles")) ?? []);
     for (const t of (await this.store.secret("timed")) ?? []) this.timed.set(t.id, { conv: t.conv, at: t.at });
     await this.sweepTimed(); // the app may have been closed in the middle of a countdown
@@ -248,11 +258,16 @@ export class Messenger extends EventTarget {
       sig: await p.wsAuth(this.me.account, this.device, nonce, this.api.origin),
     }));
     this.ws.addEventListener("status", (e) => {
-      this.status = e.detail;
+      // Replaced by another page of this device: it stays so (this page no longer connects).
+      if (this.status !== "replaced") this.status = e.detail;
       this.emit("status", e.detail);
       if (e.detail === "online") this.onOnline().catch((err) => this.fail(err));
     });
     this.ws.addEventListener("msg", (e) => this.onEnvelope(e.detail));
+    this.ws.addEventListener("replaced", () => {
+      this.status = "replaced";
+      this.emit("replaced");
+    });
     this.ws.addEventListener("relay", (e) => {
       const f = e.detail;
       // file-req streams a whole file: not in the queue, or arriving chunks would wait for it
@@ -268,6 +283,7 @@ export class Messenger extends EventTarget {
     clearInterval(this.pruneTimer);
     this.retryTimer = setInterval(() => {
       this.flushFiles().catch(() => {});
+      this.askWanted().catch(() => {});
       this.fetchMissingGifs().catch(() => {}); // a device that has them may have connected since
     }, FILE_RETRY_EVERY);
     this.pruneTimer = setInterval(() => this.prune().catch(() => {}), PRUNE_EVERY);
@@ -411,6 +427,7 @@ export class Messenger extends EventTarget {
     await this.flushReceipts();
     await this.flushFiles();
     await this.fetchMissingGifs();
+    await this.askWanted();
   }
 
   async rotatePrekey() {
@@ -1425,6 +1442,8 @@ export class Messenger extends EventTarget {
       await this.record(rec);
       // A file counts as arrived when its content is here (otherwise tryAssemble says so later).
       if (dir === "in" && have) this.queueReceipt(conv, m.id);
+      // Not here yet: asked for if it does not come (a large one waits to be taken instead, §9).
+      if (!have && !e && !b.ask) await this.wantFile(conv, m.id, b.f);
     }
     await this.serial(() => this.expectFile(b, { id: m.id, conv }));
     return fresh;
@@ -1572,19 +1591,23 @@ export class Messenger extends EventTarget {
   }
 
   /**
-   * A contact's device asks for a file that waits for it to be taken (`ask`): streamed to that device only, if it is
-   * one of the contact's verified devices and the file was sent to that conversation. One stream per file and device
-   * at a time, so repeated asking cannot make this device send a large file over and over at once.
+   * A contact's device asks for a file this device sent in that conversation: one that waits to be taken (`ask`), or
+   * one that was pushed and did not come whole (a live chunk lost on the way). Streamed to that device only, if it is
+   * one of the contact's verified devices. One stream per file and device at a time and at most every SERVE_AGAIN, so
+   * repeated asking cannot make this device send a file over and over.
    */
   async serveAsked(f, r) {
     if (typeof r.f !== "string" || r.f.startsWith("gif:") || this.contacts.get(f.account)?.state !== "accepted") return;
     const m = await this.findFileMessage(r.f, f.account);
-    if (m?.dir !== "out" || !m.file?.ask) return;
+    if (m?.dir !== "out" || !m.file) return;
     if (!(await this.peerTargets(f.account)).some((t) => t.device === f.from)) return;
     const ref = `${r.f}:${f.from}`;
     if (this.serving.has(ref)) return;
+    if (Date.now() - (this.served.get(ref) ?? 0) < SERVE_AGAIN) return;
     const read = await this.store.fileReader(r.f);
     if (!read) return;
+    this.served.set(ref, Date.now());
+    if (this.served.size > 1000) this.served.clear();
     this.serving.add(ref);
     try {
       await this.streamFile(m.file, read, [f.from]);
@@ -1689,6 +1712,7 @@ export class Messenger extends EventTarget {
     if (m && TOMBSTONES.includes(m.kind)) return this.dropTransfer(f, t, true); // taken back meanwhile
     await this.store.finishFile(f, t.meta.n, t.meta.size, t.meta.sha256);
     await this.dropTransfer(f, t);
+    await this.unwantFile(f);
     if (m?.file) {
       m.file.have = true;
       await this.store.putMessage(m);
@@ -1710,17 +1734,80 @@ export class Messenger extends EventTarget {
 
   /** Ask our own connected devices for a file we know about but do not have. Returns how many were asked. */
   async fetchFromOwnDevices(conv, f) {
+    return this.fetchFile(conv, f, { sender: false });
+  }
+
+  /**
+   * Ask for a file we know about but do not have: our own connected devices and, for a file from a contact, one of the
+   * contact's connected devices (the one that sent it, if it is there), which streams it again. Returns how many
+   * devices were asked.
+   */
+  async fetchFile(conv, f, { sender = true } = {}) {
     const m = await this.findFileMessage(f, conv);
     if (!m) return 0;
     await this.unfree(m);
     await this.serial(() => this.expectFile(m.file, { id: m.id, conv }));
+    if (await this.store.hasFile(f)) return 0;
     const own = (await this.ownTargets()).map((x) => x.device);
-    const online = await this.ws.presence(own);
-    if (online.length) {
-      await this.grantFor(online, m.file.size);
-      this.ws.relay(online, p.pack({ k: "file-req", f, conv }));
+    const asked = await this.ws.presence(own);
+    if (sender && m.dir === "in" && this.contacts.get(conv)?.state === "accepted") {
+      const theirs = await this.ws.presence((await this.peerTargets(conv)).map((t) => t.device));
+      const from = theirs.includes(m.device) ? m.device : theirs[0];
+      if (from) asked.push(from);
     }
-    return online.length;
+    if (asked.length) {
+      await this.grantFor(asked, m.file.size);
+      this.ws.relay(asked, p.pack({ k: "file-req", f, conv }));
+    }
+    return asked.length;
+  }
+
+  /** Remember that this device waits for the content of file `f` (of message `id`). */
+  async wantFile(conv, id, f) {
+    if (this.wantedFiles.some((w) => w.f === f)) return;
+    this.wantedFiles.push({ conv, id, f, since: Date.now(), at: 0, tries: 0 });
+    if (this.wantedFiles.length > 500) this.wantedFiles.shift();
+    await this.store.setSecret("wantedFiles", this.wantedFiles);
+  }
+
+  async unwantFile(f) {
+    if (!this.wantedFiles.some((w) => w.f === f)) return;
+    this.wantedFiles = this.wantedFiles.filter((w) => w.f !== f);
+    await this.store.setSecret("wantedFiles", this.wantedFiles);
+  }
+
+  /**
+   * Ask for the files this device waits for and that do not come: no part for FILE_STALL, then again after the waits
+   * in FILE_ASK_AGAIN. Forgotten when they are here, gone, removed on purpose, waiting to be taken, or FILE_RETRY old.
+   * Returns how many files were asked for.
+   */
+  async askWanted() {
+    if (this.asking || !this.wantedFiles.length || this.status !== "online") return 0;
+    this.asking = true;
+    let n = 0;
+    try {
+      const now = Date.now();
+      for (const w of [...this.wantedFiles]) {
+        const m = await this.store.message(w.id);
+        const f = m?.file;
+        if (!f || m.kind !== "file" || f.f !== w.f || f.have || f.ask || f.freed !== undefined || now - w.since > FILE_RETRY * 1000 || (await this.store.hasFile(w.f))) {
+          await this.unwantFile(w.f);
+          continue;
+        }
+        const t = this.files.get(w.f);
+        if (now - Math.max(t?.updated ?? 0, w.since) < FILE_STALL) continue; // still coming
+        if (w.at && now - w.at < FILE_ASK_AGAIN[Math.min(w.tries, FILE_ASK_AGAIN.length - 1)]) continue;
+        w.at = now;
+        if (await this.fetchFile(w.conv, w.f)) {
+          w.tries++;
+          n++;
+        }
+        await this.store.setSecret("wantedFiles", this.wantedFiles);
+      }
+    } finally {
+      this.asking = false;
+    }
+    return n;
   }
 
   /**

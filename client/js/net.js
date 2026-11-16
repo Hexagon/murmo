@@ -226,6 +226,15 @@ export class Socket extends EventTarget {
         this.settle(f.id ?? f.ref, f);
         return;
       case "error":
+        if (f.error === "replaced") {
+          // This device connected again elsewhere (another tab or window of this browser): that one has the
+          // connection now. Connecting again here would push it out in turn, so this page stops until it is reloaded.
+          this.closed = true;
+          clearTimeout(this.retry);
+          this.dispatchEvent(new CustomEvent("replaced"));
+          this.dropped(this.ws);
+          return;
+        }
         if (f.error === "rate_limited" && Number.isSafeInteger(f.retry) && f.retry > 0) {
           this.relayPause = Math.max(this.relayPause, Date.now() + Math.min(f.retry, 3600) * 1000);
         }

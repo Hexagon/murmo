@@ -1043,6 +1043,9 @@ async function enter({ store, account, handle, home }) {
   messenger.addEventListener("incoming", (e) => onIncoming(e.detail));
   messenger.addEventListener("link", (e) => showLinkRequest(e.detail));
   messenger.addEventListener("error", (e) => console.warn(e.detail.message));
+  // Murmo was opened again in another tab or window on this device, which has the connection now: this page says so
+  // and offers to take it back (a reload: what the other page stored is read afresh).
+  messenger.addEventListener("replaced", () => showReplaced());
   messenger.addEventListener("removed", async () => {
     toast(tr("main.removed"));
     await logout(true);
@@ -1051,6 +1054,18 @@ async function enter({ store, account, handle, home }) {
   await refreshGifHashes().catch(() => {});
   renderShell();
   askNotifications();
+}
+
+/** "Murmo is open in another tab": not closed, only left by using Murmo here (a reload) or closing the tab. */
+function showReplaced() {
+  if (document.querySelector("dialog.replaced")) return;
+  const d = dialog(
+    h("h2", { text: tr("main.replacedTitle") }),
+    h("p", { text: tr("main.replaced") }),
+    h("div", { class: "actions" }, h("button", { class: "btn primary", text: tr("main.useHere"), onclick: () => location.reload() })),
+  );
+  d.classList.add("replaced");
+  d.addEventListener("cancel", (e) => e.preventDefault());
 }
 
 // A page that was in the background comes back with a dead connection: check it at once.
@@ -2786,7 +2801,7 @@ function fileView(m) {
       // Put together from its stored parts only when it nears the screen: a long thread does not read all its pictures.
       await nearScreen(img);
       const b = await messenger.fileBlob(f.f, f.mime);
-      if (!b) return;
+      if (!b) throw new Error("no_file");
       const url = objectUrls.get(f.f) ?? URL.createObjectURL(b);
       objectUrls.set(f.f, url);
       img.addEventListener("load", () => {
@@ -2796,8 +2811,9 @@ function fileView(m) {
       const gif = f.mime === "image/gif" && m.kind === "file" ? () => messenger.fileBlob(f.f, "image/gif") : null;
       img.addEventListener("click", () => showImage(url, f.name, gif, f.f, m.kind === "ephemeral"));
     }).catch(() => {
+      // Not cached: the next drawing tries the picture again (its parts may not all be readable yet).
       const card = fileCard(m);
-      imgNodes.set(f.f, card);
+      imgNodes.delete(f.f);
       img.replaceWith(card);
     });
     return img;
@@ -2866,7 +2882,7 @@ function fileCard(m, note, play = false) {
         title: tr("msg.fetchOwnTitle"),
         onclick: async () => {
           try {
-            const n = await messenger.fetchFromOwnDevices(current, f.f);
+            const n = await messenger.fetchFile(current, f.f);
             toast(tr(n ? "msg.asking" : "msg.noOwn"));
           } catch (x) {
             toast(say(x));
@@ -3413,7 +3429,7 @@ async function fetchAgain(x, btn) {
       if (await messenger.acceptFile(conv, m.file.f)) toast(tr("msg.taking"));
       else toast(tr("msg.senderAway"));
     } else {
-      const n = await messenger.fetchFromOwnDevices(conv, m.file.f);
+      const n = await messenger.fetchFile(conv, m.file.f);
       toast(tr(n ? "msg.asking" : "msg.noOwn"));
     }
   } catch (x2) {
