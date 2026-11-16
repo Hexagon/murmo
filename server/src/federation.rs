@@ -7,19 +7,28 @@
 //! against the key the sender publishes in `/api/v1/info`, fetched over https from the origin it claims to be. The
 //! receiving server learns which server sent an envelope, never which account or device.
 //!
+//! File chunks go the same way (`/federation/relay`), as do the questions a transfer needs: which devices are
+//! connected (`/federation/presence`) and which have room in the file queue (`/federation/space`). Each server keeps
+//! its own limits for what it takes from other servers, and says what they are in `/api/v1/info` (`relay`,
+//! `file_queue_limits`), so that a sender can keep within the smaller of both.
+//!
 //! Which servers take part is the operator's choice (`MURMO_FEDERATION`: `open`, `off`, or a list of origins, and
 //! `MURMO_FEDERATION_BLOCK`). An open server talks only to public https origins with a domain name.
 
 use crate::api::check_account;
 use crate::app::{App, Push, now, random, text};
+use crate::db::ChunkData;
 use crate::error::{ApiError, json};
 use crate::remote::origin_of;
-use crate::ws::{MAILBOX_TTL, MAX_QUEUE, MAX_RECIPIENTS, check_envelope};
+use crate::ws::{
+    MAILBOX_TTL, MAX_PRESENCE, MAX_QUEUE, MAX_RECIPIENTS, MAX_RELAY, MAX_RELAY_BIN,
+    RELAY_PEER_BYTES, check_envelope, deliver_frame, is_b64url, space_for,
+};
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use rootcard::crypto::{ed25519_public, ed25519_sign, ed25519_verify, frame, hkdf};
-use rootcard::encoding::{base64url_decode_fixed, base64url_encode};
+use rootcard::encoding::{base64url_decode, base64url_decode_fixed, base64url_encode};
 use rootcard::json::{Map, Value, canonical, parse_limited};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -41,6 +50,13 @@ const PER_SERVER: u32 = 6000;
 /// How long a device list fetched from another server is reused for other requests (seconds). All of this server's
 /// users share its network address at the other server, and so its rate limits there.
 const LIST_CACHE: i64 = 20;
+/// How long a learned route (a device of a contact on another server) is kept without being used (seconds).
+const ROUTE_TTL: i64 = 7 * 24 * 3600;
+/// Chunk frames per minute from one server, and bytes.
+const RELAY_PER_SERVER: u32 = 60_000;
+const RELAY_BYTES_PER_SERVER: u32 = 2047 << 20;
+/// Largest relay request (one chunk as text, and the fields around it).
+pub const MAX_RELAY_BODY: usize = 256 * 1024;
 
 /// Which servers this one exchanges envelopes with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,20 +85,31 @@ impl Policy {
     }
 }
 
-/// A peer's federation key (None: it publishes none) and when it was fetched.
-type PeerKey = (Option<[u8; 32]>, i64);
+/// What this server knows of another one from its `/api/v1/info`: its federation key (None: it publishes none), the
+/// limits it puts on what it takes from other servers, and when that was fetched.
+#[derive(Clone)]
+struct Peer {
+    key: Option<[u8; 32]>,
+    limits: Option<Value>,
+    at: i64,
+}
 
 /// This server's federation key and what it remembers about other servers.
 pub struct Federation {
     seed: Zeroizing<[u8; 32]>,
     /// The public key, base64url, as published in `/api/v1/info`.
     pub public: String,
-    /// Peers' keys by origin.
-    keys: Mutex<HashMap<String, PeerKey>>,
+    /// Peers by origin.
+    keys: Mutex<HashMap<String, Peer>>,
     /// Deliveries seen (`origin nonce` → time), against replays.
     nonces: Mutex<HashMap<String, i64>>,
     /// Device lists with logs fetched from other servers (`origin account` → answer, time).
     lists: Mutex<HashMap<String, (Value, i64)>>,
+    /// Where devices of other servers are, for each local account that writes to them (`account device` → origin,
+    /// last used): learned from its `send` and `remote-devices`, used for its file chunks and presence questions.
+    routes: Mutex<HashMap<String, (String, i64)>>,
+    /// Connections to other servers, kept open between requests.
+    agent: ureq::Agent,
 }
 
 impl Federation {
@@ -96,6 +123,13 @@ impl Federation {
             keys: Mutex::default(),
             nonces: Mutex::default(),
             lists: Mutex::default(),
+            routes: Mutex::default(),
+            agent: ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(10)))
+                .max_redirects(0)
+                .http_status_as_error(false)
+                .build()
+                .into(),
         }
     }
 
@@ -116,13 +150,34 @@ impl Federation {
         }
     }
 
+    /// Remember that `device` (of a contact of `account`) is on `origin`.
+    pub fn learn(&self, account: &str, device: &str, origin: &str) {
+        self.routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(format!("{account} {device}"), (origin.to_string(), now()));
+    }
+
+    /// The server a device is on, as `account` knows it; None for a device of this server (or one it never named).
+    pub fn route(&self, account: &str, device: &str) -> Option<String> {
+        self.routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&format!("{account} {device}"))
+            .map(|(o, _)| o.clone())
+    }
+
     /// Forget peers' keys fetched long ago.
     pub fn sweep(&self) {
         let t = now();
         self.keys
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, (_, at)| t - *at < KEY_TTL);
+            .retain(|_, p| t - p.at < KEY_TTL);
+        self.routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (_, at)| t - *at < ROUTE_TTL);
         self.lists
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -166,15 +221,6 @@ pub fn allowed(app: &App, origin: &str) -> bool {
     }
 }
 
-fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .build()
-        .into()
-}
-
 /// Read an answer from another server: its status and its JSON body (an empty object when there is none or it is not
 /// JSON).
 fn answer(
@@ -195,17 +241,19 @@ fn answer(
 }
 
 /// GET a JSON document from another server (blocking task).
-async fn get(url: String) -> Result<(u16, Value), ApiError> {
-    tokio::task::spawn_blocking(move || answer(agent().get(&url).call()))
+async fn get(app: &App, url: String) -> Result<(u16, Value), ApiError> {
+    let agent = app.fed.agent.clone();
+    tokio::task::spawn_blocking(move || answer(agent.get(&url).call()))
         .await
         .map_err(ApiError::internal)?
 }
 
 /// POST a JSON body to another server (blocking task).
-async fn post(url: String, body: Vec<u8>) -> Result<(u16, Value), ApiError> {
+async fn post(app: &App, url: String, body: Vec<u8>) -> Result<(u16, Value), ApiError> {
+    let agent = app.fed.agent.clone();
     tokio::task::spawn_blocking(move || {
         answer(
-            agent()
+            agent
                 .post(&url)
                 .header("Content-Type", "application/json")
                 .send(&body[..]),
@@ -215,41 +263,145 @@ async fn post(url: String, body: Vec<u8>) -> Result<(u16, Value), ApiError> {
     .map_err(ApiError::internal)?
 }
 
-/// A peer's federation key, from its `/api/v1/info` (cached; `fresh` fetches it again).
-async fn peer_key(app: &Arc<App>, origin: &str, fresh: bool) -> Result<[u8; 32], ApiError> {
+/// What this server knows of another one, from its `/api/v1/info` (cached; `fresh` fetches it again).
+async fn peer(app: &Arc<App>, origin: &str, fresh: bool) -> Result<Peer, ApiError> {
     let t = now();
     if !fresh
-        && let Some((key, at)) = app
+        && let Some(p) = app
             .fed
             .keys
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(origin)
-            .copied()
-        && t - at < if key.is_some() { KEY_TTL } else { 60 }
+            .cloned()
+        && t - p.at < if p.key.is_some() { KEY_TTL } else { 60 }
     {
-        return key.ok_or(ApiError::new(403, "federation_refused"));
+        return Ok(p);
     }
-    let (status, info) = get(format!("{origin}/api/v1/info")).await?;
-    let info = info.as_object().filter(|_| status == 200);
+    let (status, info) = get(app, format!("{origin}/api/v1/info")).await?;
     // The peer must say it is this origin, and publish a key.
-    let key = info
-        .filter(|m| {
-            m.get("origins")
+    let info = info.as_object().filter(|m| {
+        status == 200
+            && m.get("origins")
                 .and_then(Value::as_array)
                 .is_some_and(|a| a.iter().any(|o| o.as_str() == Some(origin)))
-        })
+    });
+    let key = info
         .and_then(|m| m.get("federation"))
         .and_then(Value::as_object)
         .and_then(|f| f.get("key"))
         .and_then(Value::as_str)
         .and_then(|k| base64url_decode_fixed::<32>(k).ok());
+    let limits = info.map(|m| {
+        let mut l = Map::new();
+        for k in ["relay", "file_queue", "file_queue_limits"] {
+            if let Some(v) = m.get(k) {
+                l.insert(k, v.clone());
+            }
+        }
+        l.into()
+    });
+    let p = Peer { key, limits, at: t };
     app.fed
         .keys
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(origin.to_string(), (key, t));
-    key.ok_or(ApiError::new(403, "federation_refused"))
+        .insert(origin.to_string(), p.clone());
+    Ok(p)
+}
+
+/// A peer's federation key (cached; `fresh` fetches it again).
+async fn peer_key(app: &Arc<App>, origin: &str, fresh: bool) -> Result<[u8; 32], ApiError> {
+    peer(app, origin, fresh)
+        .await?
+        .key
+        .ok_or(ApiError::new(403, "federation_refused"))
+}
+
+/// A request to another server, signed: `{ req: { v, kind, from, to, time, nonce, ...fields }, sig }`.
+fn signed(app: &App, server: &str, kind: &str, fields: Map) -> Vec<u8> {
+    let mut req = Map::new()
+        .with("v", 1i64)
+        .with("kind", kind)
+        .with("from", app.cfg.origin.as_str())
+        .with("to", server)
+        .with("time", now())
+        .with("nonce", base64url_encode(&random::<16>()));
+    for (k, v) in fields.iter() {
+        req.insert(k, v.clone());
+    }
+    let req: Value = req.into();
+    let sig = app.fed.sign(&frame(LABEL, &canonical(&req)));
+    canonical(
+        &Map::new()
+            .with("req", req)
+            .with("sig", base64url_encode(&sig))
+            .into(),
+    )
+}
+
+/// Send a signed request of `kind` to `path` on `server`: the answer's body when it says 200, otherwise None.
+async fn call(app: &Arc<App>, server: &str, path: &str, kind: &str, fields: Map) -> Option<Map> {
+    let body = signed(app, server, kind, fields);
+    match post(app, format!("{server}{path}"), body).await {
+        Ok((200, v)) => v.as_object().cloned(),
+        _ => None,
+    }
+}
+
+/// Check a signed request from another server: the policy, the address, the time, the signature by the key the
+/// sender publishes, the kind and that it is not a replay. Returns the sender's origin and the request.
+async fn verify(
+    app: &Arc<App>,
+    body: &[u8],
+    kind: &str,
+    limit: usize,
+) -> Result<(String, Map), ApiError> {
+    if app.cfg.federation == Policy::Off {
+        return Err(ApiError::new(403, "federation_refused"));
+    }
+    if body.len() > limit {
+        return Err(ApiError::new(413, "too_large"));
+    }
+    let bad = || ApiError::new(400, "bad_field");
+    let v = parse_limited(body, limit).map_err(|_| bad())?;
+    let m = v.as_object().ok_or_else(bad)?;
+    let req = m.get("req").ok_or_else(bad)?;
+    let r = req.as_object().ok_or_else(bad)?;
+    let sig = m
+        .get("sig")
+        .and_then(Value::as_str)
+        .and_then(|s| base64url_decode_fixed::<64>(s).ok())
+        .ok_or_else(bad)?;
+    let from = r.get("from").and_then(Value::as_str).ok_or_else(bad)?;
+    let to = r.get("to").and_then(Value::as_str).ok_or_else(bad)?;
+    let time = r.get("time").and_then(Value::as_int).ok_or_else(bad)?;
+    let nonce = r.get("nonce").and_then(Value::as_str).ok_or_else(bad)?;
+    if r.get("v").and_then(Value::as_int) != Some(1)
+        || r.get("kind").and_then(Value::as_str) != Some(kind)
+        || !app.is_origin(to)
+        || base64url_decode_fixed::<16>(nonce).is_err()
+    {
+        return Err(bad());
+    }
+    let t = now();
+    if (t - time).abs() > SKEW {
+        return Err(ApiError::new(401, "stale"));
+    }
+    if !allowed(app, from) {
+        return Err(ApiError::new(403, "federation_refused"));
+    }
+    let signed = frame(LABEL, &canonical(req));
+    let mut key = peer_key(app, from, false).await?;
+    if ed25519_verify(&key, &signed, &sig).is_err() {
+        // The peer may have a new key (a new host key): ask once more.
+        key = peer_key(app, from, true).await?;
+        ed25519_verify(&key, &signed, &sig).map_err(|_| ApiError::new(401, "bad_signature"))?;
+    }
+    if !app.fed.fresh(from, nonce, t) {
+        return Err(ApiError::new(409, "replay"));
+    }
+    Ok((from.to_string(), r.clone()))
 }
 
 /// One envelope for a device on another server, as the client asked for it in `send`.
@@ -276,22 +428,13 @@ pub async fn deliver(app: &Arc<App>, server: &str, msgs: Vec<Outgoing>) -> Vec<S
             o.into()
         })
         .collect();
-    let req: Value = Map::new()
-        .with("v", 1i64)
-        .with("from", app.cfg.origin.as_str())
-        .with("to", server)
-        .with("time", now())
-        .with("nonce", base64url_encode(&random::<16>()))
-        .with("msgs", Value::Array(items))
-        .into();
-    let sig = app.fed.sign(&frame(LABEL, &canonical(&req)));
-    let body = canonical(
-        &Map::new()
-            .with("req", req)
-            .with("sig", base64url_encode(&sig))
-            .into(),
+    let body = signed(
+        app,
+        server,
+        "deliver",
+        Map::new().with("msgs", Value::Array(items)),
     );
-    match post(format!("{server}/api/v1/federation/deliver"), body).await {
+    match post(app, format!("{server}/api/v1/federation/deliver"), body).await {
         Ok((200, v)) => {
             let failed: Vec<String> = v
                 .as_object()
@@ -322,54 +465,16 @@ pub async fn post_deliver(
 ) -> Response {
     let run = async {
         app.limits.by_addr("federation", addr, 1200, 60)?;
-        if app.cfg.federation == Policy::Off {
-            return Err(ApiError::new(403, "federation_refused"));
-        }
-        if body.len() > MAX_DELIVER_BODY {
-            return Err(ApiError::new(413, "too_large"));
-        }
+        let (from, r) = verify(&app, &body, "deliver", MAX_DELIVER_BODY).await?;
+        let from = from.as_str();
         let bad = || ApiError::new(400, "bad_field");
-        let v = parse_limited(&body, MAX_DELIVER_BODY).map_err(|_| bad())?;
-        let m = v.as_object().ok_or_else(bad)?;
-        let req = m.get("req").ok_or_else(bad)?;
-        let r = req.as_object().ok_or_else(bad)?;
-        let sig = m
-            .get("sig")
-            .and_then(Value::as_str)
-            .and_then(|s| base64url_decode_fixed::<64>(s).ok())
-            .ok_or_else(bad)?;
-        let from = r.get("from").and_then(Value::as_str).ok_or_else(bad)?;
-        let to = r.get("to").and_then(Value::as_str).ok_or_else(bad)?;
-        let time = r.get("time").and_then(Value::as_int).ok_or_else(bad)?;
-        let nonce = r.get("nonce").and_then(Value::as_str).ok_or_else(bad)?;
         let msgs = r.get("msgs").and_then(Value::as_array).ok_or_else(bad)?;
-        if r.get("v").and_then(Value::as_int) != Some(1)
-            || !app.is_origin(to)
-            || base64url_decode_fixed::<16>(nonce).is_err()
-            || msgs.is_empty()
-            || msgs.len() > MAX_RECIPIENTS
-        {
+        if msgs.is_empty() || msgs.len() > MAX_RECIPIENTS {
             return Err(bad());
-        }
-        let t = now();
-        if (t - time).abs() > SKEW {
-            return Err(ApiError::new(401, "stale"));
-        }
-        if !allowed(&app, from) {
-            return Err(ApiError::new(403, "federation_refused"));
         }
         app.limits
             .check(format!("federation:{from}"), PER_SERVER, 60)?;
-        let signed = frame(LABEL, &canonical(req));
-        let mut key = peer_key(&app, from, false).await?;
-        if ed25519_verify(&key, &signed, &sig).is_err() {
-            // The peer may have a new key (a new host key): ask once more.
-            key = peer_key(&app, from, true).await?;
-            ed25519_verify(&key, &signed, &sig).map_err(|_| ApiError::new(401, "bad_signature"))?;
-        }
-        if !app.fed.fresh(from, nonce, t) {
-            return Err(ApiError::new(409, "replay"));
-        }
+        let t = now();
         let mut failed: Vec<Value> = Vec::new();
         for item in msgs {
             let o = item.as_object().ok_or_else(bad)?;
@@ -477,7 +582,11 @@ pub async fn lookup(app: &Arc<App>, server: &str, handle: &str) -> Result<Value,
     }
     // Only a Murmo server that takes part in federation (an older one, or another kind of host, does not).
     peer_key(app, &server, false).await?;
-    let (status, v) = get(format!("{server}/api/v1/lookup?handle={}", encode(handle))).await?;
+    let (status, v) = get(
+        app,
+        format!("{server}/api/v1/lookup?handle={}", encode(handle)),
+    )
+    .await?;
     if status != 200 {
         return Err(passed_on(status, &v));
     }
@@ -507,6 +616,39 @@ pub async fn devices(
     account: &str,
     fresh: bool,
 ) -> Result<Value, ApiError> {
+    let v = devices_of(app, server, account, fresh).await?;
+    Ok(v)
+}
+
+/// The routes to an account's devices on another server, learned for the local account `me` that asked.
+pub fn learn_list(app: &App, me: &str, v: &Value) {
+    let Some(m) = v.as_object() else { return };
+    let Some(server) = m.get("server").and_then(Value::as_str) else {
+        return;
+    };
+    for pk in m
+        .get("prekeys")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(d) = pk
+            .as_object()
+            .and_then(|o| o.get("device"))
+            .and_then(Value::as_str)
+            && d.len() <= 64
+        {
+            app.fed.learn(me, d, server);
+        }
+    }
+}
+
+async fn devices_of(
+    app: &Arc<App>,
+    server: &str,
+    account: &str,
+    fresh: bool,
+) -> Result<Value, ApiError> {
     let server = server_param(app, server)?;
     check_account(account)?;
     let key = format!("{server} {account}");
@@ -522,11 +664,11 @@ pub async fn devices(
     {
         return Ok(v);
     }
-    let (status, devices) = get(format!("{server}/api/v1/accounts/{account}/devices")).await?;
+    let (status, devices) = get(app, format!("{server}/api/v1/accounts/{account}/devices")).await?;
     if status != 200 {
         return Err(passed_on(status, &devices));
     }
-    let (status, log) = get(format!("{server}/api/v1/accounts/{account}/log")).await?;
+    let (status, log) = get(app, format!("{server}/api/v1/accounts/{account}/log")).await?;
     if status != 200 {
         return Err(passed_on(status, &log));
     }
@@ -542,6 +684,10 @@ pub async fn devices(
         .ok_or(ApiError::new(502, "server_error"))?;
     out.insert("events", Value::Array(events));
     out.insert("server", server.as_str().into());
+    // What the other server takes from accounts elsewhere: a sender keeps within the smaller of both servers' limits.
+    if let Some(l) = peer(app, &server, false).await.ok().and_then(|p| p.limits) {
+        out.insert("limits", l);
+    }
     let v: Value = out.into();
     app.fed
         .lists
@@ -549,6 +695,312 @@ pub async fn devices(
         .unwrap_or_else(|e| e.into_inner())
         .insert(key, (v.clone(), now()));
     Ok(v)
+}
+
+// ── files between servers ───────────────────────────────────────────────────────────────────────────────────────
+
+/// One file chunk for devices on another server, from a device of an account on this one.
+pub struct RelayOut {
+    pub account: String,
+    pub device: String,
+    pub devices: Vec<String>,
+    pub store: bool,
+    pub ttl: Option<i64>,
+    /// The chunk as the client sent it: text, or the payload of a binary frame.
+    pub text: Option<String>,
+    pub binary: Option<Vec<u8>>,
+}
+
+/// The subset of `of` that the answer lists under `key`.
+fn listed(m: &Map, key: &str, of: &[String]) -> Vec<String> {
+    m.get(key)
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .filter(|d| of.iter().any(|x| x == d))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Hand a chunk to another server. Returns the devices that did not get it, and of those the ones that take no
+/// binary frames (the sender sends them text instead), as for local devices in `relay-missed`.
+pub async fn relay(app: &Arc<App>, server: &str, out: RelayOut) -> (Vec<String>, Vec<String>) {
+    let (data, bin) = match (&out.text, &out.binary) {
+        (Some(t), _) => (t.clone(), false),
+        (None, Some(b)) => (base64url_encode(b), true),
+        (None, None) => return (out.devices, Vec::new()),
+    };
+    let sender: Value = Map::new()
+        .with("account", out.account.as_str())
+        .with("device", out.device.as_str())
+        .into();
+    let mut fields = Map::new()
+        .with("sender", sender)
+        .with(
+            "devices",
+            Value::Array(out.devices.iter().map(|d| d.as_str().into()).collect()),
+        )
+        .with("store", out.store)
+        .with("data", data)
+        .with("bin", bin);
+    if let Some(t) = out.ttl {
+        fields.insert("ttl", t.into());
+    }
+    match call(app, server, "/api/v1/federation/relay", "relay", fields).await {
+        Some(m) => (
+            listed(&m, "missed", &out.devices),
+            listed(&m, "text", &out.devices),
+        ),
+        None => (out.devices, Vec::new()),
+    }
+}
+
+/// Which of `devices` on `server` are connected now (none when it does not answer).
+pub async fn presence(app: &Arc<App>, server: &str, devices: Vec<String>) -> Vec<String> {
+    let fields = Map::new().with(
+        "devices",
+        Value::Array(devices.iter().map(|d| d.as_str().into()).collect()),
+    );
+    match call(
+        app,
+        server,
+        "/api/v1/federation/presence",
+        "presence",
+        fields,
+    )
+    .await
+    {
+        Some(m) => listed(&m, "online", &devices),
+        None => Vec::new(),
+    }
+}
+
+/// Which of `devices` on `server` have room for `bytes` of queued chunks from `account`, by that server's limits.
+pub async fn space(
+    app: &Arc<App>,
+    server: &str,
+    account: &str,
+    devices: Vec<String>,
+    bytes: i64,
+) -> Vec<String> {
+    let fields = Map::new()
+        .with("account", account)
+        .with("bytes", bytes)
+        .with(
+            "devices",
+            Value::Array(devices.iter().map(|d| d.as_str().into()).collect()),
+        );
+    match call(app, server, "/api/v1/federation/space", "space", fields).await {
+        Some(m) => listed(&m, "ok", &devices),
+        None => Vec::new(),
+    }
+}
+
+/// The devices of a request from another server: a list of at most `max` device ids.
+fn device_list(r: &Map, max: usize) -> Result<Vec<String>, ApiError> {
+    let bad = || ApiError::new(400, "bad_field");
+    let a = r.get("devices").and_then(Value::as_array).ok_or_else(bad)?;
+    if a.is_empty() || a.len() > max {
+        return Err(bad());
+    }
+    let mut out: Vec<String> = Vec::with_capacity(a.len());
+    for d in a {
+        let d = d
+            .as_str()
+            .filter(|d| d.len() <= 64 && is_b64url(d))
+            .ok_or_else(bad)?;
+        if !out.iter().any(|x| x == d) {
+            out.push(d.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// `POST /api/v1/federation/relay`: a file chunk from a device of an account on another server, for devices on this
+/// one. Forwarded live to connected devices and, with `store`, queued for the others, within this server's own limits
+/// (the same as for its own accounts: per sending account into a device, and the file queue's). Answers
+/// `{ missed, text }`.
+pub async fn post_relay(
+    State(app): State<Arc<App>>,
+    crate::ClientAddr(addr): crate::ClientAddr,
+    body: Bytes,
+) -> Response {
+    let run = async {
+        app.limits
+            .by_addr("federation-relay", addr, RELAY_PER_SERVER, 60)?;
+        let (from, r) = verify(&app, &body, "relay", MAX_RELAY_BODY).await?;
+        let bad = || ApiError::new(400, "bad_field");
+        let sender = r.get("sender").and_then(Value::as_object).ok_or_else(bad)?;
+        let account = sender
+            .get("account")
+            .and_then(Value::as_str)
+            .ok_or_else(bad)?;
+        check_account(account)?;
+        let device = sender
+            .get("device")
+            .and_then(Value::as_str)
+            .filter(|d| d.len() <= 64 && is_b64url(d))
+            .ok_or_else(bad)?;
+        let devices = device_list(&r, MAX_RECIPIENTS)?;
+        let store = r.get("store").and_then(Value::as_bool) == Some(true) && app.cfg.file_queue > 0;
+        let ttl = match r.get("ttl") {
+            None => MAILBOX_TTL,
+            Some(v) => v.as_int().filter(|t| *t > 0).ok_or_else(bad)?,
+        };
+        let raw = r.get("data").and_then(Value::as_str).ok_or_else(bad)?;
+        let bin = r.get("bin").and_then(Value::as_bool) == Some(true);
+        let payload = if bin {
+            let b = base64url_decode(raw).map_err(|_| bad())?;
+            if b.is_empty() || b.len() > MAX_RELAY_BIN {
+                return Err(ApiError::new(400, "bad_relay"));
+            }
+            Some(b)
+        } else {
+            if raw.len() > MAX_RELAY || !is_b64url(raw) {
+                return Err(ApiError::new(400, "bad_relay"));
+            }
+            None
+        };
+        let data = match &payload {
+            Some(b) => ChunkData::Binary(b),
+            None => ChunkData::Text(raw),
+        };
+        let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+        app.limits
+            .check(format!("federation-relay:{from}"), RELAY_PER_SERVER, 60)?;
+        app.limits.charge(
+            &[(
+                format!("federation-relay-bytes:{from}"),
+                len.saturating_mul(u32::try_from(devices.len()).unwrap_or(1)),
+                RELAY_BYTES_PER_SERVER,
+            )],
+            60,
+        )?;
+        let push = match &payload {
+            None => Push::Text(text(
+                &Map::new()
+                    .with("t", "relay")
+                    .with("from", device)
+                    .with("account", account)
+                    .with("data", raw)
+                    .into(),
+            )),
+            Some(b) => Push::Binary(deliver_frame(device, account, 0, b).ok_or_else(bad)?),
+        };
+        let expires = now() + ttl.clamp(1, MAILBOX_TTL);
+        let mut missed: Vec<Value> = Vec::new();
+        let mut no_binary: Vec<Value> = Vec::new();
+        for d in &devices {
+            if !app.db.device_known(d).map_err(ApiError::internal)? {
+                missed.push(d.as_str().into());
+                continue;
+            }
+            let delivered = match app.hub.binary(d) {
+                Some(false) if bin => {
+                    no_binary.push(d.as_str().into());
+                    false
+                }
+                Some(_) => {
+                    app.limits
+                        .charge(
+                            &[(format!("relay-to:{account}>{d}"), len, RELAY_PEER_BYTES)],
+                            60,
+                        )
+                        .is_ok()
+                        && app.hub.to_device(d, push.clone())
+                }
+                None if store => {
+                    app.limits
+                        .charge(
+                            &[(format!("relay-store:{account}"), len, app.cfg.relay_store)],
+                            60,
+                        )
+                        .is_ok()
+                        && app
+                            .db
+                            .relay_enqueue(
+                                d,
+                                device,
+                                account,
+                                data,
+                                expires,
+                                &app.cfg.queue_limits(),
+                            )
+                            .map_err(ApiError::internal)?
+                }
+                None => false,
+            };
+            if !delivered {
+                missed.push(d.as_str().into());
+            }
+        }
+        Ok(json(
+            200,
+            &Map::new()
+                .with("missed", Value::Array(missed))
+                .with("text", Value::Array(no_binary))
+                .into(),
+        ))
+    };
+    respond(run.await)
+}
+
+/// `POST /api/v1/federation/presence`: which of these devices on this server are connected (`{ online }`).
+pub async fn post_presence(
+    State(app): State<Arc<App>>,
+    crate::ClientAddr(addr): crate::ClientAddr,
+    body: Bytes,
+) -> Response {
+    let run = async {
+        app.limits.by_addr("federation", addr, 1200, 60)?;
+        let (from, r) = verify(&app, &body, "presence", crate::api::MAX_BODY).await?;
+        app.limits
+            .check(format!("federation-presence:{from}"), 6000, 60)?;
+        let online: Vec<Value> = device_list(&r, MAX_PRESENCE)?
+            .into_iter()
+            .filter(|d| app.hub.is_connected(d))
+            .map(Value::from)
+            .collect();
+        Ok(json(
+            200,
+            &Map::new().with("online", Value::Array(online)).into(),
+        ))
+    };
+    respond(run.await)
+}
+
+/// `POST /api/v1/federation/space`: which of these devices on this server have room in the file queue for `bytes`
+/// from `account` (`{ ok }`), by this server's limits.
+pub async fn post_space(
+    State(app): State<Arc<App>>,
+    crate::ClientAddr(addr): crate::ClientAddr,
+    body: Bytes,
+) -> Response {
+    let run = async {
+        app.limits.by_addr("federation", addr, 1200, 60)?;
+        let (from, r) = verify(&app, &body, "space", crate::api::MAX_BODY).await?;
+        app.limits
+            .check(format!("federation-space:{from}"), 6000, 60)?;
+        let bad = || ApiError::new(400, "bad_field");
+        let account = r.get("account").and_then(Value::as_str).ok_or_else(bad)?;
+        check_account(account)?;
+        let bytes = r
+            .get("bytes")
+            .and_then(Value::as_int)
+            .filter(|b| *b >= 0)
+            .ok_or_else(bad)?;
+        let devices = device_list(&r, MAX_PRESENCE)?;
+        let local: Vec<&str> = devices.iter().map(String::as_str).collect();
+        let ok: Vec<Value> = space_for(&app, account, &local, bytes)?
+            .into_iter()
+            .map(Value::from)
+            .collect();
+        Ok(json(200, &Map::new().with("ok", Value::Array(ok)).into()))
+    };
+    respond(run.await)
 }
 
 #[cfg(test)]

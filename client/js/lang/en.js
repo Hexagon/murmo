@@ -32,7 +32,6 @@ export default {
   "err.server_unreachable": "The other Murmo server could not be reached.",
   "err.server_error": "The other server did not answer like a Murmo server.",
   "err.bad_server": "Write the server after @ as a domain name, for example Alice#3F9C@murmo.example.",
-  "err.remote_files": "Files and GIFs cannot be sent to someone on another server yet.",
   "err.other_server": "This contact is already known on another server.",
   "fed.address": "From another Murmo server: {address}",
   "err.wrong_paper_key": "The paper key does not belong to this account, or it has been replaced by a newer one.",

@@ -350,7 +350,9 @@ export class Messenger extends EventTarget {
         // a prekey that does not verify is ignored
       }
     }
-    const entry = { state, list, prekeys, home: r.home, server, at: Date.now() };
+    // What the other server takes from accounts elsewhere (its relay and file queue limits), for files to it.
+    const limits = server && r.limits && typeof r.limits === "object" ? r.limits : null;
+    const entry = { state, list, prekeys, home: r.home, server, limits, at: Date.now() };
     this.lists.set(account, entry);
     if (account !== this.me.account) await this.checkPinned(account, list);
     return entry;
@@ -1169,8 +1171,6 @@ export class Messenger extends EventTarget {
    */
   async sendFile(conv, file, progress = null, ttl = 0) {
     this.requireAccepted(conv);
-    // Files go through the server's relay, which does not reach other servers yet (DESIGN.md §14).
-    if (this.serverOf(conv)) throw new ApiError(400, "remote_files");
     if (file.size > p.MAX_FILE) throw new ApiError(413, "too_large");
     if (ttl && !EPHEMERAL_TTLS.includes(ttl)) throw new ApiError(400, "bad_ttl");
     if (ttl && !p.inlineImage(p.safeMime(file.type), file.size)) throw new ApiError(400, "ephemeral_files");
@@ -1226,7 +1226,8 @@ export class Messenger extends EventTarget {
     const away = all.filter((d) => !online.includes(d));
     // Asked before the transfer, so that a file is queued whole or not at all; not at all when it can never fit.
     const need = p.queuedBytes(size, this.ws.relayLimits.binary);
-    const tooBig = this.fileQueue() && need > this.queueLimit();
+    // A contact on another server: its server's file queue limit counts too, whichever is smaller (DESIGN.md §14.6).
+    const tooBig = this.fileQueue() && need > Math.min(this.queueLimit(), await this.remoteQueueLimit(conv));
     const queued = this.fileQueue() && !tooBig ? await this.ws.relaySpace(away, need) : [];
     await this.store.finishFile(f, n, size, meta.sha256);
     // A disappearing picture waits on the server (message and chunks) no longer than it may wait unread.
@@ -1254,6 +1255,37 @@ export class Messenger extends EventTarget {
     return r;
   }
 
+  /** The most queued bytes another server takes for one file from here, for a contact on it (Infinity otherwise). */
+  async remoteQueueLimit(account) {
+    if (!this.serverOf(account)) return Infinity;
+    const l = (await this.list(account)).limits;
+    if (l?.file_queue === false) return 0;
+    const n = l?.file_queue_limits?.file;
+    return Number.isSafeInteger(n) && n >= 0 ? n : Infinity;
+  }
+
+  /**
+   * The devices among `devices` that are on other servers, each with what its server takes per minute from this
+   * account for this transfer: per device live (`relay.peer`) and, for queued chunks, the server's queue budget per
+   * account (`relay.store`) shared by its devices in this transfer. Their own limits, announced in their `/api/v1/info`;
+   * this server's budget for other servers applies too (net.js `pace`).
+   */
+  remoteCaps(devices, store) {
+    const caps = new Map();
+    const want = new Set(devices);
+    for (const e of this.lists.values()) {
+      if (!e.server) continue;
+      const on = e.list.present.map((d) => d.id).filter((d) => want.has(d));
+      if (!on.length) continue;
+      const ok = (n) => (Number.isSafeInteger(n) && n > 0 ? n : null);
+      const peer = ok(e.limits?.relay?.peer) ?? this.ws.relayLimits.peer;
+      const queued = ok(e.limits?.relay?.store);
+      const cap = store && queued ? Math.min(peer, Math.floor(queued / on.length)) : peer;
+      for (const d of on) caps.set(d, cap);
+    }
+    return caps;
+  }
+
   /**
    * Stream the chunks of a file to devices; `read(i)` gives part `i` (Store.fileReader). Returns the devices the server
    * could not give them to. `ttl`: how long the server may keep queued chunks (seconds; 0: its own limit). `stored`:
@@ -1265,6 +1297,7 @@ export class Messenger extends EventTarget {
     const missed = new Set();
     this.missed.set(ref, missed);
     const away = new Set(stored);
+    const remote = this.remoteCaps(devices, store);
     const seal = async (i) => {
       const part = await read?.(i);
       if (!part) throw new Error("no_file");
@@ -1277,7 +1310,7 @@ export class Messenger extends EventTarget {
         const chunk = await next;
         next = i + 1 < meta.n ? seal(i + 1) : null;
         next?.catch(() => {}); // a failure is seen when it is awaited
-        const sent = await this.ws.sendChunk(devices, chunk, { store, ref, ttl, stored: away, stop: () => this.refused.has(ref) });
+        const sent = await this.ws.sendChunk(devices, chunk, { store, ref, ttl, stored: away, remote, stop: () => this.refused.has(ref) });
         if (!sent) return devices;
         progress?.(i + 1);
       }

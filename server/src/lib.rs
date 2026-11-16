@@ -327,7 +327,16 @@ pub fn router(app: Arc<App>) -> Router {
             "/api/v1/federation/deliver",
             post(federation::post_deliver)
                 .layer(DefaultBodyLimit::max(federation::MAX_DELIVER_BODY)),
-        );
+        )
+        .route(
+            "/api/v1/federation/relay",
+            post(federation::post_relay).layer(DefaultBodyLimit::max(federation::MAX_RELAY_BODY)),
+        )
+        .route(
+            "/api/v1/federation/presence",
+            post(federation::post_presence),
+        )
+        .route("/api/v1/federation/space", post(federation::post_space));
     if !app.cfg.client_dir.is_empty() {
         r = r.fallback_service(ServeDir::new(&app.cfg.client_dir));
     }

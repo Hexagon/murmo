@@ -45,6 +45,9 @@ pub const RELAY_FRAMES: u32 = 24_000;
 /// Relay frames per device and minute that go anywhere but to devices that granted more (live without a grant, or
 /// queued).
 pub const RELAY_SLOW_FRAMES: u32 = 3_000;
+/// Relay budget per sending device and minute for chunks to devices on other servers (federation), which then
+/// apply their own limits too (announced in their `/api/v1/info`).
+pub const RELAY_REMOTE_BYTES: u32 = 256 << 20;
 /// Largest grant: a whole file of `MAX_FILE` (1 GiB) as text chunks, with room to spare.
 pub const MAX_GRANT: i64 = 2 << 30;
 /// How long a grant lasts, in seconds.
@@ -205,6 +208,7 @@ async fn session(
                         i64::from(app.limits.budget(app.cfg.relay_granted)),
                     )
                     .with("store", i64::from(app.limits.budget(app.cfg.relay_store)))
+                    .with("remote", i64::from(app.limits.budget(RELAY_REMOTE_BYTES)))
                     .with("frames", i64::from(app.limits.budget(RELAY_FRAMES)))
                     .with(
                         "slow_frames",
@@ -265,12 +269,12 @@ async fn session(
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(t))) => {
-                    if let Some(r) = text_frame(app, me, t.as_bytes()) {
+                    if let Some(r) = text_frame(app, me, t.as_bytes()).resolve().await {
                         socket.send(r).await?;
                     }
                 }
                 Some(Ok(Message::Binary(b))) => {
-                    if let Some(r) = binary_frame(app, me, &b) {
+                    if let Some(r) = binary_frame(app, me, &b).resolve().await {
                         socket.send(r).await?;
                     }
                 }
@@ -310,10 +314,40 @@ async fn session(
 }
 
 /// The reply to a text frame from an authenticated device, if any.
-fn text_frame(app: &Arc<App>, me: &Authed, text: &[u8]) -> Option<Message> {
+/// The answer to a frame: now, or once another server has answered (federation). The connection waits for it
+/// before it reads the next frame, so answers keep their order.
+pub enum Reply {
+    Now(Option<Message>),
+    Later(futures_util::future::BoxFuture<'static, Option<Message>>),
+}
+
+impl From<Option<Message>> for Reply {
+    fn from(m: Option<Message>) -> Reply {
+        Reply::Now(m)
+    }
+}
+
+impl Reply {
+    async fn resolve(self) -> Option<Message> {
+        match self {
+            Reply::Now(m) => m,
+            Reply::Later(f) => f.await,
+        }
+    }
+
+    /// The answer when it is there already (tests and fuzzing, where no other server is asked).
+    fn now(self) -> Option<Message> {
+        match self {
+            Reply::Now(m) => m,
+            Reply::Later(_) => None,
+        }
+    }
+}
+
+fn text_frame(app: &Arc<App>, me: &Authed, text: &[u8]) -> Reply {
     match parse_limited(text, MAX_FRAME) {
         Ok(Value::Object(m)) => handle(app, me, &m),
-        _ => Some(error("bad_json")),
+        _ => Reply::Now(Some(error("bad_json"))),
     }
 }
 
@@ -325,43 +359,43 @@ pub fn fuzz_frame(app: &Arc<App>, account: &str, device: &str, text: &[u8]) -> O
         device: device.to_string(),
         binary: true,
     };
-    match text_frame(app, &me, text)? {
+    match text_frame(app, &me, text).now()? {
         Message::Text(t) => Some(t.to_string()),
         _ => None,
     }
 }
 
-fn handle(app: &Arc<App>, me: &Authed, m: &Map) -> Option<Message> {
+fn handle(app: &Arc<App>, me: &Authed, m: &Map) -> Reply {
     let r = match m.get("t").and_then(Value::as_str) {
-        Some("send") => send(app, me, m),
-        Some("ack") => ack(app, me, m),
-        Some("prekey") => prekey(app, me, m),
+        Some("send") => send(app, me, m).map(Reply::Now),
+        Some("ack") => ack(app, me, m).map(Reply::Now),
+        Some("prekey") => prekey(app, me, m).map(Reply::Now),
         Some("link-decline") => {
             if let Some(id) = m.get("id").and_then(Value::as_str) {
                 app.links.remove(&me.account, |r| r.id == id);
             }
-            Ok(None)
+            Ok(Reply::Now(None))
         }
         Some("relay") => relay(app, me, m),
-        Some("relay-ack") => relay_ack(app, me, m),
+        Some("relay-ack") => relay_ack(app, me, m).map(Reply::Now),
         Some("relay-space") => relay_space(app, me, m),
-        Some("relay-grant") => relay_grant(app, me, m),
+        Some("relay-grant") => relay_grant(app, me, m).map(Reply::Now),
         Some("presence") => presence(app, me, m),
-        Some("remote-lookup" | "remote-devices") => remote(app, me, m),
-        Some("seen") => seen(app, me, m),
-        Some("push-sub") => push_sub(app, me, m),
-        Some("ping") => Ok(Some(frame(Map::new().with("t", "pong")))),
+        Some("remote-lookup" | "remote-devices") => remote(app, me, m).map(Reply::Now),
+        Some("seen") => seen(app, me, m).map(Reply::Now),
+        Some("push-sub") => push_sub(app, me, m).map(Reply::Now),
+        Some("ping") => Ok(Reply::Now(Some(frame(Map::new().with("t", "pong"))))),
         _ => Err(ApiError::new(400, "bad_frame")),
     };
     match r {
-        Ok(msg) => msg,
+        Ok(reply) => reply,
         Err(e) => {
             let id = m.get("id").and_then(Value::as_str).or_else(|| {
                 m.get("ref")
                     .and_then(Value::as_str)
                     .filter(|r| r.len() <= 64)
             });
-            Some(error_reply(&e, id))
+            Reply::Now(Some(error_reply(&e, id)))
         }
     }
 }
@@ -424,6 +458,7 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
             if device.len() > 64 || !crate::federation::allowed(app, server) {
                 failed.push(device.into());
             } else {
+                app.fed.learn(&me.account, device, server);
                 remote
                     .entry(server.to_string())
                     .or_default()
@@ -511,13 +546,19 @@ fn remote(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiEr
         ("devices", field("account")?)
     };
     let fresh = m.get("fresh").and_then(Value::as_bool) == Some(true);
-    let (app, device) = (app.clone(), me.device.clone());
+    let (app, device, account) = (app.clone(), me.device.clone(), me.account.clone());
     tokio::spawn(async move {
         let answer = if what == "lookup" {
             crate::federation::lookup(&app, &server, &arg).await
         } else {
             crate::federation::devices(&app, &server, &arg, fresh).await
         };
+        if let Ok(v) = &answer
+            && what == "devices"
+        {
+            // Where the contact's devices are, for this account's file chunks and presence questions.
+            crate::federation::learn_list(&app, &account, v);
+        }
         let reply = match answer {
             Ok(value) => text(
                 &Map::new()
@@ -605,17 +646,19 @@ enum Route {
     Stored,
     /// Connected, but it does not take binary frames.
     NoBinary,
+    /// On another server (federation): handed to it.
+    Remote,
     /// Not delivered.
     Missed,
 }
 
-fn is_b64url(s: &str) -> bool {
+pub fn is_b64url(s: &str) -> bool {
     s.bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// A JSON `relay` frame: `{ t: "relay", to, data, ref?, store?, ttl? }`.
-fn relay(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
+fn relay(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Reply, ApiError> {
     app.limits
         .check(format!("relay:{}", me.device), RELAY_FRAMES, 60)?;
     let data = m
@@ -702,20 +745,20 @@ fn parse_binary(b: &[u8]) -> Result<RelayReq<'_>, ApiError> {
 }
 
 /// The reply to a binary frame from an authenticated device, if any.
-fn binary_frame(app: &App, me: &Authed, b: &[u8]) -> Option<Message> {
+fn binary_frame(app: &Arc<App>, me: &Authed, b: &[u8]) -> Reply {
     if let Err(e) = app
         .limits
         .check(format!("relay:{}", me.device), RELAY_FRAMES, 60)
     {
-        return Some(error_reply(&e, None));
+        return Reply::Now(Some(error_reply(&e, None)));
     }
     let req = match parse_binary(b) {
         Ok(r) => r,
-        Err(e) => return Some(error_reply(&e, None)),
+        Err(e) => return Reply::Now(Some(error_reply(&e, None))),
     };
     match relay_req(app, me, &req) {
         Ok(r) => r,
-        Err(e) => Some(error_reply(&e, req.reference.as_deref())),
+        Err(e) => Reply::Now(Some(error_reply(&e, req.reference.as_deref()))),
     }
 }
 
@@ -727,7 +770,7 @@ pub fn fuzz_binary(app: &Arc<App>, account: &str, device: &str, b: &[u8]) -> Opt
         device: device.to_string(),
         binary: true,
     };
-    match binary_frame(app, &me, b)? {
+    match binary_frame(app, &me, b).now()? {
         Message::Text(t) => Some(t.to_string()),
         _ => None,
     }
@@ -735,7 +778,7 @@ pub fn fuzz_binary(app: &Arc<App>, account: &str, device: &str, b: &[u8]) -> Opt
 
 /// The binary frame a device receives: type, the sending device (16 bytes), the sending account (length, then the
 /// id), the queue id (8 bytes, 0 when live), then the payload as it was sent. `None` for ids that do not fit.
-fn deliver_frame(
+pub fn deliver_frame(
     device: &str,
     account: &str,
     id: i64,
@@ -761,7 +804,7 @@ fn deliver_frame(
 /// - live to a connected device: per sending device (once per recipient) and per sending account into that device;
 /// - to a device that granted this device more (`relay-grant`): per sending device, much larger, and the grant;
 /// - into the file queue: per sending account.
-fn relay_req(app: &App, me: &Authed, req: &RelayReq<'_>) -> Result<Option<Message>, ApiError> {
+fn relay_req(app: &Arc<App>, me: &Authed, req: &RelayReq<'_>) -> Result<Reply, ApiError> {
     let binary = matches!(req.data, ChunkData::Binary(_));
     let len = u32::try_from(req.data.len()).unwrap_or(u32::MAX);
     let store = req.store && app.cfg.file_queue > 0;
@@ -781,6 +824,7 @@ fn relay_req(app: &App, me: &Authed, req: &RelayReq<'_>) -> Result<Option<Messag
                     Route::Granted
                 }
                 Some(_) => Route::Live,
+                None if remote_of(app, me, d).is_some() => Route::Remote,
                 None if store => Route::Stored,
                 None => Route::Missed,
             }
@@ -788,13 +832,14 @@ fn relay_req(app: &App, me: &Authed, req: &RelayReq<'_>) -> Result<Option<Messag
         .collect();
     let count =
         |r: Route| u32::try_from(routes.iter().filter(|x| **x == r).count()).unwrap_or(u32::MAX);
-    let (live, granted, stored) = (
+    let (live, granted, stored, remote) = (
         count(Route::Live),
         count(Route::Granted),
         count(Route::Stored),
+        count(Route::Remote),
     );
-    let mut budget: Vec<(String, u32, u32)> = Vec::with_capacity(req.to.len() + 4);
-    if live + stored > 0 {
+    let mut budget: Vec<(String, u32, u32)> = Vec::with_capacity(req.to.len() + 5);
+    if live + stored + remote > 0 {
         budget.push((format!("relay-slow:{}", me.device), 1, RELAY_SLOW_FRAMES));
     }
     if live > 0 {
@@ -828,6 +873,13 @@ fn relay_req(app: &App, me: &Authed, req: &RelayReq<'_>) -> Result<Option<Messag
             format!("relay-store:{}", me.account),
             len.saturating_mul(stored),
             app.cfg.relay_store,
+        ));
+    }
+    if remote > 0 {
+        budget.push((
+            format!("relay-remote:{}", me.device),
+            len.saturating_mul(remote),
+            RELAY_REMOTE_BYTES,
         ));
     }
     app.limits.charge(&budget, 60)?;
@@ -866,14 +918,72 @@ fn relay_req(app: &App, me: &Authed, req: &RelayReq<'_>) -> Result<Option<Messag
                 no_binary.push(d.as_str().into());
                 false
             }
+            Route::Remote => continue,
             Route::Missed => false,
         };
         if !delivered {
             missed.push(d.as_str().into());
         }
     }
+    let reference = req.reference.clone();
+    if remote == 0 {
+        return Ok(Reply::Now(missed_frame(missed, no_binary, reference)));
+    }
+    // Devices on other servers: each server gets the chunk once, for all of its devices.
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    for (d, route) in req.to.iter().zip(&routes) {
+        if *route == Route::Remote
+            && let Some(origin) = remote_of(app, me, d)
+        {
+            groups.entry(origin).or_default().push(d.clone());
+        }
+    }
+    let (text_data, bin_data) = match req.data {
+        ChunkData::Text(t) => (Some(t.to_string()), None),
+        ChunkData::Binary(b) => (None, Some(b.to_vec())),
+    };
+    let (app, account, device, store, ttl) = (
+        app.clone(),
+        me.account.clone(),
+        me.device.clone(),
+        req.store,
+        req.ttl,
+    );
+    Ok(Reply::Later(Box::pin(async move {
+        for (origin, devices) in groups {
+            let out = crate::federation::RelayOut {
+                account: account.clone(),
+                device: device.clone(),
+                devices,
+                store,
+                ttl,
+                text: text_data.clone(),
+                binary: bin_data.clone(),
+            };
+            let (m, t) = crate::federation::relay(&app, &origin, out).await;
+            missed.extend(m.into_iter().map(Value::from));
+            no_binary.extend(t.into_iter().map(Value::from));
+        }
+        missed_frame(missed, no_binary, reference)
+    })))
+}
+
+/// The server a device of a contact on another server is on, as this account told us (federation), if this server
+/// still exchanges messages with it.
+fn remote_of(app: &App, me: &Authed, device: &str) -> Option<String> {
+    app.fed
+        .route(&me.account, device)
+        .filter(|o| crate::federation::allowed(app, o))
+}
+
+/// `relay-missed` for the devices that did not get a chunk, if any.
+fn missed_frame(
+    missed: Vec<Value>,
+    no_binary: Vec<Value>,
+    reference: Option<String>,
+) -> Option<Message> {
     if missed.is_empty() {
-        return Ok(None);
+        return None;
     }
     let mut f = Map::new()
         .with("t", "relay-missed")
@@ -881,10 +991,36 @@ fn relay_req(app: &App, me: &Authed, req: &RelayReq<'_>) -> Result<Option<Messag
     if !no_binary.is_empty() {
         f.insert("text", Value::Array(no_binary));
     }
-    if let Some(r) = &req.reference {
+    if let Some(r) = &reference {
         f.insert("ref", r.as_str().into());
     }
-    Ok(Some(frame(f)))
+    Some(frame(f))
+}
+
+/// Group the devices that are on other servers (as this account knows them) by server; the rest stay in `local`.
+fn split_remote(
+    app: &App,
+    me: &Authed,
+    devices: Vec<String>,
+) -> (Vec<String>, HashMap<String, Vec<String>>) {
+    let mut local = Vec::new();
+    let mut remote: HashMap<String, Vec<String>> = HashMap::new();
+    for d in devices {
+        match remote_of(app, me, &d) {
+            Some(o) if !app.hub.is_connected(&d) => remote.entry(o).or_default().push(d),
+            _ => local.push(d),
+        }
+    }
+    (local, remote)
+}
+
+/// A frame `{ t, <key>: [...], ref? }` as the answer to `presence` and `relay-space`.
+fn list_frame(t: &str, key: &str, list: Vec<Value>, reference: Option<String>) -> Message {
+    let mut f = Map::new().with("t", t).with(key, Value::Array(list));
+    if let Some(r) = reference {
+        f.insert("ref", r.into());
+    }
+    frame(f)
 }
 
 fn queue_chunk(
@@ -948,7 +1084,7 @@ fn relay_grant(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiEr
 /// Which of the given devices have room for `bytes` more of queued chunks from this account (asked before a
 /// transfer, so that a file is queued whole or not at all). The same budgets as [`queue_chunk`]; what is granted to
 /// one device counts against the account's and the server's totals for the next.
-fn relay_space(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
+fn relay_space(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Reply, ApiError> {
     app.limits
         .check(format!("presence:{}", me.device), 120, 60)?;
     let devices = m
@@ -963,38 +1099,72 @@ fn relay_space(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiEr
     if devices.len() > MAX_PRESENCE {
         return Err(ApiError::new(400, "bad_field"));
     }
+    let devices: Vec<String> = devices
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|d| *d != me.device)
+        .map(str::to_string)
+        .collect();
+    let (local, remote) = split_remote(app, me, devices);
+    let local: Vec<&str> = local.iter().map(String::as_str).collect();
+    let mut ok: Vec<Value> = space_for(app, &me.account, &local, bytes)?
+        .into_iter()
+        .map(Value::from)
+        .collect();
+    let reference = m
+        .get("ref")
+        .and_then(Value::as_str)
+        .filter(|r| r.len() <= 64)
+        .map(str::to_string);
+    if remote.is_empty() {
+        return Ok(Reply::Now(Some(list_frame(
+            "relay-space",
+            "ok",
+            ok,
+            reference,
+        ))));
+    }
+    // Devices on other servers: by their servers' own file limits.
+    let (app, account) = (app.clone(), me.account.clone());
+    Ok(Reply::Later(Box::pin(async move {
+        for (origin, devices) in remote {
+            let room = crate::federation::space(&app, &origin, &account, devices, bytes).await;
+            ok.extend(room.into_iter().map(Value::from));
+        }
+        Some(list_frame("relay-space", "ok", ok, reference))
+    })))
+}
+
+/// Which of `devices` (on this server) have room for `bytes` more of queued chunks from `account`; what is granted
+/// to one device counts against the account's and the server's totals for the next. Also asked by other servers
+/// for their accounts (federation).
+pub fn space_for(
+    app: &App,
+    account: &str,
+    devices: &[&str],
+    bytes: i64,
+) -> Result<Vec<String>, ApiError> {
     let limits = app.cfg.queue_limits();
-    let mut ok: Vec<Value> = Vec::new();
+    let mut ok: Vec<String> = Vec::new();
     let mut granted = 0i64;
-    if app.cfg.file_queue > 0 {
-        for d in devices.iter().filter_map(Value::as_str) {
-            if d == me.device || ok.iter().any(|o| o.as_str() == Some(d)) {
-                continue;
-            }
-            let Some(mut u) = app
-                .db
-                .relay_usage(d, &me.account)
-                .map_err(ApiError::internal)?
-            else {
-                continue;
-            };
-            u.account = u.account.saturating_add(granted);
-            u.total = u.total.saturating_add(granted);
-            if u.room(&limits) >= bytes {
-                granted = granted.saturating_add(bytes);
-                ok.push(d.into());
-            }
+    if app.cfg.file_queue == 0 {
+        return Ok(ok);
+    }
+    for d in devices {
+        if ok.iter().any(|o| o == d) {
+            continue;
+        }
+        let Some(mut u) = app.db.relay_usage(d, account).map_err(ApiError::internal)? else {
+            continue;
+        };
+        u.account = u.account.saturating_add(granted);
+        u.total = u.total.saturating_add(granted);
+        if u.room(&limits) >= bytes {
+            granted = granted.saturating_add(bytes);
+            ok.push((*d).to_string());
         }
     }
-    let mut f = Map::new()
-        .with("t", "relay-space")
-        .with("ok", Value::Array(ok));
-    if let Some(r) = m.get("ref").and_then(Value::as_str)
-        && r.len() <= 64
-    {
-        f.insert("ref", r.into());
-    }
-    Ok(Some(frame(f)))
+    Ok(ok)
 }
 
 fn relay_ack(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
@@ -1059,7 +1229,7 @@ fn seen(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
     Ok(Some(frame(f)))
 }
 
-fn presence(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
+fn presence(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Reply, ApiError> {
     app.limits
         .check(format!("presence:{}", me.device), 120, 60)?;
     let devices = m
@@ -1069,21 +1239,37 @@ fn presence(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError
     if devices.len() > MAX_PRESENCE {
         return Err(ApiError::new(400, "bad_field"));
     }
-    let online: Vec<Value> = devices
+    let devices: Vec<String> = devices
         .iter()
         .filter_map(Value::as_str)
-        .filter(|d| *d != me.device && app.hub.is_connected(d))
+        .filter(|d| *d != me.device)
+        .map(str::to_string)
+        .collect();
+    let (local, remote) = split_remote(app, me, devices);
+    let mut online: Vec<Value> = local
+        .into_iter()
+        .filter(|d| app.hub.is_connected(d))
         .map(Value::from)
         .collect();
-    let mut f = Map::new()
-        .with("t", "presence")
-        .with("online", Value::Array(online));
-    if let Some(r) = m.get("ref").and_then(Value::as_str)
-        && r.len() <= 64
-    {
-        f.insert("ref", r.into());
+    let reference = m
+        .get("ref")
+        .and_then(Value::as_str)
+        .filter(|r| r.len() <= 64)
+        .map(str::to_string);
+    if remote.is_empty() {
+        return Ok(Reply::Now(Some(list_frame(
+            "presence", "online", online, reference,
+        ))));
     }
-    Ok(Some(frame(f)))
+    // Devices on other servers: asked there (a server that does not answer counts as nobody connected).
+    let app = app.clone();
+    Ok(Reply::Later(Box::pin(async move {
+        for (origin, devices) in remote {
+            let on = crate::federation::presence(&app, &origin, devices).await;
+            online.extend(on.into_iter().map(Value::from));
+        }
+        Some(list_frame("presence", "online", online, reference))
+    })))
 }
 
 #[cfg(test)]
@@ -1162,8 +1348,8 @@ mod tests {
         got
     }
 
-    fn object(msg: Option<Message>) -> Map {
-        match msg {
+    fn object(msg: impl Into<Reply>) -> Map {
+        match msg.into().now() {
             Some(Message::Text(t)) => match parse_limited(t.as_bytes(), MAX_FRAME) {
                 Ok(Value::Object(m)) => m,
                 _ => panic!("not an object"),
@@ -1537,7 +1723,7 @@ mod tests {
             .with("t", "send")
             .with("id", "s")
             .with("to", Value::Array(vec![Value::Object(item)]));
-        match handle(app, me, &f) {
+        match handle(app, me, &f).now() {
             Some(Message::Text(t)) => match parse_limited(t.as_bytes(), MAX_FRAME) {
                 Ok(Value::Object(m)) => m,
                 _ => panic!("not an object"),
@@ -1638,7 +1824,7 @@ mod tests {
         if let Some(ttl) = ttl {
             f.insert("ttl", ttl);
         }
-        match handle(app, me, &f) {
+        match handle(app, me, &f).now() {
             Some(Message::Text(t)) => match parse_limited(t.as_bytes(), MAX_FRAME) {
                 Ok(Value::Object(m)) => Some(m),
                 _ => panic!("not an object"),

@@ -32,7 +32,6 @@ export default {
   "err.server_unreachable": "Det gick inte att nå den andra Murmo-servern.",
   "err.server_error": "Den andra servern svarade inte som en Murmo-server.",
   "err.bad_server": "Skriv servern efter @ som ett domännamn, till exempel Alice#3F9C@murmo.example.",
-  "err.remote_files": "Filer och GIF:ar kan ännu inte skickas till någon på en annan server.",
   "err.other_server": "Den här kontakten finns redan på en annan server.",
   "fed.address": "Från en annan Murmo-server: {address}",
   "err.wrong_paper_key": "Pappersnyckeln hör inte till det här kontot, eller så har den ersatts av en nyare.",

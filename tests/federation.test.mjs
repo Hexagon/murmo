@@ -60,7 +60,8 @@ async function up(a) {
 before(async () => {
   // Plain http on loopback is only possible with an explicit list of origins (an open server needs public https).
   start(A, PORT, "a", { MURMO_FEDERATION: `${B},${C},${D}`, MURMO_FEDERATION_BLOCK: C });
-  start(B, PORT + 1000, "b", { MURMO_FEDERATION: A });
+  // B keeps less in its file queue than A: at most 1 MiB per device.
+  start(B, PORT + 1000, "b", { MURMO_FEDERATION: A, MURMO_FILE_QUEUE_MB: "1" });
   start(C, PORT + 2000, "c", { MURMO_FEDERATION: A });
   start(D, PORT + 3000, "d", { MURMO_FEDERATION: "off" });
   await Promise.all([up(apiA), up(apiB), up(apiC), up(apiD)]);
@@ -163,9 +164,71 @@ test("request, acceptance and text between servers", async () => {
   assert.equal(await alice.safetyCode(bob.me.account), await bob.safetyCode(alice.me.account));
 });
 
-test("files to another server are refused for now", async () => {
-  const file = new File([new Uint8Array(1000)], "x.bin", { type: "application/octet-stream" });
-  await assert.rejects(alice.sendFile(bob.me.account, file), (e) => e.code === "remote_files");
+/** Random bytes of any length (getRandomValues gives at most 64 KiB per call). */
+function noise(n) {
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i += 65536) crypto.getRandomValues(out.subarray(i, Math.min(n, i + 65536)));
+  return out;
+}
+
+/** Wait until `m` has the file `name` from `conv` whole, and return its bytes. */
+async function received(m, conv, name) {
+  const msg = await until(async () => (await m.messages(conv)).find((x) => x.kind === "file" && x.file?.name === name && x.file.have));
+  return new Uint8Array(await (await m.fileBlob(msg.file.f, "application/octet-stream")).arrayBuffer());
+}
+
+test("a file goes live to a device on another server", async () => {
+  const bytes = noise(300_000);
+  const r = await alice.sendFile(bob.me.account, new File([bytes], "live.bin", { type: "application/octet-stream" }));
+  assert.equal(r.live, 1);
+  assert.equal(r.waiting, 0);
+  assert.deepEqual(await received(bob, alice.me.account, "live.bin"), bytes);
+});
+
+test("a file waits in the other server's queue while the device is away", async () => {
+  bob.ws.close();
+  clearInterval(bob.retryTimer);
+  await new Promise((r) => setTimeout(r, 300));
+  const bytes = noise(200_000);
+  const r = await alice.sendFile(bob.me.account, new File([bytes], "queued.bin", { type: "application/octet-stream" }));
+  assert.equal(r.queued, 1);
+  // The chunks are on B now, not on A.
+  const count = (name) => {
+    const db = new DatabaseSync(join(dir, `${name}.sqlite`), { readOnly: true });
+    const n = db.prepare("SELECT COUNT(*) AS n FROM relay_queue").get().n;
+    db.close();
+    return n;
+  };
+  assert.ok(count("b") > 0);
+  assert.equal(count("a"), 0);
+  const online = waitFor(bob, "status", (s) => s === "online");
+  await bob.start();
+  await online;
+  assert.deepEqual(await received(bob, alice.me.account, "queued.bin"), bytes);
+  await until(() => count("b") === 0);
+});
+
+test("the smaller of both servers' limits decides: B queues at most 1 MiB per device", async () => {
+  bob.ws.close();
+  clearInterval(bob.retryTimer);
+  await new Promise((r) => setTimeout(r, 300));
+  // A would take it (150 MiB), B does not: the file waits until Bob's device is connected.
+  const r = await alice.sendFile(bob.me.account, new File([noise(2_000_000)], "big.bin", { type: "application/octet-stream" }));
+  assert.equal(r.queued, 0);
+  assert.equal(r.waiting, 1);
+  assert.equal(r.tooBig, true);
+  const online = waitFor(bob, "status", (s) => s === "online");
+  await bob.start();
+  await online;
+  // Offered again once the device is there, live this time.
+  await alice.flushFiles();
+  await until(async () => (await bob.messages(alice.me.account)).some((x) => x.file?.name === "big.bin" && x.file.have), 30000);
+});
+
+test("each server announces what it takes from other servers", async () => {
+  const ib = await apiB.info();
+  assert.ok(ib.relay.peer > 0 && ib.relay.store > 0);
+  assert.ok(ib.file_queue_limits.file < (await apiA.info()).file_queue_limits.file);
 });
 
 test("servers outside the policy are refused", async () => {
@@ -180,7 +243,7 @@ test("servers outside the policy are refused", async () => {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      req: { v: 1, from: A, to: B, time: Math.floor(Date.now() / 1000), nonce: "AAAAAAAAAAAAAAAAAAAAAA", msgs: [{ device: "x", env: "AA" }] },
+      req: { v: 1, kind: "deliver", from: A, to: B, time: Math.floor(Date.now() / 1000), nonce: "AAAAAAAAAAAAAAAAAAAAAA", msgs: [{ device: "x", env: "AA" }] },
       sig: "A".repeat(86),
     }),
   });

@@ -133,6 +133,18 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
             Map::new().with("key", app.fed.public.as_str()).into(),
         );
     }
+    // What this server takes per minute from each account for each of its devices, live and into the file queue:
+    // other servers keep their users' transfers within it (federation).
+    m.insert(
+        "relay",
+        Map::new()
+            .with(
+                "peer",
+                i64::from(app.limits.budget(crate::ws::RELAY_PEER_BYTES)),
+            )
+            .with("store", i64::from(app.limits.budget(app.cfg.relay_store)))
+            .into(),
+    );
     if app.push.enabled() {
         m.insert("push_key", app.push.public.as_str().into());
     }

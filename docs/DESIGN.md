@@ -1219,11 +1219,40 @@ federation key, and other servers then refuse it as `federation_refused` rather 
 Lookups and device lists of the recipient are asked by the sender's server, so the recipient's server sees which
 accounts on it are looked up by users of that server (not by whom).
 
-### 14.6 Not yet across servers
+### 14.6 Files between servers, within the smaller limits
 
-- **Files** (live relay, the file queue, grants) and **GIFs**, which are files: refused with `remote_files` for a
-  contact on another server. Servers have their own file limits (`file_queue_limits`, relay budgets); a transfer
-  between servers will have to keep within the smaller of both.
-- **Presence**: devices on another server are not asked, so they count as away.
-- The `devices` notice: a change of a contact's list on another server is learned from the heads in its next message
-  (§5.3), as T3 already allows.
+File chunks, and the questions a transfer asks first, take the same way as envelopes: the client sends the frames it
+always sends (`presence`, `relay-space`, `relay`, text or binary), and its server hands what is for devices on other
+servers to those servers, signed like a delivery (`kind` binds each request to its endpoint):
+
+| Endpoint | Request | Answer |
+|---|---|---|
+| `POST /api/v1/federation/relay` | `sender: { account, device }, devices, store, ttl?, data, bin` (one chunk; `bin`: the payload of a binary frame, base64url) | `{ missed, text }` |
+| `POST /api/v1/federation/presence` | `devices` | `{ online }` |
+| `POST /api/v1/federation/space` | `account, devices, bytes` | `{ ok }` |
+
+The server knows which devices are elsewhere from what its own account told it: the `server` of envelopes in `send`
+and the lists it fetched with `remote-devices` (kept in memory per account and device for a week since last use).
+The connection waits for the other server's answer before it reads the next frame, so `relay-missed`, `presence` and
+`relay-space` keep their order (the client relies on that to know which devices missed a chunk).
+
+**Each server keeps its own limits** for what comes from other servers: a chunk from an account elsewhere counts
+exactly like one from its own accounts (live per sending account into a device, `relay.peer`; queued per sending
+account, `relay.store`; and the file queue's sizes per device, sender and account), besides 60 000 frames and 2 GiB a
+minute per sending server. It announces them in `/api/v1/info` (`relay`, `file_queue`, `file_queue_limits`), and the
+sending server passes them to its client with the contact's device list (`limits`). So a transfer keeps within the
+smaller of both servers:
+- the sending server has its own budget for chunks to other servers, `remote` in `ready` (256 MiB a minute per
+  sending device), and the client paces against it;
+- for each device on another server, the client also paces against that server's `relay.peer`, and for queued chunks
+  against its `relay.store` shared by that server's devices in the transfer;
+- whether a file fits the other server's queue is asked there (`relay-space` → `/federation/space`, by its limits),
+  and "too large to queue" is shown against the smaller per-file limit of both servers.
+
+What does not fit waits, as on one server: it goes when the device is connected (presence is asked across servers
+too). Grants (`relay-grant`) do not cross servers; transfers to other servers use the budgets above.
+
+Not across servers yet: the `devices` notice (a change of a contact's list on another server is learned from the
+heads in its next message, §5.3, as T3 already allows). A receiving client takes chunks from its contacts' devices by
+account and device as before; it does not check which server a chunk came through, and a server could inject chunks
+in a contact's name, which fail the file's key and hash and are dropped.

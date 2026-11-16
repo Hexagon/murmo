@@ -54,7 +54,9 @@ requests to them.
 - A list of origins, for a group of servers that know each other (a family's, a club's).
 - `off`: a private island, as before federation.
 
-Files and GIFs do not go between servers yet; users are told so when they try.
+Files go between servers too. Your server's file limits (`MURMO_FILE_QUEUE_*`, `MURMO_RELAY_STORE_MB`) apply to
+what comes from other servers as to your own users, and are announced in `/api/v1/info`, so that senders elsewhere
+keep within the smaller of both servers' limits.
 
 ## Upgrading to the federation release
 
