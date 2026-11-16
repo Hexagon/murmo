@@ -405,7 +405,7 @@ const HELP = [
   ["help.limits", 3],
 ];
 
-/** "Version 0.1.0 · commit 1a2b3c4d5e6f", linking to the source of that commit; null if the server does not say. */
+/** "Version 0.2.0 · commit 1a2b3c4d5e6f", linking to the source of that commit; null if the server does not say. */
 function versionLine() {
   if (typeof info?.version !== "string") return null;
   const commit = /^[0-9a-f]{7,40}$/.test(info.commit ?? "") ? info.commit : null;

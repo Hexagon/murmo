@@ -21,7 +21,7 @@ reach someone only with their exact identifier (`Alice#3F9C`), and the device li
 in rootcard's verifiable key log rather than in trust in the server. The server is a single Rust binary that stores
 as little as possible.
 
-> **Status: early.** Murmo 0.1 builds on rootcard 0.3.5. Neither has had an external security review. Read the
+> **Status: early.** Murmo 0.2 builds on rootcard 0.3.5. Neither has had an external security review. Read the
 > [threat model](docs/THREAT_MODEL.md) before trusting it with anything sensitive, and report vulnerabilities
 > privately as described in [SECURITY.md](SECURITY.md).
 
