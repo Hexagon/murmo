@@ -97,8 +97,6 @@ fn harness() -> &'static Harness {
             push_hosts: Vec::new(),
             giphy_key: String::new(),
             giphy_rating: "pg-13".into(),
-            operator: String::new(),
-            contact: String::new(),
             beta: true,
             push_contact: String::new(),
         };

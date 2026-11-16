@@ -66,10 +66,6 @@ pub struct Config {
     pub giphy_key: String,
     /// GIPHY content rating for searches (`g`, `pg`, `pg-13` or `r`).
     pub giphy_rating: String,
-    /// Who runs this server, shown in the terms and privacy notice (empty: not given).
-    pub operator: String,
-    /// How to reach the operator about privacy, abuse and requests from authorities (empty: not given).
-    pub contact: String,
     /// Whether the client marks the service as an open beta.
     pub beta: bool,
 }

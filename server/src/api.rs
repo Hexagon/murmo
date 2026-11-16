@@ -126,15 +126,6 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
                 .into(),
         );
     }
-    if !app.cfg.operator.is_empty() || !app.cfg.contact.is_empty() {
-        m.insert(
-            "operator",
-            Map::new()
-                .with("name", app.cfg.operator.as_str())
-                .with("contact", app.cfg.contact.as_str())
-                .into(),
-        );
-    }
     if app.push.enabled() {
         m.insert("push_key", app.push.public.as_str().into());
     }

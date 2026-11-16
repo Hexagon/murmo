@@ -29,8 +29,6 @@ Set in the environment:
 | `MURMO_PUSH_CONTACT` | `MURMO_ORIGIN` | contact sent to push services (`mailto:` or `https:` URL) |
 | `MURMO_GIPHY_KEY` | empty | GIPHY API key; lets users search GIPHY to fill their GIF collection, directly from the browser (empty: no search). A beta key allows 100 searches an hour for the whole server |
 | `MURMO_GIPHY_RATING` | `pg-13` | GIPHY content rating for searches (`g`, `pg`, `pg-13`, `r`) |
-| `MURMO_OPERATOR` | empty | who runs this server (a person or an organisation), named as data controller in the terms |
-| `MURMO_CONTACT` | empty | how to reach the operator about privacy, abuse and requests from authorities: an e-mail address (shown as text) or an `https://` page (shown as a link) |
 | `MURMO_BETA` | `1` | mark the service as an open beta in the client (`0`: no mark) |
 
 Murmo was called mesg before. The old variable names (`MESG_…`) still work when the new ones are not set, and an
@@ -44,22 +42,14 @@ The `MURMO_ORIGIN` goes into users' signed rootcard logs as their home address: 
 ## Terms, privacy and the open beta
 
 The client has a page "Terms and privacy" (in the page footer, at `#villkor`, on the login screen, in the account
-settings and in the help): an open beta notice, a disclaimer of warranty and liability, rules of use, what personal
-data the server processes and why (the same list as [DESIGN.md §11](DESIGN.md#11-data-the-server-stores)), and the
-user's rights. The texts are written for any operator; the operator's name and contact come from `MURMO_OPERATOR` and
-`MURMO_CONTACT`. A public server should set both: under the GDPR whoever runs a server open to others is the data
-controller and must say who they are and how to reach them, and a contact for abuse is what lets you act on reports
-about content you cannot see. For example:
-
-```sh
-MURMO_OPERATOR="Murmo, ideell förening"
-MURMO_CONTACT=privacy@example.org
-```
+settings and in the help): an open beta notice, a disclaimer of warranty and liability, rules of use, and what
+personal data the server processes and why (the same list as [DESIGN.md §11](DESIGN.md#11-data-the-server-stores)).
+The texts are written for any operator and any country: they name no person, contact or law.
 
 Without `MURMO_BETA=0` the service is marked "Open beta" (next to the logo, on the login screen and in the terms),
 which suits Murmo as long as it has not been reviewed externally. The texts are in `client/js/lang/*.js` (`beta.*`,
-`terms.*`); the date they took effect is `TERMS_DATE` in `client/js/app.js`. Change both together, and have the texts
-checked against the law where you run the server: they are a starting point, not legal advice.
+`terms.*`); the date they took effect is `TERMS_DATE` in `client/js/app.js`. Change both together, and check the texts
+against the law where you run the server: they are a starting point, not legal advice.
 
 ## Moving to a new domain
 

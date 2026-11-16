@@ -428,13 +428,13 @@ function showHelp() {
 /** The day the terms below last changed (Unix seconds), shown with them. */
 const TERMS_DATE = Date.UTC(2026, 10, 16) / 1000;
 
-/** The sections of the terms, as HELP. Who runs the server (MURMO_OPERATOR, MURMO_CONTACT) comes after privacy. */
+/** The sections of the terms, as HELP. */
 const TERMS = [
   ["terms.beta", 3],
   ["terms.warranty", 3],
   ["terms.use", 4],
   ["terms.privacy", 5],
-  ["terms.other", 3],
+  ["terms.other", 2],
 ];
 
 /** Whether this server calls itself an open beta (`MURMO_BETA`, on unless turned off). */
@@ -447,27 +447,6 @@ function betaMark() {
   return isBeta() ? h("span", { class: "beta", title: tr("beta.note"), text: tr("beta.mark") }) : null;
 }
 
-/** Who runs this server and how to reach them, as the server says (`MURMO_OPERATOR`, `MURMO_CONTACT`). */
-function operatorSection() {
-  const o = info?.operator;
-  const name = typeof o?.name === "string" ? o.name.slice(0, 200) : "";
-  const contact = typeof o?.contact === "string" ? o.contact.slice(0, 200) : "";
-  // Only an https address becomes a link; anything else (an e-mail address) is shown as text.
-  const link = /^https:\/\/[^\s"<>]+$/.test(contact)
-    ? h("a", { href: contact, target: "_blank", rel: "noopener noreferrer", text: contact })
-    : h("strong", { text: contact });
-  return h(
-    "section",
-    {},
-    h("h3", { text: tr("terms.operator") }),
-    h("ul", {},
-      h("li", { text: name ? tr("terms.operatorName", { name }) : tr("terms.operatorNone") }),
-      contact ? h("li", {}, tr("terms.contact"), " ", link) : null,
-      h("li", { text: tr("terms.rights") }),
-    ),
-  );
-}
-
 function showTerms() {
   const section = ([title, n]) => h("section", {}, h("h3", { text: tr(title) }), h("ul", {}, Array.from({ length: n }, (_, i) => h("li", { text: tr(`${title}.${i + 1}`) }))));
   const date = new Date(TERMS_DATE * 1000).toLocaleDateString(i18n.locale(), { dateStyle: "long", timeZone: "UTC" });
@@ -478,9 +457,7 @@ function showTerms() {
     h(
       "div",
       { class: "help" },
-      TERMS.slice(0, 4).map(section),
-      operatorSection(),
-      TERMS.slice(4).map(section),
+      TERMS.map(section),
     ),
     versionLine(),
     h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
