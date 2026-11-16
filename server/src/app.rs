@@ -53,6 +53,10 @@ pub struct Config {
     pub file_queue_sender: i64,
     /// Bytes of queued file chunks one sender account may keep in total.
     pub file_queue_account: i64,
+    /// Bytes per minute one device may stream to devices that granted it more (`relay-grant`; 0: no grants).
+    pub relay_granted: u32,
+    /// Bytes per minute one account may put into the file queue.
+    pub relay_store: u32,
     /// Push services whose endpoints are accepted for notifications (empty: no push).
     pub push_hosts: Vec<String>,
     /// Contact in push requests (`mailto:` or `https:` URL); the origin by default.
@@ -110,6 +114,8 @@ pub fn random<const N: usize>() -> [u8; N] {
 pub enum Push {
     /// A text frame.
     Text(String),
+    /// A binary frame (a file chunk, DESIGN.md §10.2). The buffer is shared by every device it goes to.
+    Binary(axum::body::Bytes),
 }
 
 /// Pushes waiting per connection; a connection that falls this far behind is dropped (it reconnects and reads the
@@ -119,7 +125,19 @@ pub const PUSH_QUEUE: usize = 512;
 struct Conn {
     id: u64,
     account: String,
+    /// Whether the connection takes binary relay frames (`caps: ["bin"]` in `auth`).
+    binary: bool,
     tx: mpsc::Sender<Push>,
+}
+
+/// Most live grants a receiving device holds at once; a new one replaces its oldest.
+pub const MAX_GRANTS: usize = 16;
+
+/// A receiving device's permission for one sending device to stream more to it (`relay-grant`, DESIGN.md §10.2).
+#[derive(Debug, Clone, Copy)]
+struct Grant {
+    bytes: u64,
+    expires: i64,
 }
 
 /// The connected devices of this server. Dropping a connection's sender ends its session.
@@ -127,11 +145,21 @@ struct Conn {
 pub struct Hub {
     conns: Mutex<HashMap<String, Conn>>,
     next: AtomicU64,
+    /// receiving device → sending device → grant. In memory only: a restart forgets them, and the transfer then
+    /// falls back to the ordinary live budgets.
+    grants: Mutex<HashMap<String, HashMap<String, Grant>>>,
 }
 
 impl Hub {
-    /// Register a connection of `device`; an earlier connection of the same device is dropped.
-    pub fn register(&self, device: &str, account: &str, tx: mpsc::Sender<Push>) -> u64 {
+    /// Register a connection of `device`; an earlier connection of the same device is dropped. `binary`: it takes
+    /// binary relay frames.
+    pub fn register(
+        &self,
+        device: &str,
+        account: &str,
+        binary: bool,
+        tx: mpsc::Sender<Push>,
+    ) -> u64 {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut g) = self.conns.lock() {
             g.insert(
@@ -139,11 +167,82 @@ impl Hub {
                 Conn {
                     id,
                     account: account.to_string(),
+                    binary,
                     tx,
                 },
             );
         }
         id
+    }
+
+    /// Whether a connected device takes binary relay frames; `None` when it is not connected.
+    pub fn binary(&self, device: &str) -> Option<bool> {
+        self.conns
+            .lock()
+            .ok()
+            .and_then(|g| g.get(device).map(|c| c.binary))
+    }
+
+    /// `to` lets `from` stream up to `bytes` more to it until `expires` (replacing an earlier grant; 0 removes it).
+    pub fn grant(&self, to: &str, from: &str, bytes: u64, expires: i64) {
+        let Ok(mut g) = self.grants.lock() else {
+            return;
+        };
+        let t = now();
+        let mine = g.entry(to.to_string()).or_default();
+        mine.retain(|_, x| x.expires > t && x.bytes > 0);
+        if bytes == 0 {
+            mine.remove(from);
+        } else {
+            if !mine.contains_key(from) && mine.len() >= MAX_GRANTS {
+                let oldest = mine
+                    .iter()
+                    .min_by_key(|(_, x)| x.expires)
+                    .map(|(k, _)| k.clone());
+                if let Some(k) = oldest {
+                    mine.remove(&k);
+                }
+            }
+            mine.insert(from.to_string(), Grant { bytes, expires });
+        }
+        if mine.is_empty() {
+            g.remove(to);
+        }
+    }
+
+    /// What `to` still lets `from` stream to it (0: no grant).
+    pub fn granted(&self, to: &str, from: &str) -> u64 {
+        let t = now();
+        self.grants
+            .lock()
+            .ok()
+            .and_then(|g| {
+                g.get(to)
+                    .and_then(|m| m.get(from))
+                    .filter(|x| x.expires > t)
+                    .map(|x| x.bytes)
+            })
+            .unwrap_or(0)
+    }
+
+    /// Use `n` bytes of the grant from `from` to `to` (what is left of it, at most).
+    pub fn use_grant(&self, to: &str, from: &str, n: u64) {
+        if let Ok(mut g) = self.grants.lock()
+            && let Some(x) = g.get_mut(to).and_then(|m| m.get_mut(from))
+        {
+            x.bytes = x.bytes.saturating_sub(n);
+        }
+    }
+
+    /// Forget expired and used-up grants.
+    pub fn sweep_grants(&self) {
+        let t = now();
+        if let Ok(mut g) = self.grants.lock() {
+            for m in g.values_mut() {
+                m.retain(|_, x| x.expires > t && x.bytes > 0);
+            }
+            g.retain(|_, m| !m.is_empty());
+        }
     }
 
     /// Remove a connection (only if it is still the registered one).

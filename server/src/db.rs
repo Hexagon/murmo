@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS relay_queue (
   account TEXT NOT NULL,
   size    INTEGER NOT NULL,
   expires INTEGER NOT NULL,
-  data    TEXT NOT NULL
+  data    TEXT NOT NULL -- or a BLOB: a binary chunk (TEXT affinity keeps BLOBs as they are)
 );
 CREATE INDEX IF NOT EXISTS relay_queue_device ON relay_queue (device, id);
 CREATE INDEX IF NOT EXISTS relay_queue_account ON relay_queue (account, device);
@@ -80,6 +80,52 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   window INTEGER NOT NULL
 );
 ";
+
+/// A file chunk to queue: base64url text from a client that sends text frames, or the payload of a binary frame.
+#[derive(Debug, Clone, Copy)]
+pub enum ChunkData<'a> {
+    /// Text (`relay` JSON frame).
+    Text(&'a str),
+    /// Bytes (binary relay frame).
+    Binary(&'a [u8]),
+}
+
+impl ChunkData<'_> {
+    /// Its size as counted against the queue's budgets.
+    pub fn len(&self) -> usize {
+        match self {
+            ChunkData::Text(t) => t.len(),
+            ChunkData::Binary(b) => b.len(),
+        }
+    }
+
+    /// Whether it is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A queued chunk as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueuedData {
+    /// Delivered as a text `relay` frame.
+    Text(String),
+    /// Delivered as a binary frame, only to connections that take them.
+    Binary(Vec<u8>),
+}
+
+/// A queued chunk with where it came from.
+#[derive(Debug, Clone)]
+pub struct QueuedChunk {
+    /// Its id, for `relay-ack`.
+    pub id: i64,
+    /// The sending device.
+    pub sender: String,
+    /// The sending account.
+    pub account: String,
+    /// The chunk.
+    pub data: QueuedData,
+}
 
 /// A saved rate limit counter: `(keyed hash, count, window start, window seconds)`.
 pub type RateRow = (Vec<u8>, u32, i64, i64);
@@ -463,13 +509,14 @@ impl Db {
         usage(&*self.conn()?, device, account)
     }
 
-    /// Queue a chunk for a device unless that would exceed one of `limits`.
+    /// Queue a chunk for a device unless that would exceed one of `limits`. A binary chunk is stored as a `BLOB`,
+    /// a text chunk (from a client that sends text frames) as `TEXT`; [`Db::relay_queued`] tells them apart.
     pub fn relay_enqueue(
         &self,
         device: &str,
         sender: &str,
         account: &str,
-        data: &str,
+        data: ChunkData<'_>,
         expires: i64,
         limits: &QueueLimits,
     ) -> Result<bool, StoreError> {
@@ -480,22 +527,27 @@ impl Db {
             Some(u) if u.room(limits) >= size => {}
             _ => return Ok(false),
         }
-        tx.execute(
-            "INSERT INTO relay_queue (device, sender, account, size, expires, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![device, sender, account, size, expires, data],
-        )
+        let sql = "INSERT INTO relay_queue (device, sender, account, size, expires, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+        match data {
+            ChunkData::Text(t) => {
+                tx.execute(sql, params![device, sender, account, size, expires, t])
+            }
+            ChunkData::Binary(b) => {
+                tx.execute(sql, params![device, sender, account, size, expires, b])
+            }
+        }
         .map_err(store_err)?;
         tx.commit().map_err(store_err)?;
         Ok(true)
     }
 
-    /// Queued chunks of a device after `after`, oldest first: `(id, sender device, sender account, data)`.
+    /// Queued chunks of a device after `after`, oldest first.
     pub fn relay_queued(
         &self,
         device: &str,
         after: i64,
         limit: i64,
-    ) -> Result<Vec<(i64, String, String, String)>, StoreError> {
+    ) -> Result<Vec<QueuedChunk>, StoreError> {
         let c = self.conn()?;
         let mut st = c
             .prepare(
@@ -504,7 +556,17 @@ impl Db {
             .map_err(store_err)?;
         let rows = st
             .query_map(params![device, after, limit], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                let data = match r.get::<_, rusqlite::types::Value>(3)? {
+                    rusqlite::types::Value::Blob(b) => QueuedData::Binary(b),
+                    rusqlite::types::Value::Text(t) => QueuedData::Text(t),
+                    _ => QueuedData::Text(String::new()),
+                };
+                Ok(QueuedChunk {
+                    id: r.get(0)?,
+                    sender: r.get(1)?,
+                    account: r.get(2)?,
+                    data,
+                })
             })
             .map_err(store_err)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(store_err)
@@ -930,8 +992,15 @@ mod tests {
     }
 
     fn put(db: &Db, to: &str, from_account: &str, n: usize) -> bool {
-        db.relay_enqueue(to, "dev", from_account, &"x".repeat(n), 10, &LIMITS)
-            .expect("enqueue")
+        db.relay_enqueue(
+            to,
+            "dev",
+            from_account,
+            ChunkData::Text(&"x".repeat(n)),
+            10,
+            &LIMITS,
+        )
+        .expect("enqueue")
     }
 
     #[test]
@@ -982,6 +1051,34 @@ mod tests {
         let u = db.relay_usage("b2", "A").expect("usage").expect("known");
         assert_eq!((u.own, u.device, u.pair), (false, 70, 0));
         assert_eq!(u.room(&LIMITS), 30);
+    }
+
+    #[test]
+    fn binary_and_text_chunks_keep_their_kind() {
+        let db = db();
+        assert!(
+            db.relay_enqueue("b1", "a1", "A", ChunkData::Text("abc"), 10, &LIMITS)
+                .expect("enqueue")
+        );
+        assert!(
+            db.relay_enqueue(
+                "b1",
+                "a1",
+                "A",
+                ChunkData::Binary(&[0, 1, 2, 255]),
+                10,
+                &LIMITS
+            )
+            .expect("enqueue")
+        );
+        let q = db.relay_queued("b1", 0, 10).expect("queued");
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].data, QueuedData::Text("abc".into()));
+        assert_eq!(q[1].data, QueuedData::Binary(vec![0, 1, 2, 255]));
+        assert_eq!((q[1].sender.as_str(), q[1].account.as_str()), ("a1", "A"));
+        // Both count by their length.
+        let u = db.relay_usage("b1", "A").expect("usage").expect("known");
+        assert_eq!(u.pair, 7);
     }
 
     #[test]

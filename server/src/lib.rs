@@ -120,6 +120,16 @@ fn list(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// A budget in MiB per minute from the environment, as bytes (at most 4095 MiB, so it fits a rate limit counter).
+fn rate_mb(name: &str, default: u32) -> u32 {
+    env(name, &default.to_string())
+        .parse::<u32>()
+        .unwrap_or(default)
+        .min(4095)
+        * 1024
+        * 1024
+}
+
 fn megabytes(name: &str, default: i64) -> i64 {
     env(name, &default.to_string())
         .parse::<i64>()
@@ -159,6 +169,8 @@ fn config() -> Result<Config, String> {
         file_queue_total: megabytes("MURMO_FILE_QUEUE_TOTAL_MB", 2048),
         file_queue_sender: megabytes("MURMO_FILE_QUEUE_SENDER_MB", 50),
         file_queue_account: megabytes("MURMO_FILE_QUEUE_ACCOUNT_MB", 300),
+        relay_granted: rate_mb("MURMO_RELAY_GRANTED_MB", 1024),
+        relay_store: rate_mb("MURMO_RELAY_STORE_MB", 128),
         push_hosts: list(&env(
             "MURMO_PUSH_HOSTS",
             "fcm.googleapis.com,updates.push.services.mozilla.com,*.push.apple.com,*.notify.windows.com",
@@ -376,6 +388,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             sweeper.links.sweep();
             sweeper.limits.sweep();
+            sweeper.hub.sweep_grants();
             if let Err(e) = sweeper.limits.save() {
                 eprintln!("rate limits: {e}");
             }

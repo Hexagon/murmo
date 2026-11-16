@@ -2,6 +2,7 @@
 //! it receives queued envelopes, pushes and link requests, and can send, acknowledge and publish prekeys.
 
 use crate::app::{App, PUSH_QUEUE, Push, now, random, text};
+use crate::db::{ChunkData, QueuedData};
 use crate::devices::{verify_prekey, verify_ws_auth};
 use crate::error::ApiError;
 use axum::extract::State;
@@ -24,11 +25,32 @@ pub const MAX_QUEUE: i64 = 2000;
 pub const MAILBOX_TTL: i64 = 14 * 24 * 3600;
 /// Largest relay payload (base64url text): one file chunk.
 pub const MAX_RELAY: usize = 96 * 1024;
-/// Relay budget per sending device and minute, in bytes of chunk text counted once per recipient device.
+/// Largest payload of a binary relay frame: one file chunk with its id and indices (DESIGN.md §10.2).
+pub const MAX_RELAY_BIN: usize = 64 * 1024;
+/// Live relay budget per sending device and minute, in bytes of chunks (text, or the payload of binary frames)
+/// counted once per connected recipient device without a grant.
 pub const RELAY_BYTES: u32 = 384 << 20;
-/// Relay budget per sending account and recipient device and minute, in bytes of chunk text: what one account can
-/// push into one device, whichever of its devices sends.
+/// Live relay budget per sending account and recipient device and minute: what one account can push into one
+/// connected device that did not ask for it, whichever of the account's devices sends.
 pub const RELAY_PEER_BYTES: u32 = 96 << 20;
+/// Default budget per sending device and minute for chunks to devices that granted it more (`relay-grant`): the
+/// recipient asked for the file, so this is not flooding; it bounds the server's bandwidth (`MURMO_RELAY_GRANTED_MB`).
+pub const RELAY_GRANTED_BYTES: u32 = 1 << 30;
+/// Default budget per sending account and minute for chunks put into the file queue (`MURMO_RELAY_STORE_MB`).
+pub const RELAY_STORE_BYTES: u32 = 128 << 20;
+/// Relay frames per device and minute, of any kind.
+pub const RELAY_FRAMES: u32 = 24_000;
+/// Relay frames per device and minute that go anywhere but to devices that granted more (live without a grant, or
+/// queued).
+pub const RELAY_SLOW_FRAMES: u32 = 3_000;
+/// Largest grant: a whole file of `MAX_FILE` (1 GiB) as text chunks, with room to spare.
+pub const MAX_GRANT: i64 = 2 << 30;
+/// How long a grant lasts, in seconds.
+pub const GRANT_TTL: i64 = 30 * 60;
+/// Binary frame types (DESIGN.md §10.2).
+pub const BIN_RELAY: u8 = 0x01;
+/// A binary chunk from the server to a device.
+pub const BIN_DELIVER: u8 = 0x02;
 /// Most devices per presence query.
 pub const MAX_PRESENCE: usize = 32;
 /// Largest frame accepted from a client.
@@ -83,6 +105,8 @@ async fn recv_object(socket: &mut WebSocket) -> Option<Map> {
 struct Authed {
     account: String,
     device: String,
+    /// It takes binary relay frames (`caps: ["bin"]` in `auth`).
+    binary: bool,
 }
 
 async fn authenticate(
@@ -130,7 +154,15 @@ async fn authenticate(
         let _ = socket.send(error("bad_signature")).await;
         return None;
     }
-    Some(Authed { account, device })
+    let binary = m
+        .get("caps")
+        .and_then(Value::as_array)
+        .is_some_and(|c| c.iter().any(|x| x.as_str() == Some("bin")));
+    Some(Authed {
+        account,
+        device,
+        binary,
+    })
 }
 
 async fn run(
@@ -143,7 +175,7 @@ async fn run(
         return Ok(());
     };
     let (tx, mut rx) = mpsc::channel::<Push>(PUSH_QUEUE);
-    let conn = app.hub.register(&me.device, &me.account, tx);
+    let conn = app.hub.register(&me.device, &me.account, me.binary, tx);
     // When each device was last connected, so the owner can tell which devices are still in use (`seen`).
     let _ = app.db.set_seen(&me.device, now());
     let result = session(&app, &me, &mut socket, &mut rx).await;
@@ -166,6 +198,25 @@ async fn session(
                 Map::new()
                     .with("bytes", i64::from(app.limits.budget(RELAY_BYTES)))
                     .with("peer", i64::from(app.limits.budget(RELAY_PEER_BYTES)))
+                    .with(
+                        "granted",
+                        i64::from(app.limits.budget(app.cfg.relay_granted)),
+                    )
+                    .with("store", i64::from(app.limits.budget(app.cfg.relay_store)))
+                    .with("frames", i64::from(app.limits.budget(RELAY_FRAMES)))
+                    .with(
+                        "slow_frames",
+                        i64::from(app.limits.budget(RELAY_SLOW_FRAMES)),
+                    )
+                    .with(
+                        "grant",
+                        if app.cfg.relay_granted > 0 {
+                            MAX_GRANT
+                        } else {
+                            0
+                        },
+                    )
+                    .with("binary", 1i64)
                     .with("window", 60i64),
             ),
         ))
@@ -203,6 +254,7 @@ async fn session(
             biased;
             push = rx.recv() => match push {
                 Some(Push::Text(t)) => socket.send(Message::Text(t.into())).await?,
+                Some(Push::Binary(b)) => socket.send(Message::Binary(b)).await?,
                 None => {
                     let _ = socket.send(Message::Close(None)).await;
                     return Ok(());
@@ -211,6 +263,11 @@ async fn session(
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(t))) => {
                     if let Some(r) = text_frame(app, me, t.as_bytes()) {
+                        socket.send(r).await?;
+                    }
+                }
+                Some(Ok(Message::Binary(b))) => {
+                    if let Some(r) = binary_frame(app, me, &b) {
                         socket.send(r).await?;
                     }
                 }
@@ -224,18 +281,25 @@ async fn session(
                     .relay_queued(&me.device, relay_after, 4)
                     .map_err(axum::Error::new)?;
                 relay_more = !batch.is_empty();
-                for (id, sender, account, data) in batch {
-                    relay_after = id;
-                    socket
-                        .send(frame(
+                for q in batch {
+                    relay_after = q.id;
+                    let out = match q.data {
+                        QueuedData::Text(data) => frame(
                             Map::new()
                                 .with("t", "relay")
-                                .with("id", id)
-                                .with("from", sender)
-                                .with("account", account)
+                                .with("id", q.id)
+                                .with("from", q.sender)
+                                .with("account", q.account)
                                 .with("data", data),
-                        ))
-                        .await?;
+                        ),
+                        // A connection that cannot read it does not get it; it stays queued until it expires.
+                        QueuedData::Binary(_) if !me.binary => continue,
+                        QueuedData::Binary(data) => match deliver_frame(&q.sender, &q.account, q.id, &data) {
+                            Some(b) => Message::Binary(b),
+                            None => continue,
+                        },
+                    };
+                    socket.send(out).await?;
                 }
             }
         }
@@ -256,6 +320,7 @@ pub fn fuzz_frame(app: &Arc<App>, account: &str, device: &str, text: &[u8]) -> O
     let me = Authed {
         account: account.to_string(),
         device: device.to_string(),
+        binary: true,
     };
     match text_frame(app, &me, text)? {
         Message::Text(t) => Some(t.to_string()),
@@ -277,6 +342,7 @@ fn handle(app: &Arc<App>, me: &Authed, m: &Map) -> Option<Message> {
         Some("relay") => relay(app, me, m),
         Some("relay-ack") => relay_ack(app, me, m),
         Some("relay-space") => relay_space(app, me, m),
+        Some("relay-grant") => relay_grant(app, me, m),
         Some("presence") => presence(app, me, m),
         Some("seen") => seen(app, me, m),
         Some("push-sub") => push_sub(app, me, m),
@@ -286,20 +352,26 @@ fn handle(app: &Arc<App>, me: &Authed, m: &Map) -> Option<Message> {
     match r {
         Ok(msg) => msg,
         Err(e) => {
-            let mut f = Map::new().with("t", "error").with("error", e.code);
-            if let Some(s) = e.retry_after {
-                f.insert("retry", i64::try_from(s).unwrap_or(i64::MAX).into());
-            }
-            if let Some(id) = m.get("id").and_then(Value::as_str) {
-                f.insert("id", id.into());
-            } else if let Some(r) = m.get("ref").and_then(Value::as_str)
-                && r.len() <= 64
-            {
-                f.insert("id", r.into());
-            }
-            Some(frame(f))
+            let id = m.get("id").and_then(Value::as_str).or_else(|| {
+                m.get("ref")
+                    .and_then(Value::as_str)
+                    .filter(|r| r.len() <= 64)
+            });
+            Some(error_reply(&e, id))
         }
     }
+}
+
+/// `{ t: "error", error, retry?, id? }`.
+fn error_reply(e: &ApiError, id: Option<&str>) -> Message {
+    let mut f = Map::new().with("t", "error").with("error", e.code);
+    if let Some(s) = e.retry_after {
+        f.insert("retry", i64::try_from(s).unwrap_or(i64::MAX).into());
+    }
+    if let Some(id) = id {
+        f.insert("id", id.into());
+    }
+    frame(f)
 }
 
 fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
@@ -407,18 +479,48 @@ fn prekey(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> 
     )))
 }
 
-/// Live relay to connected devices only: nothing is stored, devices that are not connected are reported back.
+/// A relay request, from a JSON `relay` frame or a binary frame.
+struct RelayReq<'a> {
+    /// Recipient devices, without duplicates.
+    to: Vec<String>,
+    /// Keep the chunk for devices that are not connected.
+    store: bool,
+    /// How long a queued chunk is kept (seconds), when given.
+    ttl: Option<i64>,
+    /// Echoed in `relay-missed` and `error`.
+    reference: Option<String>,
+    data: ChunkData<'a>,
+}
+
+/// Where one chunk goes for one recipient device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// Connected, no grant: the live budgets.
+    Live,
+    /// Connected, and it granted the sender more.
+    Granted,
+    /// Not connected: into the file queue.
+    Stored,
+    /// Connected, but it does not take binary frames.
+    NoBinary,
+    /// Not delivered.
+    Missed,
+}
+
+fn is_b64url(s: &str) -> bool {
+    s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// A JSON `relay` frame: `{ t: "relay", to, data, ref?, store?, ttl? }`.
 fn relay(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
-    app.limits.check(format!("relay:{}", me.device), 3000, 60)?;
+    app.limits
+        .check(format!("relay:{}", me.device), RELAY_FRAMES, 60)?;
     let data = m
         .get("data")
         .and_then(Value::as_str)
         .ok_or(ApiError::new(400, "bad_field"))?;
-    if data.len() > MAX_RELAY
-        || !data
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
+    if data.len() > MAX_RELAY || !is_b64url(data) {
         return Err(ApiError::new(400, "bad_relay"));
     }
     let to = m
@@ -428,56 +530,244 @@ fn relay(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
     if to.is_empty() || to.len() > MAX_RECIPIENTS {
         return Err(ApiError::new(400, "bad_field"));
     }
-    // Bytes, not only frames: once per recipient device for the sender, and per recipient for the sending account.
-    let mut targets: Vec<&str> = Vec::with_capacity(to.len());
+    let mut devices: Vec<String> = Vec::with_capacity(to.len());
     for d in to {
         let d = d.as_str().ok_or(ApiError::new(400, "bad_field"))?;
-        if d != me.device && !targets.contains(&d) {
-            targets.push(d);
+        if !devices.iter().any(|x| x == d) {
+            devices.push(d.to_string());
         }
     }
-    let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
-    let mut budget: Vec<(String, u32, u32)> = Vec::with_capacity(targets.len() + 1);
-    budget.push((
-        format!("relay-bytes:{}", me.device),
-        len.saturating_mul(u32::try_from(targets.len()).unwrap_or(u32::MAX)),
-        RELAY_BYTES,
-    ));
-    for d in &targets {
+    let ttl = match m.get("ttl") {
+        None => None,
+        Some(v) => Some(
+            v.as_int()
+                .filter(|t| *t > 0)
+                .ok_or(ApiError::new(400, "bad_field"))?,
+        ),
+    };
+    let req = RelayReq {
+        to: devices,
+        store: m.get("store").and_then(Value::as_bool) == Some(true),
+        ttl,
+        reference: m
+            .get("ref")
+            .and_then(Value::as_str)
+            .filter(|r| r.len() <= 64)
+            .map(str::to_string),
+        data: ChunkData::Text(data),
+    };
+    relay_req(app, me, &req)
+}
+
+/// Parse a binary relay frame (DESIGN.md §10.2). Fixed offsets, every bound checked; nothing is allocated beyond
+/// the recipient list.
+fn parse_binary(b: &[u8]) -> Result<RelayReq<'_>, ApiError> {
+    let bad = || ApiError::new(400, "bad_relay");
+    let (&kind, rest) = b.split_first().ok_or_else(bad)?;
+    if kind != BIN_RELAY {
+        return Err(bad());
+    }
+    let (&flags, rest) = rest.split_first().ok_or_else(bad)?;
+    if flags & !1 != 0 {
+        return Err(bad());
+    }
+    let (&k, rest) = rest.split_first().ok_or_else(bad)?;
+    let k = usize::from(k);
+    if k == 0 || k > MAX_RECIPIENTS {
+        return Err(bad());
+    }
+    let (ids, rest) = rest.split_at_checked(16 * k).ok_or_else(bad)?;
+    let (reference, rest) = rest.split_at_checked(8).ok_or_else(bad)?;
+    let (ttl, payload) = rest.split_at_checked(4).ok_or_else(bad)?;
+    if payload.is_empty() || payload.len() > MAX_RELAY_BIN {
+        return Err(bad());
+    }
+    let mut to: Vec<String> = Vec::with_capacity(k);
+    for id in ids.chunks_exact(16) {
+        let d = base64url_encode(id);
+        if !to.contains(&d) {
+            to.push(d);
+        }
+    }
+    let ttl = u32::from_be_bytes(ttl.try_into().map_err(|_| bad())?);
+    Ok(RelayReq {
+        to,
+        store: flags & 1 == 1,
+        ttl: (ttl > 0).then_some(i64::from(ttl)),
+        reference: Some(base64url_encode(reference)),
+        data: ChunkData::Binary(payload),
+    })
+}
+
+/// The reply to a binary frame from an authenticated device, if any.
+fn binary_frame(app: &App, me: &Authed, b: &[u8]) -> Option<Message> {
+    if let Err(e) = app
+        .limits
+        .check(format!("relay:{}", me.device), RELAY_FRAMES, 60)
+    {
+        return Some(error_reply(&e, None));
+    }
+    let req = match parse_binary(b) {
+        Ok(r) => r,
+        Err(e) => return Some(error_reply(&e, None)),
+    };
+    match relay_req(app, me, &req) {
+        Ok(r) => r,
+        Err(e) => Some(error_reply(&e, req.reference.as_deref())),
+    }
+}
+
+/// [`binary_frame`] for the fuzz targets: the reply as text.
+#[doc(hidden)]
+pub fn fuzz_binary(app: &Arc<App>, account: &str, device: &str, b: &[u8]) -> Option<String> {
+    let me = Authed {
+        account: account.to_string(),
+        device: device.to_string(),
+        binary: true,
+    };
+    match binary_frame(app, &me, b)? {
+        Message::Text(t) => Some(t.to_string()),
+        _ => None,
+    }
+}
+
+/// The binary frame a device receives: type, the sending device (16 bytes), the sending account (length, then the
+/// id), the queue id (8 bytes, 0 when live), then the payload as it was sent. `None` for ids that do not fit.
+fn deliver_frame(
+    device: &str,
+    account: &str,
+    id: i64,
+    payload: &[u8],
+) -> Option<axum::body::Bytes> {
+    let from = rootcard::encoding::base64url_decode(device).ok()?;
+    let len = u8::try_from(account.len()).ok()?;
+    if from.len() != 16 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(2 + 16 + account.len() + 8 + payload.len());
+    out.push(BIN_DELIVER);
+    out.extend_from_slice(&from);
+    out.push(len);
+    out.extend_from_slice(account.as_bytes());
+    out.extend_from_slice(&id.to_be_bytes());
+    out.extend_from_slice(payload);
+    Some(out.into())
+}
+
+/// Forward a chunk to the connected recipients and, with `store`, queue it for the others. Each route has its own
+/// budget, charged all or nothing before anything is forwarded:
+/// - live to a connected device: per sending device (once per recipient) and per sending account into that device;
+/// - to a device that granted this device more (`relay-grant`): per sending device, much larger, and the grant;
+/// - into the file queue: per sending account.
+fn relay_req(app: &App, me: &Authed, req: &RelayReq<'_>) -> Result<Option<Message>, ApiError> {
+    let binary = matches!(req.data, ChunkData::Binary(_));
+    let len = u32::try_from(req.data.len()).unwrap_or(u32::MAX);
+    let store = req.store && app.cfg.file_queue > 0;
+    let routes: Vec<Route> = req
+        .to
+        .iter()
+        .map(|d| {
+            if *d == me.device {
+                return Route::Missed;
+            }
+            match app.hub.binary(d) {
+                Some(false) if binary => Route::NoBinary,
+                Some(_)
+                    if app.cfg.relay_granted > 0
+                        && app.hub.granted(d, &me.device) >= u64::from(len) =>
+                {
+                    Route::Granted
+                }
+                Some(_) => Route::Live,
+                None if store => Route::Stored,
+                None => Route::Missed,
+            }
+        })
+        .collect();
+    let count =
+        |r: Route| u32::try_from(routes.iter().filter(|x| **x == r).count()).unwrap_or(u32::MAX);
+    let (live, granted, stored) = (
+        count(Route::Live),
+        count(Route::Granted),
+        count(Route::Stored),
+    );
+    let mut budget: Vec<(String, u32, u32)> = Vec::with_capacity(req.to.len() + 4);
+    if live + stored > 0 {
+        budget.push((format!("relay-slow:{}", me.device), 1, RELAY_SLOW_FRAMES));
+    }
+    if live > 0 {
         budget.push((
-            format!("relay-to:{}>{d}", me.account),
-            len,
-            RELAY_PEER_BYTES,
+            format!("relay-bytes:{}", me.device),
+            len.saturating_mul(live),
+            RELAY_BYTES,
+        ));
+        for (d, _) in req
+            .to
+            .iter()
+            .zip(&routes)
+            .filter(|(_, r)| **r == Route::Live)
+        {
+            budget.push((
+                format!("relay-to:{}>{d}", me.account),
+                len,
+                RELAY_PEER_BYTES,
+            ));
+        }
+    }
+    if granted > 0 {
+        budget.push((
+            format!("relay-granted:{}", me.device),
+            len.saturating_mul(granted),
+            app.cfg.relay_granted,
+        ));
+    }
+    if stored > 0 {
+        budget.push((
+            format!("relay-store:{}", me.account),
+            len.saturating_mul(stored),
+            app.cfg.relay_store,
         ));
     }
     app.limits.charge(&budget, 60)?;
-    let push = text(
-        &Map::new()
-            .with("t", "relay")
-            .with("from", me.device.as_str())
-            .with("account", me.account.as_str())
-            .with("data", data)
-            .into(),
-    );
-    // `store`: keep the chunk for devices that are not connected (ciphertext, like the mailbox), for `ttl` seconds
-    // when given (disappearing pictures), never longer than the mailbox keeps a message.
-    let store = m.get("store").and_then(Value::as_bool) == Some(true) && app.cfg.file_queue > 0;
-    let ttl = match m.get("ttl") {
-        None => MAILBOX_TTL,
-        Some(v) => v
-            .as_int()
-            .filter(|t| *t > 0)
-            .ok_or(ApiError::new(400, "bad_field"))?,
+    let push = match req.data {
+        ChunkData::Text(data) => Push::Text(text(
+            &Map::new()
+                .with("t", "relay")
+                .with("from", me.device.as_str())
+                .with("account", me.account.as_str())
+                .with("data", data)
+                .into(),
+        )),
+        ChunkData::Binary(payload) => Push::Binary(
+            deliver_frame(&me.device, &me.account, 0, payload)
+                .ok_or(ApiError::new(400, "bad_relay"))?,
+        ),
     };
-    let expires = now() + ttl.clamp(1, MAILBOX_TTL);
+    // `store`: kept for devices that are not connected (ciphertext, like the mailbox), for `ttl` seconds when given
+    // (disappearing pictures), never longer than the mailbox keeps a message.
+    let expires = now() + req.ttl.unwrap_or(MAILBOX_TTL).clamp(1, MAILBOX_TTL);
     let mut missed: Vec<Value> = Vec::new();
-    for d in to {
-        let d = d.as_str().ok_or(ApiError::new(400, "bad_field"))?;
-        let delivered = d != me.device
-            && (app.hub.to_device(d, Push::Text(push.clone()))
-                || (store && queue_chunk(app, me, d, data, expires)?));
+    let mut no_binary: Vec<Value> = Vec::new();
+    for (d, route) in req.to.iter().zip(&routes) {
+        let delivered = match route {
+            Route::Live | Route::Granted => {
+                // A device that went away in between gets it queued, if it may be.
+                let ok = app.hub.to_device(d, push.clone())
+                    || (store && queue_chunk(app, me, d, req.data, expires)?);
+                if ok && *route == Route::Granted {
+                    app.hub.use_grant(d, &me.device, u64::from(len));
+                }
+                ok
+            }
+            Route::Stored => queue_chunk(app, me, d, req.data, expires)?,
+            Route::NoBinary => {
+                no_binary.push(d.as_str().into());
+                false
+            }
+            Route::Missed => false,
+        };
         if !delivered {
-            missed.push(d.into());
+            missed.push(d.as_str().into());
         }
     }
     if missed.is_empty() {
@@ -486,10 +776,11 @@ fn relay(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
     let mut f = Map::new()
         .with("t", "relay-missed")
         .with("devices", Value::Array(missed));
-    if let Some(r) = m.get("ref").and_then(Value::as_str)
-        && r.len() <= 64
-    {
-        f.insert("ref", r.into());
+    if !no_binary.is_empty() {
+        f.insert("text", Value::Array(no_binary));
+    }
+    if let Some(r) = &req.reference {
+        f.insert("ref", r.as_str().into());
     }
     Ok(Some(frame(f)))
 }
@@ -498,7 +789,7 @@ fn queue_chunk(
     app: &App,
     me: &Authed,
     device: &str,
-    data: &str,
+    data: ChunkData<'_>,
     expires: i64,
 ) -> Result<bool, ApiError> {
     app.db
@@ -511,6 +802,45 @@ fn queue_chunk(
             &app.cfg.queue_limits(),
         )
         .map_err(ApiError::internal)
+}
+
+/// `{ t: "relay-grant", from, bytes, ref }`: this device lets `from` stream up to `bytes` more to it in the next
+/// [`GRANT_TTL`] seconds, beyond the live budgets (it asked for a file). `bytes: 0` takes a grant back. The sending
+/// device is told (`{ t: "relay-grant", to, bytes, ttl }`) when it is connected, so it can pace for it.
+fn relay_grant(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError> {
+    app.limits.check(format!("grant:{}", me.device), 120, 60)?;
+    if app.cfg.relay_granted == 0 {
+        return Err(ApiError::new(400, "no_grants"));
+    }
+    let from = m
+        .get("from")
+        .and_then(Value::as_str)
+        .filter(|d| d.len() <= 64 && is_b64url(d) && *d != me.device)
+        .ok_or(ApiError::new(400, "bad_field"))?;
+    let bytes = m
+        .get("bytes")
+        .and_then(Value::as_int)
+        .filter(|b| (0..=MAX_GRANT).contains(b))
+        .ok_or(ApiError::new(400, "bad_field"))?;
+    app.hub.grant(
+        &me.device,
+        from,
+        u64::try_from(bytes).unwrap_or(0),
+        now() + GRANT_TTL,
+    );
+    let note = Map::new()
+        .with("t", "relay-grant")
+        .with("to", me.device.as_str())
+        .with("bytes", bytes)
+        .with("ttl", GRANT_TTL);
+    app.hub.to_device(from, Push::Text(text(&note.into())));
+    let mut f = Map::new().with("t", "ok");
+    if let Some(r) = m.get("ref").and_then(Value::as_str)
+        && r.len() <= 64
+    {
+        f.insert("ref", r.into());
+    }
+    Ok(Some(frame(f)))
 }
 
 /// Which of the given devices have room for `bytes` more of queued chunks from this account (asked before a
@@ -657,7 +987,7 @@ fn presence(app: &App, me: &Authed, m: &Map) -> Result<Option<Message>, ApiError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Config;
+    use crate::app::{Config, MAX_GRANTS};
 
     fn app() -> Arc<App> {
         app_with_queue(0)
@@ -682,6 +1012,8 @@ mod tests {
             file_queue_total: bytes,
             file_queue_sender: bytes,
             file_queue_account: bytes,
+            relay_granted: crate::ws::RELAY_GRANTED_BYTES,
+            relay_store: crate::ws::RELAY_STORE_BYTES,
             push_hosts: Vec::new(),
             giphy_key: String::new(),
             giphy_rating: "pg-13".into(),
@@ -695,11 +1027,53 @@ mod tests {
         Authed {
             account: account.into(),
             device: device.into(),
+            binary: true,
         }
     }
 
+    /// Connect `device` of `account` to the hub; what it is pushed is collected (and drained, so it never falls
+    /// behind) by a thread.
+    fn connect(
+        app: &Arc<App>,
+        account: &str,
+        device: &str,
+        binary: bool,
+    ) -> Arc<std::sync::Mutex<Vec<Push>>> {
+        let (tx, mut rx) = mpsc::channel::<Push>(PUSH_QUEUE);
+        app.hub.register(device, account, binary, tx);
+        let got = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let keep = got.clone();
+        std::thread::spawn(move || {
+            while let Some(p) = rx.blocking_recv() {
+                if let Ok(mut g) = keep.lock() {
+                    // Keep the first few only: the tests look at their shape, not at all of them.
+                    if g.len() < 8 {
+                        g.push(p);
+                    }
+                }
+            }
+        });
+        got
+    }
+
+    fn object(msg: Option<Message>) -> Map {
+        match msg {
+            Some(Message::Text(t)) => match parse_limited(t.as_bytes(), MAX_FRAME) {
+                Ok(Value::Object(m)) => m,
+                _ => panic!("not an object"),
+            },
+            None => Map::new(),
+            _ => panic!("unexpected reply"),
+        }
+    }
+
+    /// A JSON relay frame to `to`; the reply, or an empty map when there is none (everything delivered).
     fn relay_to(app: &Arc<App>, me: &Authed, to: &[&str], len: usize) -> Map {
-        let f = Map::new()
+        relay_with(app, me, to, len, false)
+    }
+
+    fn relay_with(app: &Arc<App>, me: &Authed, to: &[&str], len: usize, store: bool) -> Map {
+        let mut f = Map::new()
             .with("t", "relay")
             .with(
                 "to",
@@ -707,13 +1081,10 @@ mod tests {
             )
             .with("data", "a".repeat(len).as_str())
             .with("ref", "r");
-        match handle(app, me, &f) {
-            Some(Message::Text(t)) => match parse_limited(t.as_bytes(), MAX_FRAME) {
-                Ok(Value::Object(m)) => m,
-                _ => panic!("not an object"),
-            },
-            _ => panic!("no reply"),
+        if store {
+            f.insert("store", Value::Bool(true));
         }
+        object(handle(app, me, &f))
     }
 
     fn is_limited(m: &Map) -> bool {
@@ -727,15 +1098,16 @@ mod tests {
     #[test]
     fn relay_bytes_per_recipient() {
         let app = app();
+        for d in ["b1", "b2", "b3"] {
+            connect(&app, "B", d, true);
+        }
         let a = me("A", "a1");
         // Full chunks into one device: the per-recipient budget ends it long before the frame limit.
         let per = RELAY_PEER_BYTES as usize / MAX_RELAY;
         for _ in 0..per {
-            assert_eq!(
-                relay_to(&app, &a, &["b1"], MAX_RELAY)
-                    .get("t")
-                    .and_then(Value::as_str),
-                Some("relay-missed")
+            assert!(
+                relay_to(&app, &a, &["b1"], MAX_RELAY).is_empty(),
+                "delivered"
             );
         }
         assert!(is_limited(&relay_to(&app, &a, &["b1"], MAX_RELAY)));
@@ -764,6 +1136,9 @@ mod tests {
         let app = app();
         let a = me("A", "a1");
         let to: Vec<String> = (0..MAX_RECIPIENTS).map(|i| format!("d{i}")).collect();
+        for d in &to {
+            connect(&app, "D", d, true);
+        }
         let to: Vec<&str> = to.iter().map(String::as_str).collect();
         // Fan-out counts once per recipient (duplicates and the sender itself not at all).
         let per = RELAY_BYTES as usize / (MAX_RELAY * to.len());
@@ -772,7 +1147,278 @@ mod tests {
         }
         assert!(is_limited(&relay_to(&app, &a, &to, MAX_RELAY)));
         // Small frames still fit in what is left.
-        assert!(!is_limited(&relay_to(&app, &a, &["x", "x", "a1"], 1000)));
+        assert!(!is_limited(&relay_to(&app, &a, &["d1", "d1", "a1"], 1000)));
+        // Devices that are not connected cost nothing: there is nothing to forward.
+        let m = relay_to(&app, &a, &["gone"], MAX_RELAY);
+        assert_eq!(m.get("t").and_then(Value::as_str), Some("relay-missed"));
+    }
+
+    #[test]
+    fn queued_chunks_have_their_own_budget() {
+        // A queue large enough that only the rate limit decides.
+        let app = app_with_queue(1 << 32);
+        for i in 0..4 {
+            app.db
+                .put_prekey("B", &format!("q{i}"), &Value::from("p"))
+                .expect("prekey");
+        }
+        connect(&app, "B", "b1", true);
+        let a = me("A", "a1");
+        // Use up the live budget into b1 first: queueing still works.
+        for _ in 0..RELAY_PEER_BYTES as usize / MAX_RELAY {
+            assert!(relay_to(&app, &a, &["b1"], MAX_RELAY).is_empty());
+        }
+        assert!(is_limited(&relay_to(&app, &a, &["b1"], MAX_RELAY)));
+        // Counted once per queued copy.
+        let per = RELAY_STORE_BYTES as usize / (MAX_RELAY * 4);
+        for _ in 0..per {
+            assert!(
+                relay_with(&app, &a, &["q0", "q1", "q2", "q3"], MAX_RELAY, true).is_empty(),
+                "queued"
+            );
+        }
+        for _ in 0..(RELAY_STORE_BYTES as usize - per * MAX_RELAY * 4) / MAX_RELAY {
+            assert!(
+                relay_with(&app, &a, &["q0"], MAX_RELAY, true).is_empty(),
+                "queued"
+            );
+        }
+        // The store budget is per account: another device of the account is refused too.
+        assert!(is_limited(&relay_with(
+            &app,
+            &me("A", "a2"),
+            &["q0"],
+            MAX_RELAY,
+            true
+        )));
+        // ... and a frame that would also queue is refused whole, live part included.
+        let other = me("C", "c1");
+        assert!(!is_limited(&relay_with(
+            &app,
+            &other,
+            &["b1", "q1"],
+            MAX_RELAY,
+            true
+        )));
+    }
+
+    fn grant(app: &Arc<App>, me: &Authed, from: &str, bytes: i64) -> Map {
+        object(handle(
+            app,
+            me,
+            &Map::new()
+                .with("t", "relay-grant")
+                .with("from", from)
+                .with("bytes", bytes)
+                .with("ref", "g"),
+        ))
+    }
+
+    #[test]
+    fn a_grant_lifts_the_live_budget_for_one_sender() {
+        let app = app();
+        let sender = connect(&app, "A", "a1", true);
+        connect(&app, "B", "b1", true);
+        let a = me("A", "a1");
+        let b = me("B", "b1");
+        let extra = 2 * RELAY_PEER_BYTES as usize / MAX_RELAY;
+        let grant_bytes = i64::try_from(extra * MAX_RELAY).expect("fits");
+        assert_eq!(
+            grant(&app, &b, "a1", grant_bytes)
+                .get("t")
+                .and_then(Value::as_str),
+            Some("ok")
+        );
+        // The sender is told, so it can pace for it.
+        std::thread::sleep(Duration::from_millis(50));
+        let told = sender.lock().expect("lock").iter().any(|p| match p {
+            Push::Text(t) => t.contains("relay-grant") && t.contains("b1"),
+            Push::Binary(_) => false,
+        });
+        assert!(told, "the sender heard of the grant");
+        // Twice the live budget gets through on the grant, then the live budget follows.
+        for _ in 0..extra {
+            assert!(relay_to(&app, &a, &["b1"], MAX_RELAY).is_empty());
+        }
+        assert_eq!(app.hub.granted("b1", "a1"), 0);
+        for _ in 0..RELAY_PEER_BYTES as usize / MAX_RELAY {
+            assert!(relay_to(&app, &a, &["b1"], MAX_RELAY).is_empty());
+        }
+        assert!(is_limited(&relay_to(&app, &a, &["b1"], MAX_RELAY)));
+        // The grant was for a1 only: a2 of the same account is still on the (spent) live budget.
+        assert!(is_limited(&relay_to(
+            &app,
+            &me("A", "a2"),
+            &["b1"],
+            MAX_RELAY
+        )));
+    }
+
+    #[test]
+    fn grants_are_checked() {
+        let app = app();
+        let b = me("B", "b1");
+        for (from, bytes) in [("a1", -1), ("a1", MAX_GRANT + 1), ("b1", 10), ("a+1", 10)] {
+            assert_eq!(
+                grant(&app, &b, from, bytes)
+                    .get("error")
+                    .and_then(Value::as_str),
+                Some("bad_field"),
+                "{from} {bytes}"
+            );
+        }
+        assert_eq!(
+            grant(&app, &b, "a1", 10).get("t").and_then(Value::as_str),
+            Some("ok")
+        );
+        assert_eq!(app.hub.granted("b1", "a1"), 10);
+        assert_eq!(
+            app.hub.granted("b2", "a1"),
+            0,
+            "only for the device that granted"
+        );
+        assert_eq!(
+            grant(&app, &b, "a1", 0).get("t").and_then(Value::as_str),
+            Some("ok")
+        );
+        assert_eq!(app.hub.granted("b1", "a1"), 0, "taken back");
+        // A device holds at most MAX_GRANTS; the oldest goes first.
+        for i in 0..=MAX_GRANTS {
+            app.hub.grant(
+                "b1",
+                &format!("s{i}"),
+                1,
+                now() + 100 + i64::try_from(i).expect("small"),
+            );
+        }
+        assert_eq!(app.hub.granted("b1", "s0"), 0);
+        assert_eq!(app.hub.granted("b1", &format!("s{MAX_GRANTS}")), 1);
+        app.hub.grant("b1", "old", 1, now() - 1);
+        assert_eq!(app.hub.granted("b1", "old"), 0, "expired");
+    }
+
+    /// A binary relay frame from the parts.
+    fn bin(flags: u8, to: &[[u8; 16]], ttl: u32, payload: &[u8]) -> Vec<u8> {
+        let mut b = vec![BIN_RELAY, flags, u8::try_from(to.len()).expect("small")];
+        for d in to {
+            b.extend_from_slice(d);
+        }
+        b.extend_from_slice(&[7; 8]);
+        b.extend_from_slice(&ttl.to_be_bytes());
+        b.extend_from_slice(payload);
+        b
+    }
+
+    #[test]
+    fn binary_frames_are_parsed_strictly() {
+        let d = [1u8; 16];
+        let ok = bin(0, &[d], 0, b"xyz");
+        let r = parse_binary(&ok).expect("parses");
+        assert_eq!(r.to, vec![base64url_encode(&d)]);
+        assert!(!r.store && r.ttl.is_none());
+        assert_eq!(
+            r.reference.as_deref(),
+            Some(base64url_encode(&[7; 8]).as_str())
+        );
+        let two = bin(1, &[d, d], 60, b"x");
+        let r = parse_binary(&two).expect("parses");
+        assert!(r.store);
+        assert_eq!((r.to.len(), r.ttl), (1, Some(60)), "duplicates dropped");
+        let too_many: Vec<[u8; 16]> = (0..=MAX_RECIPIENTS)
+            .map(|i| [u8::try_from(i).expect("small"); 16])
+            .collect();
+        let mut bad_kind = ok.clone();
+        bad_kind[0] = 3;
+        for bad in [
+            Vec::new(),
+            vec![BIN_RELAY],
+            bad_kind,
+            bin(2, &[d], 0, b"x"),
+            bin(0, &[], 0, b"x"),
+            bin(0, &too_many, 0, b"x"),
+            bin(0, &[d], 0, b""),
+            bin(0, &[d], 0, &vec![0; MAX_RELAY_BIN + 1]),
+            ok[..ok.len() - 4].to_vec(),
+            ok[..3 + 16 + 4].to_vec(),
+        ] {
+            assert!(parse_binary(&bad).is_err(), "{bad:?}");
+        }
+        assert!(parse_binary(&bin(0, &[d], 0, &vec![0; MAX_RELAY_BIN])).is_ok());
+    }
+
+    #[test]
+    fn binary_chunks_go_to_binary_connections_only() {
+        let app = app();
+        let raw = [5u8; 16];
+        let new = base64url_encode(&raw);
+        let old_raw = [6u8; 16];
+        let old = base64url_encode(&old_raw);
+        let got = connect(&app, "B", &new, true);
+        connect(&app, "B", &old, false);
+        let sender = base64url_encode(&[9u8; 16]);
+        let a = me("A", &sender);
+        let reply = object(binary_frame(
+            &app,
+            &a,
+            &bin(0, &[raw, old_raw, [8; 16]], 0, b"payload"),
+        ));
+        assert_eq!(reply.get("t").and_then(Value::as_str), Some("relay-missed"));
+        let list = |k: &str| -> Vec<String> {
+            reply
+                .get(k)
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            list("devices"),
+            vec![old.clone(), base64url_encode(&[8; 16])]
+        );
+        assert_eq!(list("text"), vec![old]);
+        assert_eq!(
+            reply.get("ref").and_then(Value::as_str),
+            Some(base64url_encode(&[7; 8]).as_str())
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        let g = got.lock().expect("lock");
+        let Some(Push::Binary(b)) = g.first() else {
+            panic!("no binary frame")
+        };
+        let mut want = vec![BIN_DELIVER];
+        want.extend_from_slice(&[9; 16]);
+        want.push(1);
+        want.extend_from_slice(b"A");
+        want.extend_from_slice(&0i64.to_be_bytes());
+        want.extend_from_slice(b"payload");
+        assert_eq!(b.as_ref(), want.as_slice());
+    }
+
+    #[test]
+    fn binary_errors_carry_the_ref() {
+        let app = app();
+        let raw = [5u8; 16];
+        connect(&app, "B", &base64url_encode(&raw), true);
+        let a = me("A", &base64url_encode(&[9u8; 16]));
+        let chunk = vec![0u8; MAX_RELAY_BIN];
+        let mut last = Map::new();
+        for _ in 0..=RELAY_PEER_BYTES as usize / MAX_RELAY_BIN {
+            last = object(binary_frame(&app, &a, &bin(0, &[raw], 0, &chunk)));
+        }
+        assert_eq!(
+            last.get("error").and_then(Value::as_str),
+            Some("rate_limited")
+        );
+        assert_eq!(
+            last.get("id").and_then(Value::as_str),
+            Some(base64url_encode(&[7; 8]).as_str())
+        );
+        let bad = object(binary_frame(&app, &a, &[1, 2, 3]));
+        assert_eq!(bad.get("error").and_then(Value::as_str), Some("bad_relay"));
     }
 
     /// A `send` to one device, with `ttl` as the given JSON value (or absent).
