@@ -492,6 +492,14 @@ conversation: images up to 25 MiB, videos up to 100 MiB (`MAX_INLINE`). Larger f
 where the browser has `showSaveFilePicker` they are written to the chosen file part by part; elsewhere they are
 handed to the browser as a `Blob` (Chromium keeps large ones on disk, other browsers may hold them in memory).
 
+**Showing a long conversation.** A conversation opens with its newest 50 messages; the next 50 older ones are drawn
+when the user scrolls near the top (or taps *Show older messages*), with what is on the screen kept in place, and a
+search hit further back widens the window to it. A picture is put together from its parts only when it comes near
+the screen; its size is read from the header first, so it has its place before it loads. The records of a
+conversation are still all read and decrypted (the order is inside the encryption, so IndexedDB cannot give the newest
+first without storing times in the clear), but side by side, and a record whose ciphertext is unchanged is not
+decrypted again while the store is open.
+
 **Retention per conversation.** A contact record can carry `retention` (seconds; 0 or absent: keep). Messages of
 that conversation sent before *now − retention* are deleted from IndexedDB together with their files: when the
 setting changes, every minute while the app runs, and at start. A message that is already older when it arrives (from

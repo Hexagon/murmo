@@ -271,6 +271,7 @@ export default {
   "conv.decline": "Rechazar",
   "conv.block": "Bloquear",
   "conv.empty": "Aún no hay mensajes.",
+  "conv.older": "Mostrar mensajes anteriores",
 
   // ── new conversation ──
   "new.notePlaceholder": "¡Hola, soy yo!",

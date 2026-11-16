@@ -43,6 +43,11 @@ export const PART_BATCH = 32;
 function encode(v) {
   return p.utf8(JSON.stringify(v, (_, x) => (x instanceof Uint8Array ? { $b: p.b64(x) } : x)));
 }
+function sameBytes(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
 function decode(bytes) {
   return JSON.parse(new TextDecoder().decode(bytes), (_, x) => (x && typeof x === "object" && typeof x.$b === "string" ? p.unb64(x.$b) : x));
 }
@@ -114,10 +119,25 @@ export class Store {
     this.account = account;
     this.key = null;
     this.index = null;
+    /**
+     * Messages decrypted before, by record key: `{ v, m }`. A record whose ciphertext is still `v` (byte for byte; a
+     * new write has a new nonce) is not decrypted again, so drawing a long conversation anew stays quick.
+     */
+    this.decrypted = new Map();
   }
 
   close() {
+    this.decrypted.clear();
     this.db.close();
+  }
+
+  /** The message in a record of the "messages" store (a copy: the caller may change it). */
+  async decryptMessage(r) {
+    const hit = this.decrypted.get(r.k);
+    if (hit && sameBytes(hit.v, r.v)) return structuredClone(hit.m);
+    const m = decode(await p.decryptLocal(this.key, r.v, `message:${r.k}`));
+    this.decrypted.set(r.k, { v: r.v, m: structuredClone(m) });
+    return m;
   }
 
   /** Unlock with the local secret from the vault and this device's salt (created on first use). */
@@ -127,6 +147,7 @@ export class Store {
       salt = p.random(16);
       await this.setMeta("salt", salt);
     }
+    this.decrypted.clear();
     this.key = await p.localKey(secret, salt);
     this.index = await p.localIndexKey(secret, salt);
   }
@@ -135,6 +156,7 @@ export class Store {
   async unlockRemembered() {
     const r = await this.meta("remembered");
     if (!r?.key || !r?.index) return false;
+    this.decrypted.clear();
     this.key = r.key;
     this.index = r.index;
     return true;
@@ -192,15 +214,15 @@ export class Store {
   async messages(conv) {
     const c = await this.tag("conv", conv);
     const rows = await req(this.db.transaction("messages").objectStore("messages").index("c").getAll(c));
-    const out = [];
-    for (const r of rows) out.push(decode(await p.decryptLocal(this.key, r.v, `message:${r.k}`)));
+    // Decrypted side by side rather than one after the other: WebCrypto works while the next one is started.
+    const out = await Promise.all(rows.map((r) => this.decryptMessage(r)));
     return out.sort((a, b) => a.time - b.time || (a.at ?? 0) - (b.at ?? 0) || (a.id < b.id ? -1 : 1));
   }
   /** One message by its id, or undefined. */
   async message(id) {
     const k = await this.tag("message", id);
     const r = await req(this.db.transaction("messages").objectStore("messages").get(k));
-    return r ? decode(await p.decryptLocal(this.key, r.v, `message:${k}`)) : undefined;
+    return r ? this.decryptMessage(r) : undefined;
   }
   async hasMessage(id) {
     const k = await this.tag("message", id);
@@ -234,6 +256,7 @@ export class Store {
     const k = await this.tag("message", id);
     const tx = this.db.transaction("messages", "readwrite");
     tx.objectStore("messages").delete(k);
+    this.decrypted.delete(k);
     await done(tx);
   }
   /** Delete a whole conversation, with the files of its messages. */
@@ -250,7 +273,7 @@ export class Store {
     const keys = [];
     const files = [];
     for (const r of rows) {
-      const m = decode(await p.decryptLocal(this.key, r.v, `message:${r.k}`));
+      const m = await this.decryptMessage(r);
       if (!(m.time < before)) continue;
       keys.push(r.k);
       if (typeof m.file?.f === "string") files.push(await this.tag("file", m.file.f));
@@ -258,7 +281,10 @@ export class Store {
     if (!keys.length) return 0;
     // Tags are computed first: a transaction ends at the first await on anything but itself.
     const tx = this.db.transaction(["messages", "files", "parts"], "readwrite");
-    for (const k of keys) tx.objectStore("messages").delete(k);
+    for (const k of keys) {
+      tx.objectStore("messages").delete(k);
+      this.decrypted.delete(k);
+    }
     for (const k of files) {
       tx.objectStore("files").delete(k);
       tx.objectStore("parts").delete(partsOf(k));

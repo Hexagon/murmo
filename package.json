@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Development tooling for Murmo (the client itself has no dependencies and no build step)",
   "scripts": {
-    "test": "node --test tests/protocol.test.mjs tests/i18n.test.mjs tests/e2e.test.mjs tests/move.test.mjs",
+    "test": "node --test tests/protocol.test.mjs tests/i18n.test.mjs tests/e2e.test.mjs tests/move.test.mjs tests/store.test.mjs",
     "test:ui": "node tests/ui-smoke.mjs"
   },
   "devDependencies": {

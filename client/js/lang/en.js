@@ -271,6 +271,7 @@ export default {
   "conv.decline": "Decline",
   "conv.block": "Block",
   "conv.empty": "No messages yet.",
+  "conv.older": "Show older messages",
 
   // ── new conversation ──
   "new.notePlaceholder": "Hi, it's me!",
