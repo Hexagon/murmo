@@ -357,6 +357,34 @@ try {
   await a.waitForFunction(() => document.querySelector(".topbar .title")?.textContent.includes("raderas efter 1 vecka"), { timeout: 5000 });
   await a.screenshot({ path: `${shots}/a-7-retention.png` });
   await a.keyboard.press("Escape");
+  // A long history: the newest messages are drawn first, older ones as the reader scrolls up, and what is on the
+  // screen stays in place while they come.
+  for (let i = 1; i <= 60; i++) {
+    await a.type(".composer textarea", `Historik ${i}`);
+    await a.keyboard.press("Enter");
+  }
+  await b.waitForFunction(() => [...document.querySelectorAll(".msg")].some((m) => m.textContent.includes("Historik 60")), { timeout: 60000 });
+  await a.waitForFunction(() => !document.querySelector(".msg.held"), { timeout: 30000 });
+  await b.$eval(".side-list .conv.on", (e) => e.click()); // opened again: drawn from the start
+  await b.waitForFunction(() => [...document.querySelectorAll(".msg")].some((m) => m.textContent.includes("Historik 60")), { timeout: 10000 });
+  const drawn = await count(b, ".msg");
+  if (drawn > 55 || !(await b.$(".thread > .older"))) throw new Error(`the whole history was drawn at once (${drawn} messages)`);
+  if (await b.evaluate(() => [...document.querySelectorAll(".msg")].some((m) => m.textContent.includes("Andra raden.")))) throw new Error("an old message was drawn at once");
+  for (let i = 0; i < 10 && (await b.$(".thread > .older")); i++) {
+    const kept = await b.evaluate(() => {
+      const s = document.querySelector(".main .scroll");
+      s.scrollTop = 0;
+      const m = document.querySelector(".thread .msg");
+      window.__top = m;
+      return m.getBoundingClientRect().top;
+    });
+    await b.waitForFunction(() => document.querySelector(".thread .msg") !== window.__top, { timeout: 10000 });
+    await sleep(100);
+    const moved = await b.evaluate((y) => Math.abs(window.__top.getBoundingClientRect().top - y), kept);
+    if (!(moved < 2)) throw new Error(`the thread jumped by ${moved}px when older messages came`);
+  }
+  if (!(await b.evaluate(() => [...document.querySelectorAll(".msg")].some((m) => m.textContent.includes("Andra raden."))))) throw new Error("the oldest messages never came");
+  await b.screenshot({ path: `${shots}/b-7d-older.png` });
   // Search: the field in the sidebar finds a contact by handle and an old message by its text (any case), with the
   // match marked; the hit opens the conversation with that message in view and marked. Escape brings the list back.
   // The field is hidden until the search button (or Ctrl+K) opens it, and Esc on an empty field hides it again.

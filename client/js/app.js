@@ -1379,6 +1379,10 @@ function openConversation(account, form = false) {
   const [name, tag] = splitHandle(c.handle);
   ui.thread = h("div", { class: "thread" });
   ui.scroll = h("div", { class: "scroll" }, ui.thread);
+  ui.older = null;
+  threadFrom = null;
+  threadView = { stored: [], start: 0 };
+  ui.scroll.addEventListener("scroll", () => { if (ui.scroll.scrollTop < OLDER_MARGIN) loadOlder(); }, { passive: true });
   const head = topbar(
     h("div", { class: "title" }, name, h("span", { class: "tag", text: tag }), homeLabel(c.home) ? h("span", { class: "home", text: ` · ${homeLabel(c.home)}` }) : null, c.retention ? h("span", { class: "home", title: tr("conv.retentionTitle"), text: tr("conv.retention", { time: retentionLabel(c.retention) }) }) : null),
     c.state === "accepted" ? h("button", { class: "btn ghost small", onclick: () => showSafety(c) }, icon("shield"), h("span", { class: "wide", text: tr("conv.safety") })) : null,
@@ -2038,6 +2042,58 @@ async function gifSearch(box, config, { alive, track }) {
   if (canHover()) input.focus();
 }
 
+// ── the thread: the newest messages first, older ones as the user scrolls up ─────────────────────────────────────
+
+/** How many messages are drawn when a conversation opens, and how many more each time the user nears the top. */
+const PAGE = 50;
+/** How close to the top (px) the user scrolls before the next older page is drawn. */
+const OLDER_MARGIN = 600;
+
+/** The order of a conversation's messages (the same as Store.messages). */
+function byOrder(a, b) {
+  return a.time - b.time || (a.at ?? 0) - (b.at ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+/**
+ * The open conversation's drawing window: `from` is the oldest message drawn (its time, at and id), or null for the
+ * last PAGE; `start` is its place in `stored`, the messages read at the last render.
+ */
+let threadFrom = null;
+let threadView = { stored: [], start: 0 };
+let loadingOlder = false;
+
+/** The first message of the thread that is on the screen, and where: to keep it in place when older ones come above. */
+function scrollAnchor() {
+  const top = ui.scroll.getBoundingClientRect().top;
+  // A message, not a day's heading or the "older" button: those move or go when older messages come.
+  for (const n of ui.thread.querySelectorAll(":scope > .msg")) {
+    const r = n.getBoundingClientRect();
+    if (r.bottom > top) return { n, y: r.top };
+  }
+  return null;
+}
+
+/** Draw the next PAGE older messages above those shown (their pictures' sizes first, so nothing jumps). */
+async function loadOlder() {
+  const { stored, start } = threadView;
+  if (loadingOlder || !start || !ui.thread) return;
+  loadingOlder = true;
+  const conv = current;
+  try {
+    const from = Math.max(0, start - PAGE);
+    const pics = stored.slice(from, start).map((m) => m.file).filter((f) => f?.have && p.inlineImage(f.mime, f.size) && !imgSizes.has(f.f));
+    await Promise.all(pics.map((f) => messenger.imageSize(f.f).then((s) => { if (p.imageFits(s)) imgSizes.set(f.f, { width: s.width, height: s.height }); }, () => {})));
+    if (conv !== current) return;
+    const m = stored[from];
+    threadFrom = { time: m.time, at: m.at, id: m.id };
+    await renderThread();
+  } finally {
+    loadingOlder = false;
+  }
+  // Still near the top (a fast scroll, a tall screen): one more page.
+  if (conv === current && ui.scroll && ui.scroll.scrollTop < OLDER_MARGIN) loadOlder();
+}
+
 let renderSeq = 0;
 async function renderThread() {
   if (!ui.thread || !current) return;
@@ -2045,14 +2101,35 @@ async function renderThread() {
   const conv = current;
   const stored = await messenger.messages(conv);
   if (seq !== renderSeq || conv !== current) return;
+  const nearBottom = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 80;
+  // Only the newest messages are drawn at first; the window reaches back to `threadFrom` once the user has scrolled
+  // up. At the bottom again, a window grown long goes back to the last PAGE (a smaller page to keep up to date).
+  // (Only when well more than a screen: a page that does not fill one would be asked for again at once.)
+  if (nearBottom && seq > 1 && !jumpTo && threadFrom && stored.length - threadView.start > 2 * PAGE && ui.scroll.scrollHeight > 3 * ui.scroll.clientHeight) threadFrom = null;
+  let start = Math.max(0, stored.length - PAGE);
+  if (threadFrom) {
+    const i = stored.findIndex((m) => byOrder(m, threadFrom) >= 0);
+    if (i >= 0) start = Math.min(start, i);
+  }
+  // Opened from a search hit: the window reaches back to it.
+  const hit = jumpTo ? stored.findIndex((m) => m.id === jumpTo) : -1;
+  if (hit >= 0 && hit < start) start = Math.max(0, hit - 10);
+  if (start < stored.length) threadFrom = { time: stored[start].time, at: stored[start].at, id: stored[start].id };
+  threadView = { stored, start };
   // Texts waiting for "Ångra" come last, until the sent message (same id) is stored.
   const ids = new Set(stored.map((m) => m.id));
-  const msgs = [...stored, ...[...heldMsgs.values()].map((e) => e.m).filter((m) => m.conv === conv && !ids.has(m.id))];
-  const nearBottom = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 80;
+  const held = [...heldMsgs.values()].map((e) => e.m).filter((m) => m.conv === conv && !ids.has(m.id));
+  const msgs = [...stored, ...held];
+  const shown = [...stored.slice(start), ...held];
+  const anchor = nearBottom || seq === 1 ? null : scrollAnchor();
   const out = [];
+  if (start > 0) {
+    ui.older ??= h("button", { type: "button", class: "link older", text: tr("conv.older"), onclick: () => loadOlder() });
+    out.push(ui.older);
+  }
   const seen = new Set();
   let lastDay = "";
-  for (const m of msgs) {
+  for (const m of shown) {
     // Grouped by the local calendar day; the label is made when the group first shows ("Today" stays so until the
     // conversation is opened again).
     const d = i18n.dayKey(m.time);
@@ -2083,6 +2160,8 @@ async function renderThread() {
   if (!msgs.length) out.push(h("div", { class: "day", text: tr("conv.empty") }));
   reconcile(ui.thread, out);
   if (nearBottom || seq === 1) ui.scroll.scrollTop = ui.scroll.scrollHeight;
+  // Scrolled up: what the user was reading stays where it was, whatever came above or below it.
+  else if (anchor?.n.isConnected) ui.scroll.scrollTop += anchor.n.getBoundingClientRect().top - anchor.y;
   // Opened from a search hit: the message in the middle, marked for a moment.
   if (jumpTo) {
     const node = msgNodes.get(jumpTo)?.node;
@@ -2095,6 +2174,8 @@ async function renderThread() {
   }
   watchUnseen();
   tickFuses();
+  // Too few messages to fill the screen, so no scrolling up to ask for more: the next page now.
+  if (start > 0 && seq === renderSeq && !loadingOlder && ui.scroll.scrollTop < OLDER_MARGIN) loadOlder();
 }
 
 // ── disappearing messages: when they are seen, and their countdown ──────────────────────────────────────────────
@@ -2480,6 +2561,31 @@ function placeImage(img, { width, height }) {
   img.style.aspectRatio = `${width} / ${height}`;
 }
 
+/** Pictures waiting to near the screen: element → the function that lets their loading go on. */
+const offScreen = new Map();
+let nearObserver = null;
+
+/** Resolves when `el` is on or near the thread's screen (at once where that cannot be watched). */
+function nearScreen(el) {
+  if (!ui.scroll || typeof IntersectionObserver === "undefined") return Promise.resolve();
+  if (nearObserver?.root !== ui.scroll) {
+    nearObserver?.disconnect();
+    offScreen.clear(); // another conversation: the pictures of the one before are not loaded at all
+    nearObserver = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        nearObserver.unobserve(e.target);
+        offScreen.get(e.target)?.();
+        offScreen.delete(e.target);
+      }
+    }, { root: ui.scroll, rootMargin: "800px 0px" });
+  }
+  return new Promise((resolve) => {
+    offScreen.set(el, resolve);
+    nearObserver.observe(el);
+  });
+}
+
 function fileView(m) {
   const f = m.file;
   if (f.have && p.inlineVideo(f.mime, f.size)) return imgNodes.get(f.f) ?? fileCard(m, null, true);
@@ -2506,6 +2612,8 @@ function fileView(m) {
       }
       imgSizes.set(f.f, { width: size.width, height: size.height });
       placeImage(img, size);
+      // Put together from its stored parts only when it nears the screen: a long thread does not read all its pictures.
+      await nearScreen(img);
       const b = await messenger.fileBlob(f.f, f.mime);
       if (!b) return;
       const url = objectUrls.get(f.f) ?? URL.createObjectURL(b);

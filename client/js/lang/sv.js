@@ -271,6 +271,7 @@ export default {
   "conv.decline": "Neka",
   "conv.block": "Blockera",
   "conv.empty": "Inga meddelanden ännu.",
+  "conv.older": "Visa äldre meddelanden",
 
   // ── new conversation ──
   "new.notePlaceholder": "Hej, det är jag!",
