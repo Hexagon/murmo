@@ -428,8 +428,10 @@ function showHelp() {
 /** The day the terms below last changed (Unix seconds), shown with them. */
 const TERMS_DATE = Date.UTC(2026, 10, 16) / 1000;
 
-/** The sections of the terms, as HELP. */
-const TERMS = [
+/** The sections of the terms, as HELP; the demo section only on a demo server (`MURMO_DEMO`). */
+const termSections = () => [
+  ...(isDemo() ? [["terms.demo", 2]] : []),
+  ["terms.fed", 3],
   ["terms.beta", 3],
   ["terms.warranty", 3],
   ["terms.use", 4],
@@ -442,9 +444,30 @@ function isBeta() {
   return info?.beta !== false;
 }
 
-/** The "Open beta" mark, or null when the server is not in beta. */
+/** Whether this server calls itself a demo (`MURMO_DEMO`): its data may be wiped at any time. */
+function isDemo() {
+  return info?.demo === true;
+}
+
+/** Where to read about running one's own server. */
+const HOSTING_URL = "https://github.com/Hexagon/murmo/blob/main/docs/HOSTING.md";
+
+/** The "Demo" and "Open beta" marks, as this server says (none, one or both). */
 function betaMark() {
-  return isBeta() ? h("span", { class: "beta", title: tr("beta.note"), text: tr("beta.mark") }) : null;
+  return [
+    isDemo() ? h("span", { class: "beta demo", title: tr("demo.note"), text: tr("demo.mark") }) : null,
+    isBeta() ? h("span", { class: "beta", title: tr("beta.note"), text: tr("beta.mark") }) : null,
+  ];
+}
+
+/** The notices under the login card: a demo server's, then the open beta's. */
+function serverNotes() {
+  return [
+    isDemo()
+      ? h("p", { class: "hint beta-note" }, tr("demo.note"), " ", h("a", { href: HOSTING_URL, target: "_blank", rel: "noopener noreferrer", text: tr("demo.own") }))
+      : null,
+    isBeta() ? h("p", { class: "hint beta-note" }, tr("beta.note")) : null,
+  ];
 }
 
 function showTerms() {
@@ -457,7 +480,7 @@ function showTerms() {
     h(
       "div",
       { class: "help" },
-      TERMS.map(section),
+      termSections().map(section),
     ),
     versionLine(),
     h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
@@ -470,6 +493,8 @@ function showTerms() {
 function wirePage() {
   const mark = document.getElementById("beta-mark");
   if (mark) mark.hidden = !isBeta();
+  const demo = document.getElementById("demo-mark");
+  if (demo) demo.hidden = !isDemo();
   const link = document.getElementById("terms-link");
   link?.addEventListener("click", (e) => {
     e.preventDefault();
@@ -548,7 +573,8 @@ function showAuth(tab = "login", prefill = "") {
       h(
         "div",
         { class: "auth-foot" },
-        isBeta() ? h("p", { class: "hint beta-note" }, betaMark(), " ", tr("beta.note")) : null,
+        h("div", { class: "marks" }, betaMark()),
+        serverNotes(),
         h("button", { class: "link", type: "button", text: tr("about.more"), onclick: showHelp }),
         h("button", { class: "link", type: "button", text: tr("terms.title"), onclick: showTerms }),
         themePicker(),

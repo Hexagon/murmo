@@ -98,6 +98,7 @@ fn harness() -> &'static Harness {
             giphy_key: String::new(),
             giphy_rating: "pg-13".into(),
             beta: true,
+            demo: false,
             push_contact: String::new(),
         };
         let db = crate::db::Db::open(":memory:").expect("database");

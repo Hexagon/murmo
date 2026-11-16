@@ -68,6 +68,8 @@ pub struct Config {
     pub giphy_rating: String,
     /// Whether the client marks the service as an open beta.
     pub beta: bool,
+    /// Whether the client marks this server as a demo, whose data may be wiped at any time.
+    pub demo: bool,
 }
 
 /// The hosts a browser talks to for GIPHY search (the API and its media), allowed by the CSP only when a key is set.

@@ -107,6 +107,7 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
         .with("homes", homes)
         .with("file_queue", app.cfg.file_queue > 0)
         .with("beta", app.cfg.beta)
+        .with("demo", app.cfg.demo)
         .with("version", env!("CARGO_PKG_VERSION"))
         .with("source", env!("CARGO_PKG_REPOSITORY"));
     if !env!("MURMO_COMMIT").is_empty() {

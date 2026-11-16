@@ -19,6 +19,7 @@
 //! | `MURMO_GIPHY_KEY` | empty | GIPHY API key: lets browsers search GIPHY directly for their GIF collection (empty: no search) |
 //! | `MURMO_GIPHY_RATING` | `pg-13` | GIPHY content rating for searches (`g`, `pg`, `pg-13`, `r`) |
 //! | `MURMO_BETA` | `1` | mark the service as an open beta in the client (`0`: no mark) |
+//! | `MURMO_DEMO` | `0` | mark this server as a demo whose data may be wiped at any time (`1`), as murmo.org |
 //!
 //! Each variable is also read under its old name, `MESG_…`, when the `MURMO_…` name is not set. The default files
 //! `murmo.sqlite` and `murmo-host.key` fall back to `mesg.sqlite` and `mesg-host.key` when only those exist.
@@ -193,6 +194,7 @@ fn config() -> Result<Config, String> {
             _ => "pg-13".to_string(),
         },
         beta: env("MURMO_BETA", "1") != "0",
+        demo: env("MURMO_DEMO", "0") == "1",
     })
 }
 
