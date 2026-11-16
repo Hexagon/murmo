@@ -468,6 +468,34 @@ try {
   await a.keyboard.press("Escape");
   await a.keyboard.press("Escape");
   await a.waitForFunction(() => document.querySelector(".side-search").offsetParent === null, { timeout: 5000 });
+  // The files view (DESIGN.md §13.9): every file of the conversations, pictures as tiles, other files as rows; the
+  // viewer steps through the pictures; a file removed from this device stays as a message with "Hämta igen".
+  await a.click(".side-top .files-btn");
+  await a.waitForSelector(".fv-tile img[src]", { timeout: 20000 });
+  await a.waitForFunction(() => [...document.querySelectorAll(".fv-row .fn")].some((e) => e.textContent === "icon.svg"), { timeout: 5000 });
+  if (await a.$eval(".side-top .files-btn", (e) => e.getAttribute("aria-pressed")) !== "true") throw new Error("files button not marked");
+  await a.screenshot({ path: `${shots}/a-8-files.png` });
+  await a.click(".fv-tile img[src]");
+  await a.waitForSelector("dialog.viewer.gallery .fv-stage img[src]", { timeout: 10000 });
+  await a.screenshot({ path: `${shots}/a-8b-files-viewer.png` });
+  await a.click("dialog.viewer .close");
+  await a.waitForFunction(() => !document.querySelector("dialog.viewer"), { timeout: 5000 });
+  await clickText(a, "Dokument", ".fv-tabs button");
+  await a.waitForFunction(() => !document.querySelector(".fv-tile") && document.querySelector(".fv-row"), { timeout: 5000 });
+  await clickText(a, "Välj", ".topbar button");
+  await a.waitForSelector(".fv-row .fv-check", { timeout: 5000 });
+  await a.click(".fv-row .fv-check");
+  await a.waitForFunction(() => /1 fil vald/.test(document.querySelector(".fv-foot").textContent), { timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-8c-files-select.png` });
+  await clickText(a, "Ta bort från den här enheten", ".fv-foot button");
+  await a.waitForSelector("dialog .btn.primary", { timeout: 5000 });
+  await clickText(a, "Ta bort från den här enheten", "dialog button");
+  await a.waitForFunction(() => [...document.querySelectorAll(".fv-row .fv-status")].some((e) => /borttagen från den här enheten/.test(e.textContent)), { timeout: 10000 });
+  await a.waitForFunction(() => [...document.querySelectorAll(".fv-row button")].some((e) => e.textContent === "Hämta igen"), { timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-8d-files-freed.png` });
+  await clickText(a, "Alla", ".fv-tabs button"); // the choice is remembered: back to all for the steps after
+  await a.click(".side-list .conv");
+  await a.waitForSelector(".composer textarea", { timeout: 5000 });
   // Dark mode and narrow screen.
   await b.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }]);
   await b.keyboard.press("Escape");
@@ -485,6 +513,13 @@ try {
   await b.goBack();
   await b.waitForFunction(() => getComputedStyle(document.querySelector(".sidebar")).display !== "none" && getComputedStyle(document.querySelector(".main")).display === "none", { timeout: 5000 });
   await b.screenshot({ path: `${shots}/b-9-mobile-list.png` });
+  // The files view on a phone: it covers the list like a conversation, and back leads to the list.
+  await b.click(".side-top .files-btn");
+  await b.waitForSelector(".fv-tile", { visible: true, timeout: 10000 });
+  await sleep(500);
+  await b.screenshot({ path: `${shots}/b-9b-mobile-files.png` });
+  await b.goBack();
+  await b.waitForFunction(() => getComputedStyle(document.querySelector(".main")).display === "none", { timeout: 5000 });
   // Headless Chrome has not been allowed to notify: the header shows a struck-through bell that says so.
   const bell = await b.$eval(".side-top .bell-off", (e) => ({ shown: !e.hidden && e.offsetWidth > 0, title: e.title }));
   if (!bell.shown || !bell.title.startsWith("Murmo kan inte skicka notiser.")) throw new Error(`no notification warning: ${JSON.stringify(bell)}`);
@@ -527,7 +562,7 @@ try {
   await a2.screenshot({ path: `${shots}/a2-2-welcome-back.png` });
   if (codeA !== codeB) throw new Error("safety codes differ");
 } catch (e) {
-  console.log("FAILED", e.message);
+  console.log("FAILED", e.message, e.stack?.split("\n").find((l) => l.includes("ui-smoke")));
   process.exitCode = 1;
 } finally {
   console.log(problems.join("\n") || "no console errors");

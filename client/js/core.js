@@ -209,6 +209,7 @@ export class Messenger extends EventTarget {
     this.contacts = new Map();
     this.prekeys = new Map(); // id → { privateKey, publicRaw, time }
     this.files = new Map(); // f → transfer state, see fileState()
+    this.freed = new Set(); // files removed from this device to free room, not to be taken again unasked (§13.9)
     this.serving = new Set(); // `${f}:${device}` of files streamed now to a contact's device that asked for them
     this.fileWork = Promise.resolve(); // chunks and file messages are handled one at a time
     this.status = "offline";
@@ -231,6 +232,7 @@ export class Messenger extends EventTarget {
     }
     for (const c of await this.store.contacts()) this.contacts.set(c.account, c);
     this.pendingFiles = (await this.store.secret("pendingFiles")) ?? [];
+    this.freed = new Set((await this.store.secret("freedFiles")) ?? []);
     for (const t of (await this.store.secret("timed")) ?? []) this.timed.set(t.id, { conv: t.conv, at: t.at });
     await this.sweepTimed(); // the app may have been closed in the middle of a countdown
     this.store.sweepParts(Date.now() - 3600_000).catch(() => {}); // left by a transfer that was interrupted
@@ -1044,8 +1046,12 @@ export class Messenger extends EventTarget {
     let batch = { contacts, messages: [] };
     let size = rc.canonical(batch).length;
     for (const c of contacts) {
-      for (const m of await this.store.messages(c.account)) {
+      for (let m of await this.store.messages(c.account)) {
         if (m.kind === "ephemeral" || m.kind === GONE) continue; // disappearing messages stay on the devices they reached
+        if (m.file?.freed !== undefined) {
+          const { freed, ...file } = m.file; // removed here only: the new device decides for itself
+          m = { ...m, file };
+        }
         const s = rc.canonical(m).length;
         if (size + s > HISTORY_CHUNK && batch.messages.length) {
           await this.deliver(target, "history", this.me.account, batch);
@@ -1077,7 +1083,10 @@ export class Messenger extends EventTarget {
       }
       if (!(await this.isNew(m))) continue;
       if (typeof m.time !== "number" || m.time < this.cutoff(m.conv)) continue;
-      if (m.file) m.file.have = false;
+      if (m.file) {
+        m.file.have = false;
+        delete m.file.freed;
+      }
       await this.store.putMessage(m);
       this.emit("messages", { conv: m.conv });
     }
@@ -1360,6 +1369,7 @@ export class Messenger extends EventTarget {
   /** The `file` message for a transfer is known (it came, or this device asked its own devices for the file). */
   async expectFile(meta, message) {
     const f = meta.f;
+    if (this.freed.has(f)) return; // removed here on purpose: taken again only when asked for (unfree)
     if (await this.store.hasFile(f)) {
       const t = this.files.get(f);
       if (t) await this.dropTransfer(f, t);
@@ -1423,6 +1433,7 @@ export class Messenger extends EventTarget {
       if (!this.mayRelay(f)) return ack();
       let t = this.files.get(r.f);
       if (!t && (await this.store.hasFile(r.f))) return ack(); // a queued copy of a file we already have
+      if (!t && this.freed.has(r.f)) return ack(); // removed here to free room: not taken back unasked
       if (!t) {
         if (this.files.size >= 64) this.sweepFiles();
         if (this.files.size >= 64) return; // too many transfers at once; a queued copy comes again
@@ -1496,6 +1507,7 @@ export class Messenger extends EventTarget {
     this.requireAccepted(conv);
     const m = await this.findFileMessage(f, conv);
     if (m?.dir !== "in" || !m.file?.ask) throw new ApiError(404, "no_file");
+    await this.unfree(m);
     await this.serial(() => this.expectFile(m.file, { id: m.id, conv }));
     if (await this.store.hasFile(f)) return true;
     const online = await this.ws.presence([m.device]);
@@ -1606,6 +1618,7 @@ export class Messenger extends EventTarget {
   async fetchFromOwnDevices(conv, f) {
     const m = await this.findFileMessage(f, conv);
     if (!m) return 0;
+    await this.unfree(m);
     await this.serial(() => this.expectFile(m.file, { id: m.id, conv }));
     const own = (await this.ownTargets()).map((x) => x.device);
     const online = await this.ws.presence(own);
@@ -1664,6 +1677,72 @@ export class Messenger extends EventTarget {
   async imageSize(f) {
     const head = await this.store.fileHead(f, IMAGE_HEAD);
     return head ? p.imageSize(head) : null;
+  }
+
+  // ── the files view (DESIGN.md §13.9) ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * The files of the conversations, newest first: `{ m, conv, state }` for every `file` message the user sees, of
+   * contacts in state accepted, outgoing or blocked (`conv`: one conversation only). Disappearing messages are not
+   * files here (§6.8), and messages taken back or deleted are not shown.
+   */
+  async fileList(conv = null) {
+    const convs = conv ? [this.contacts.get(conv)].filter(Boolean) : this.contactList();
+    const out = [];
+    for (const c of convs) {
+      if (!["accepted", "outgoing", "blocked"].includes(c.state)) continue;
+      for (const m of await this.messages(c.account)) {
+        if (m.kind === "file" && typeof m.file?.f === "string") out.push({ m, conv: c.account, state: c.state });
+      }
+    }
+    return out.sort((a, b) => b.m.time - a.m.time || (b.m.at ?? 0) - (a.m.at ?? 0));
+  }
+
+  /**
+   * Remove the content of files from this device only, to free room (`items`: `[{ conv, id }]`). The messages stay,
+   * with `have: false` and `freed` (when); nothing is sent to anyone. Chunks that come for them unasked are refused
+   * until the user asks for one again (`fetchFromOwnDevices`, `acceptFile`). Returns the bytes freed.
+   */
+  async freeFiles(items) {
+    let freed = 0;
+    for (const { conv, id } of items) {
+      const m = await this.store.message(id);
+      if (!m || m.conv !== conv || m.kind !== "file" || typeof m.file?.f !== "string") continue;
+      const f = m.file.f;
+      const had = await this.store.fileHeader(f);
+      const t = this.files.get(f);
+      if (t) await this.serial(() => this.dropTransfer(f, t, true));
+      m.file.have = false;
+      m.file.freed = p.now();
+      await this.store.replaceMessage(m, f);
+      this.freed.add(f);
+      await this.forgetPendingFile(id); // nothing left here to offer again
+      if (had) freed += m.file.size ?? 0;
+      this.emit("messages", { conv });
+    }
+    await this.store.setSecret("freedFiles", [...this.freed]);
+    return freed;
+  }
+
+  /** The user asks for a freed file again: it may come once more. */
+  async unfree(m) {
+    const f = m.file?.f;
+    if (!this.freed.has(f) && m.file?.freed === undefined) return;
+    this.freed.delete(f);
+    await this.store.setSecret("freedFiles", [...this.freed]);
+    if (m.file.freed !== undefined) {
+      delete m.file.freed;
+      await this.store.putMessage(m);
+      this.emit("messages", { conv: m.conv });
+    }
+  }
+
+  /**
+   * Whether this device may be the only source of an own file someone still needs: one that waits to be taken
+   * (`ask`, not yet delivered) or that some of the recipient's devices have not got yet (`missed`).
+   */
+  static serves(m) {
+    return m?.dir === "out" && m.file?.have === true && ((m.file.ask && !m.delivered) || !!m.file.missed?.length);
   }
 
   /** The messages of a conversation as the user sees them (with "retracted" placeholders, without hidden records). */
