@@ -1,9 +1,9 @@
 // The messenger engine: devices, contacts and requests, messages, multi-device sync, history hand-over and live
 // file transfer (docs/DESIGN.md). No DOM: the UI listens to events.
 //
-// Events: "status" (online/offline), "contacts", "messages" ({ conv }), "gifs" (the collection changed), "link"
-// ({ request, code }), "file" ({ f }), "incoming" ({ conv, kind }: something from a contact the user should hear
-// about), "removed" (this device was removed), "error" ({ message }).
+// Events: "status" (online/offline), "contacts", "messages" ({ conv }), "gifs" (the collection changed), "names" (a
+// device nickname changed), "link" ({ request, code }), "file" ({ f }), "incoming" ({ conv, kind }: something from a
+// contact the user should hear about), "removed" (this device was removed), "error" ({ message }).
 
 import * as rc from "../vendor/rootcard/src/index.js";
 import * as p from "./protocol.js";
@@ -46,6 +46,10 @@ const PRUNE_EVERY = 60_000;
 /** The user's own GIF collection, kept encrypted on this device only (docs/DESIGN.md §9.2). */
 export const GIF_MAX_BYTES = 8 * 1024 * 1024;
 export const GIF_MAX_COUNT = 60;
+/** Most characters in a device nickname (the server's device-label limit, `MAX_LABEL`). */
+export const NAME_MAX = 64;
+/** Most device nicknames kept (the device list has at most 32 entries, DESIGN.md §4.1). */
+const NAMES_MAX = 32;
 /** The file id a saved GIF is stored and streamed under (apart from the files of messages). */
 const gifFile = (id) => `gif:${id}`;
 /** A saved GIF as the file it is streamed as (Messenger.streamFile, expectFile). */
@@ -87,6 +91,31 @@ function gifEntry(g) {
 /** Whether `r` is a retention in seconds this client accepts (0: keep). */
 export function validRetention(r) {
   return Number.isInteger(r) && r >= 0 && r <= RETENTION_MAX;
+}
+
+/**
+ * A device nickname as stored and sent, or null when it is not acceptable: trimmed, at most NAME_MAX characters and
+ * no control characters. `""` is a tombstone that clears the nickname (DESIGN.md §4.6).
+ */
+function cleanName(name) {
+  if (typeof name !== "string") return null;
+  const t = name.trim();
+  return t.length <= NAME_MAX && !/\p{Cc}/u.test(t) ? t : null;
+}
+
+/** Keep at most NAMES_MAX nicknames, the newest by time (the map is `{ [deviceId]: { name, time } }`). */
+function capNames(names) {
+  const ids = Object.keys(names);
+  if (ids.length <= NAMES_MAX) return names;
+  const keep = ids.sort((a, b) => (names[b].time ?? 0) - (names[a].time ?? 0)).slice(0, NAMES_MAX);
+  const out = {};
+  for (const id of keep) out[id] = names[id];
+  return out;
+}
+
+/** The name to show for a device: its nickname if one is set, otherwise the automatic label (DESIGN.md §4.6). */
+export function displayName(dev, names) {
+  return names?.[dev?.id]?.name || dev?.label || "";
 }
 
 /**
@@ -958,6 +987,9 @@ export class Messenger extends EventTarget {
       case "gifs":
         if (conv === this.me.account) await this.mergeGifs(m.body);
         return;
+      case "names":
+        if (conv === this.me.account) await this.mergeNames(m.body);
+        return;
       default:
         return;
     }
@@ -1065,6 +1097,8 @@ export class Messenger extends EventTarget {
     await this.deliver(target, "history", this.me.account, batch);
     const gifs = await this.gifs();
     if (gifs.length) await this.deliver(target, "gifs", this.me.account, { add: gifs });
+    const names = await this.names();
+    if (Object.keys(names).length) await this.deliver(target, "names", this.me.account, { set: names });
   }
 
   async mergeHistory(body) {
@@ -2069,6 +2103,52 @@ export class Messenger extends EventTarget {
     const blob = await this.gifBlob(id);
     if (!blob) throw new ApiError(404, "gif_missing");
     return this.sendFile(conv, new File([blob], "animation.gif", { type: "image/gif" }), progress);
+  }
+
+  // ── device nicknames (DESIGN.md §4.6) ─────────────────────────────────────────────────────────────────────────
+  //
+  // A nickname is the user's own name for a device of the account, kept encrypted on the devices and shared only
+  // between them as "names" messages. The signed device list is untouched: the automatic label ("Chrome på Linux")
+  // stays as it is, and the server never sees a nickname.
+
+  /** The account's device nicknames, `{ [deviceId]: { name, time } }` (encrypted on this device). */
+  async names() {
+    const m = await this.store.secret("names");
+    return m && typeof m === "object" && !Array.isArray(m) ? m : {};
+  }
+
+  /** Give a present device of the account a nickname of its own, or clear it with "" (on the own devices too). */
+  async setDeviceName(deviceId, name) {
+    const own = await this.ownList();
+    if (!own.present.some((d) => d.id === deviceId && !p.isPaper(d))) throw new ApiError(400, "bad_device");
+    const clean = cleanName(name);
+    if (clean === null) throw new ApiError(400, "bad_name");
+    const names = await this.names();
+    const time = Date.now(); // milliseconds: a rename and a clear in quick succession must not tie
+    names[deviceId] = { name: clean, time };
+    await this.store.setSecret("names", capNames(names));
+    this.emit("names");
+    const owns = await this.ownTargets();
+    if (owns.length) await this.deliver(owns, "names", this.me.account, { set: { [deviceId]: { name: clean, time } } });
+  }
+
+  /** "names" from an own device: `{ set: { [deviceId]: { name, time } } }`, last writer wins by time. */
+  async mergeNames(body) {
+    const set = body?.set;
+    if (!set || typeof set !== "object" || Array.isArray(set)) return;
+    const names = await this.names();
+    let changed = false;
+    for (const [id, v] of Object.entries(set)) {
+      if (typeof id !== "string" || !v || typeof v !== "object" || !Number.isSafeInteger(v.time)) continue;
+      const name = cleanName(v.name);
+      if (name === null) continue;
+      if ((names[id]?.time ?? 0) >= v.time) continue; // an older change, or a tie: keep what is here
+      names[id] = { name, time: v.time };
+      changed = true;
+    }
+    if (!changed) return;
+    await this.store.setSecret("names", capNames(names));
+    this.emit("names");
   }
 
   // ── recently used emoji, encrypted on this device ──────────────────────────────────────────────────────────────

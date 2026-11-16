@@ -3,7 +3,7 @@
 import * as p from "./protocol.js";
 import { Api, ApiError } from "./api.js";
 import * as id from "./identity.js";
-import { EPHEMERAL_TTLS, GIF_MAX_BYTES, GIF_MAX_COUNT, Messenger, Store, setupDevice, validRetention } from "./core.js";
+import { displayName, EPHEMERAL_TTLS, GIF_MAX_BYTES, GIF_MAX_COUNT, Messenger, NAME_MAX, Store, setupDevice, validRetention } from "./core.js";
 import * as emoji from "./emoji.js";
 import * as code from "./code.js";
 import * as giphy from "./giphy.js";
@@ -143,6 +143,7 @@ const ICONS = {
   search: "M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 0 0 0-13zM15.5 15.5L20 20",
   folder: "M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z",
   check: "M5 12.5l4.5 4.5L19 7.5",
+  pen: "M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4",
   timer: "M12 6a7.5 7.5 0 1 0 0 15a7.5 7.5 0 0 0 0-15zM12 9.5v4l2.5 1.5M10 2.5h4M18.5 6.5l1.5-1.5",
 };
 
@@ -3608,6 +3609,29 @@ function showAccountMenu() {
   );
 }
 
+/** Give one of the account's devices a nickname of its own, or clear it with an empty field (DESIGN.md §4.6). */
+function showDeviceName(dev, current) {
+  const input = h("input", { class: "input", type: "text", maxlength: String(NAME_MAX), "aria-label": tr("dev.rename"), placeholder: dev.label });
+  input.value = current ?? "";
+  const save = async () => {
+    dlg.close();
+    try {
+      await messenger.setDeviceName(dev.id, input.value);
+    } catch (x) {
+      toast(say(x));
+    }
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); save(); } });
+  const dlg = dialog(
+    h("h2", { text: tr("dev.rename") }),
+    h("div", { class: "field" }, input),
+    h("p", { class: "hint", text: tr("dev.renameHint", { label: dev.label }) }),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.cancel"), onclick: () => dlg.close() }), h("button", { class: "btn primary", text: tr("common.save"), onclick: save })),
+  );
+  input.focus();
+  input.select();
+}
+
 async function showDevices() {
   const list = h("div", {}, h("span", { class: "spinner" }));
   const paper = h("div", { class: "paperbox" });
@@ -3619,7 +3643,7 @@ async function showDevices() {
     h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
   );
   const render = async () => {
-    const [own, seen] = await Promise.all([messenger.ownList(true), messenger.ownSeen()]);
+    const [own, seen, names] = await Promise.all([messenger.ownList(true), messenger.ownSeen(), messenger.names()]);
     const keys = own.present.filter(p.isPaper);
     const browsers = own.present.filter((x) => !p.isPaper(x));
     put(
@@ -3627,14 +3651,21 @@ async function showDevices() {
       browsers.length === 1 && !keys.length
         ? h("p", { class: "lone", text: tr("dev.lone") })
         : null,
-      ...own.present.map((dev) =>
-        h(
+      ...own.present.map((dev) => {
+        const name = names[dev.id]?.name;
+        return h(
           "div",
           { class: "dev" },
           h(
             "div",
             { class: "l" },
-            h("div", { text: p.isPaper(dev) ? tr("paper.label") : dev.id === messenger.me.device ? tr("dev.this", { label: dev.label }) : dev.label }),
+            h(
+              "div",
+              { class: "name" },
+              h("span", { text: p.isPaper(dev) ? tr("paper.label") : dev.id === messenger.me.device ? tr("dev.this", { label: displayName(dev, names) }) : displayName(dev, names) }),
+              p.isPaper(dev) ? null : h("button", { class: "icon-btn pen", title: tr("dev.rename"), "aria-label": tr("dev.rename"), onclick: () => showDeviceName(dev, name) }, icon("pen", 15)),
+            ),
+            name ? h("div", { class: "hint", text: dev.label }) : null,
             p.isPaper(dev)
               ? h("div", { class: "hint", text: tr("dev.paperHint") })
               : [
@@ -3657,8 +3688,8 @@ async function showDevices() {
                   }
                 },
               }),
-        ),
-      ),
+        );
+      }),
     );
     put(
       paper,
@@ -3667,6 +3698,9 @@ async function showDevices() {
       h("button", { class: "btn", text: tr(keys.length ? "dev.newKey" : "lone.make"), onclick: () => { d.close(); showPaperKey(); } }),
     );
   };
+  // A nickname changed here or on another own device while the dialog is open.
+  const onNames = () => (d.isConnected ? render().catch(() => {}) : messenger.removeEventListener("names", onNames));
+  messenger.addEventListener("names", onNames);
   render().catch((x) => list.replaceChildren(h("div", { class: "error", text: say(x) })));
 }
 

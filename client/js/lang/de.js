@@ -511,6 +511,8 @@ export default {
   "dev.hint": "Neue Geräte fügst du hinzu, indem du dich auf ihnen anmeldest und hier bestätigst. Ein Passwort reicht nicht, um ein Gerät hinzuzufügen.",
   "dev.lone": "Das ist dein einziges Gerät. Werden die Browserdaten gelöscht, kann niemand ein neues Gerät bestätigen: Dann braucht es die Wiederherstellungskarte, das Konto beginnt neu, und der Verlauf geht verloren. Verknüpfe ein weiteres Gerät oder erstelle einen Papierschlüssel.",
   "dev.this": "{label} (dieses)",
+  "dev.rename": "Umbenennen",
+  "dev.renameHint": "Leer lassen, um wieder {label} zu verwenden.",
   "dev.paperHint": "Kann zusammen mit deinem Passwort ein neues Gerät bestätigen. Entfernst du ihn, funktioniert der alte Schlüssel nicht mehr.",
   "dev.removePaper": "Papierschlüssel entfernen? Er kann dann kein neues Gerät mehr bestätigen.",
   "dev.haveKey": "Du hast einen Papierschlüssel. Ein neuer ersetzt den alten, der dann nicht mehr funktioniert.",

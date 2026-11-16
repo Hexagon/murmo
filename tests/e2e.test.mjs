@@ -217,6 +217,43 @@ test("link a second device: approval on the first, history handed over", async (
   for (const dev of [alice, alice2]) await until(async () => (await dev.messages(bob.me.account)).find((m) => m.text === "Från laptopen")?.delivered > 0);
 });
 
+test("device nicknames: own devices share them, last writer wins, and a contact cannot set one", async () => {
+  // A nickname set on one device reaches the other, trimmed; an empty one clears it again.
+  await alice.setDeviceName(alice2.me.device, "  Laptopen  ");
+  await until(async () => (await alice2.names())[alice2.me.device]?.name === "Laptopen");
+  assert.equal((await alice.names())[alice2.me.device].name, "Laptopen");
+  await alice.setDeviceName(alice2.me.device, "");
+  await until(async () => (await alice2.names())[alice2.me.device]?.name === "");
+  // Last writer wins by time; an older change and a tie are ignored.
+  const t = Date.now() + 1_000_000;
+  await alice.mergeNames({ set: { [alice2.me.device]: { name: "Först", time: t } } });
+  await alice.mergeNames({ set: { [alice2.me.device]: { name: "Äldre", time: t - 100 } } });
+  await alice.mergeNames({ set: { [alice2.me.device]: { name: "Samma", time: t } } });
+  assert.equal((await alice.names())[alice2.me.device].name, "Först");
+  await alice.mergeNames({ set: { [alice2.me.device]: { name: "Senare", time: t + 100 } } });
+  assert.equal((await alice.names())[alice2.me.device].name, "Senare");
+  // A device that is not in the list, and a name with a control character, are refused.
+  await assert.rejects(alice.setDeviceName("x".repeat(22), "Nope"), (x) => x.code === "bad_device");
+  await assert.rejects(alice.setDeviceName(alice2.me.device, "\u0007"), (x) => x.code === "bad_name");
+  // Bob cannot set a nickname on one of Alice's devices: only an own device is taken.
+  await bob.deliver(await bob.peerTargets(alice.me.account), "names", alice.me.account, { set: { [alice.me.device]: { name: "hackad", time: Date.now() + 1_000_000 } } });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal((await alice.names())[alice.me.device], undefined);
+});
+
+test("a newly linked device receives the nicknames after the history hand-over", async () => {
+  const ninaHandle = await register("Nina", PW);
+  const nina1 = await device(ninaHandle, PW, "nina1");
+  await nina1.setDeviceName(nina1.me.device, "Skrivbordet");
+  assert.equal((await nina1.names())[nina1.me.device].name, "Skrivbordet");
+  const nina2 = await device(ninaHandle, PW, "nina2", async (setup) => {
+    const req = await waitFor(nina1, "link");
+    assert.equal(req.code, setup.code); // both screens show the same code
+    await nina1.approveLink(req.request);
+  });
+  await until(async () => (await nina2.names())[nina1.me.device]?.name === "Skrivbordet");
+});
+
 test("retention: old messages are deleted on all own devices, new ones kept", async () => {
   const conv = bob.me.account;
   const old = Math.floor(Date.now() / 1000) - 3 * 86400;

@@ -503,6 +503,9 @@ dialog.wide { width: min(640px, calc(100% - 24px)); max-height: calc(100dvh - 32
 .dev { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .dev:last-child { border-bottom: 0; }
 .dev .l { flex: 1; }
+.dev .name { display: flex; align-items: center; gap: 4px; }
+.icon-btn.pen { width: 26px; height: 26px; border: 0; color: var(--muted); }
+.icon-btn.pen:hover { color: var(--text); }
 .dev .seen { font-size: 13px; color: var(--muted); }
 .dev .id { font: 12px var(--mono); color: var(--faint); }
 .help h3 { font-size: 15px; margin: 16px 0 6px; }
