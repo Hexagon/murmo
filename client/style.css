@@ -576,6 +576,8 @@ body.in-app #top, body.in-app .hero, body.in-app .hero-app { display: block; hei
 .site-head nav { display: flex; gap: 20px; margin-left: auto; }
 .site-head nav a { color: var(--muted); text-decoration: none; font-size: 14px; }
 .site-head nav a:hover { color: var(--text); }
+.landing .site-head .gh { display: flex; color: var(--muted); }
+.landing .site-head .gh:hover { color: var(--text); }
 .landing main > section { max-width: 1120px; margin: 0 auto; padding: 72px 24px; scroll-margin-top: 64px; }
 .landing main > section.band { max-width: none; background: var(--sidebar); padding-left: max(24px, calc((100% - 1072px) / 2)); padding-right: max(24px, calc((100% - 1072px) / 2)); }
 .hero { display: grid; grid-template-columns: 1fr minmax(320px, 420px); gap: 56px; align-items: start; }
@@ -631,6 +633,6 @@ body.in-app #top, body.in-app .hero, body.in-app .hero-app { display: block; hei
   .hero-text h1 { font-size: 36px; }
   .steps, .grid, .split { grid-template-columns: 1fr; }
   .site-head nav { display: none; }
-  .site-head .btn { margin-left: auto; }
+  .site-head .gh { margin-left: auto; }
   .landing main > section { padding-top: 48px; padding-bottom: 48px; }
 }
