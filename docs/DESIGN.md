@@ -1063,3 +1063,150 @@ Built: binary chunk frames, grants for files the recipient asked for, and a budg
   a chunk larger than 48 KiB, so it needs a `chunk` field in the `file` message and a §12 row.
 - **A larger live budget** for files that are pushed (below `ASK_ABOVE`)? It is now 1.78× more file per minute than
   before, since binary chunks are counted by their payload (T31).
+
+### 13.9 A view of shared files
+
+A plan for one place where the user sees every file shared in their conversations, instead of scrolling each thread.
+Nothing here is built. It needs no protocol, server or §12 change: every file is already a `file` message in the
+local store (§8.1, §9), so the view is another way of drawing what the device has.
+
+Decided (November 2026): the view opens from the sidebar too; files can be removed from one device to free room,
+one at a time or several at once; files of blocked contacts are only under a filter of their own. These are written
+into the plan below.
+
+*What is in it.* The `file` messages of every conversation with a contact in state accepted, outgoing or blocked
+(the same records `messenger.messages(conv)` gives the thread), in both directions. Not in it: disappearing
+messages (§6.8: they must not be collected anywhere else), messages taken back or deleted (§6.6, they are
+placeholders or hidden), declined contacts, files of blocked contacts unless their filter is chosen (below), and the GIF collection (§9.2), which has its own panel. A file sent to
+the user's own devices only does not exist as a message, so it cannot appear.
+
+*Where it opens.*
+- **All files:** a button in the sidebar's actions next to search and *Ny konversation* (a folder icon, title
+  *Filer*); with the bell that comes and goes, that is at most four icons, which fit the narrowest sidebar. To be
+  tried there first; if it crowds the top on a phone, it moves to the account menu, and the conversation menu
+  stays. The view takes the main pane like a conversation (and the whole screen on a phone, with the same back
+  button and history entry, `shell.chat`); the sidebar stays as it is, with no conversation marked.
+- **One conversation's files:** *Filer* in the conversation's menu (`showContactMenu`), and on wide screens a button in
+  its top bar. It opens the same view, already filtered to that contact; the filter chip can be removed to see all.
+
+*Layout.*
+
+```
+┌───────────────────────────────────────────────────────────┐
+│ ←  Filer                                     [ Sök filer ] │
+│ [ Alla · Bilder och video · Dokument ]                     │
+│ Från: [Alla ▾]  [Alice#3F9C ×]   Sortera: [Nyast ▾]        │
+├───────────────────────────────────────────────────────────┤
+│ November 2026                                              │
+│ ▣ ▣ ▣ ▣ ▣ ▣      (pictures and videos: square tiles)       │
+│ PDF  offert.pdf          2,1 MB · Alice · 14 nov   Spara ⋯ │
+│ ZIP  bilder.zip         320 MB · Du → Bob · 12 nov Ta emot │
+│ Oktober 2026                                               │
+│ …                                                          │
+├───────────────────────────────────────────────────────────┤
+│ 1,4 GB av filer på den här enheten                         │
+└───────────────────────────────────────────────────────────┘
+```
+
+- **Three tabs**, as a segmented control (`role="tablist"`): *Alla*, *Bilder och video* (types `p.inlineImage` /
+  `p.inlineVideo` accept, whatever the size) and *Dokument* (everything else). The last choice is remembered per
+  device in settings, like the theme.
+- **Grouped by month**, newest first, with sticky month headings (`i18n` month names, local time only when shown,
+  as everywhere). Pictures and videos within a month are a grid of square tiles; other files are rows. On *Alla* each
+  month has its tiles first, then its rows, so a month of photos does not become a long list.
+- **A row** is the file card that threads already use (`fileCard`: type badge from the extension, name in a
+  bidi-isolated element, size), with a second line saying who and where: *Alice* for a received file, *Du → Alice*
+  for a sent one (the conversation is left out when the view is filtered to one), and the day. The row's action is
+  the card's own: *Spara*, *Ta emot* (`ask`, §9), or *Hämta från mina enheter*; a `⋯` menu holds the rest.
+- **A tile** shows the picture, or a video's first frame where the browser can draw it (otherwise a play symbol on
+  the type colour); a video tile has its length or a play mark, a file that is not here a dimmed tile with a
+  download mark. Images that fail `p.imageFits` (§9) get the plain type tile.
+- **Filters and sort.** *Från*: *Alla*, *Mig*, *Andra*, and last, set apart, *Blockerade*: the files of blocked
+  contacts are left out of every other choice and shown only here, so that what a blocked contact sent does not turn
+  up among the user's own photos; a contact chip (set by opening from a conversation, or chosen
+  in a small list of contacts that have files); a search field that filters on the file name with the same folding as
+  §6.9 (`fold`). Sort: *Nyast* (default), *Äldst*, *Störst*; sorting by size drops the month groups and is the way to
+  find what takes room.
+- **Footer:** how much the shown files take on this device, counted from the stored headers (`files` store, `size`),
+  and of the files filtered to, with *Frigör utrymme* (below).
+
+*Status of a file*, the same words as in the thread so the two never disagree: here (no mark); *väntar på att tas
+emot* (`ask`, not taken); *inte mottagen* (received message, no content yet); *finns inte här* (sent from another of
+the user's devices, fetchable from them); *borttagen från den här enheten* (removed here to free room, below; with *Hämta igen*); *inte skickad än* (sent, but `missed` by all the recipient's devices,
+`Messenger.undelivered`). A transfer in progress shows the same progress as the thread (`data-coming`, `fileState`).
+
+*Opening a file.*
+- A picture or video opens the existing viewer (`showImage` / the video player), extended with previous and next
+  (arrow keys, swipe on touch) through the tiles in the current filter and order, and with the file's line (name,
+  who, day) under it. Images over `MAX_INLINE` or that fail the pixel check are not put together for viewing (§8.1):
+  their tile opens the row's actions instead.
+- Other files: *Spara* as in the thread (`saveFile`, part by part where `showSaveFilePicker` exists).
+- `⋯` on a row, and in the viewer: *Visa i konversationen* (opens the thread with the message centred and marked, the
+  `jumpTo` that search uses), *Spara*, *Radera för mig* (`deleteForMe`, which also removes it from the user's other
+  devices) and, within the 24 hours of §6.6 for the user's own files, *Radera för alla* (`retract`), with the same
+  confirmation texts as in the thread. *Ta bort från den här enheten* (below) is in the same menu, above the two
+  that delete the message.
+
+*Removing a file from this device, to free room.* Deleting a message (§6.6) removes it from every own device and
+from the conversation. Often the user only wants the room back on one device, typically a phone, while the message
+stays and the file is still on a computer. So:
+- **Ta bort från den här enheten** deletes the file's header and parts on this device only (`files`, `parts`, as
+  retention does, §8.1) and sets `have: false` and a local mark `freed: <time>` on the stored message. Nothing is
+  sent: not to the contact, not to the own devices. The message stays in the thread and in the view, with the status
+  *borttagen från den här enheten* and *Hämta igen*, which asks the own connected devices (`fetchFromOwnDevices`, §9
+  step 5), or for an `ask` file the sending device (`acceptFile`), exactly as for a file that never came.
+- **No protocol or §12 change.** `have` is already per device (a history hand-over sets it false on the receiving
+  device), and `freed` is local in the same way: dropped when messages are handed over, never in a message.
+- **It must not come back by itself.** A freed file is not expected: chunks that arrive for it unasked (the sender's
+  retry of `missed` devices, the file queue) are dropped, and queued ones acknowledged so the server deletes them,
+  as for any chunk the device does not want; it is not offered by this device to its own devices either. *Hämta
+  igen* clears `freed` first. Retention and deletion of the message work as before.
+- **Warnings, not prohibitions.** The device cannot know whether another device still has the file, so the
+  confirmation says it can be fetched again only from a device of the user's that still has it, or from the
+  sender while they keep it. Stronger, and asked separately, for the files this device must serve: the user's own
+  `ask` files (§9: the recipient takes them from this device; afterwards *Ta emot* reaches nobody until another own
+  device has it) and own files whose recipients have not got them yet (`missed`, which this device offers again).
+- **Several at once.** *Välj* in the view's top bar starts a select mode: tiles and rows get checkboxes (a long
+  press on touch starts it too), a month heading selects its month, and a bar at the bottom says how many and how
+  much (*12 filer · 840 MB*) with *Ta bort från den här enheten*, *Spara* (one by one, each with the browser's
+  dialog) and *Radera för mig*. Files that are not here cannot be chosen for removal. Removal runs in batches of
+  files per transaction and can be stopped; the footer's total updates as it goes.
+- **Frigör utrymme** in the footer opens the view sorted by *Störst*, filtered to files that are here, in select
+  mode, with a line on what the browser reports for the whole site (`navigator.storage.estimate()`, where it exists).
+  Nothing is chosen for the user.
+
+*How it is built, and what it costs.*
+- **Reading.** Like search (§6.9), the view decrypts each conversation's messages, keeps only `kind === "file"` and
+  holds `{ id, conv, time, dir, file }` in memory per conversation while the view is open; a conversation's entry is
+  dropped on the same `messages` event that drops the search cache, and everything is forgotten when the view
+  closes. Conversations are read side by side, and the first month is drawn as soon as the newest conversations are
+  read. Nothing new is stored and nothing is sent.
+- **Thumbnails.** None are stored: a tile puts its picture together from the stored parts (`fileBlob`) only when it
+  nears the screen (`nearScreen`, with the view's scroller as root), at most a few at a time, after the header's
+  dimensions passed `p.imageFits`. The `<img>` is drawn small with `object-fit: cover`; the browser decodes it at that
+  size where it can (`decoding="async"`). Object URLs are revoked when the view closes or the tile leaves the window
+  far behind. A stored, encrypted thumbnail per image (a `thumb:<file tag>` part made on receipt) would make a large
+  grid much cheaper, but is new data at rest and a new step on every received picture: decide after measuring with a
+  few thousand photos.
+- **Store.** `store.freeFile(id, f)` deletes the parts and header and updates the message in one transaction, like
+  `replaceMessage`; `core.js` checks `freed` where it decides whether to take chunks (`expectFile`, the queue) and
+  whether to serve its own devices.
+- **Long lists.** Months are drawn as they near the screen, like older messages in a thread (§8.1), so a device with
+  ten thousand files does not build ten thousand nodes.
+- **Code.** A `files.js` module beside `app.js` (view, tiles, rows, filters), reusing `fileCard`, `showImage`,
+  `saveFile`, `nearScreen` and the search's folding; `messenger.fileList(conv?)` in `core.js` if the filtering is
+  wanted in tests without the UI. Texts under `files.*` in all four languages (`client/js/lang/`); the i18n test
+  checks that every key exists in each.
+- **Accessibility.** The grid is a list of buttons whose names are the file names (`alt`); arrow keys move between
+  tiles, Enter opens. Month headings are headings. Status is text, never only a colour or an icon.
+
+*Still open.* Whether removing the file from all own devices but one is worth a button of its own ("keep it only on
+this computer"); it would be a new `sync` kind and a §12 row, so it waits until removing on one device has been used.
+
+*Order of work.* 1) `fileList` in core with a store test (kinds left out, blocked only under their filter, order,
+invalidation); 2) the view with rows, tabs, month groups and filters, opened from the sidebar button and the
+conversation menu; 3) tiles with lazy pictures and the viewer with previous/next, *Visa i konversationen*;
+4) *Ta bort från den här enheten* with `freeFile`, `freed` honoured by the relay and the queue, and an e2e test that a
+freed file is not pushed back by the sender's retry but comes with *Hämta igen*; 5) select mode and *Frigör
+utrymme*; 6) the four languages and a step in `tests/ui-smoke.mjs` that opens the view with a sent picture and a
+document, removes one from the device, and fails on any console error.
