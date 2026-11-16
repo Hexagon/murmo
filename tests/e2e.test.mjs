@@ -454,6 +454,48 @@ test("files go live to connected devices, wait for absent ones, and own devices 
   });
 });
 
+test("files view: the list of files, and a file removed from one device stays away until asked for", async () => {
+  const data = noise(90_000);
+  const bobGot = waitFor(bob, "file");
+  const a2Got = waitFor(alice2, "file");
+  await alice.sendFile(bob.me.account, new File([data], "rapport.pdf", { type: "application/pdf" }));
+  const { f } = await bobGot;
+  await a2Got;
+
+  // The list: files of every conversation, newest first, not texts, the same on the sending and the other own device.
+  const listed = await alice2.fileList();
+  assert.equal(listed[0].m.file.f, f);
+  assert.equal(listed[0].conv, bob.me.account);
+  assert.ok(listed.every((x) => x.m.kind === "file"));
+  assert.equal((await alice2.fileList(bob.me.account)).length, listed.length);
+
+  // Removed on Alice's second device only: the message stays, marked, and nothing reaches Bob or Alice's first device.
+  const before = (await alice2.messages(bob.me.account)).find((m) => m.file?.f === f);
+  assert.equal(await alice2.freeFiles([{ conv: bob.me.account, id: before.id }]), data.length);
+  const after = (await alice2.messages(bob.me.account)).find((m) => m.id === before.id);
+  assert.equal(after.file.have, false);
+  assert.equal(typeof after.file.freed, "number");
+  assert.equal(await alice2.store.hasFile(f), false);
+  assert.deepEqual(await alice.store.file(f), data);
+  assert.deepEqual(await bob.store.file(f), data);
+
+  // Chunks that come unasked (a retry from the sending device) are refused.
+  const sent = (await alice.messages(bob.me.account)).find((m) => m.file?.f === f);
+  await alice.streamFile(sent.file, await alice.store.fileReader(f), [alice2.me.device]);
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(await alice2.store.hasFile(f), false);
+
+  // Asked for again: it comes from the own device that has it, and the mark is gone.
+  const back = waitFor(alice2, "file", (d) => d.f === f);
+  assert.equal(await alice2.fetchFromOwnDevices(bob.me.account, f), 1);
+  await back;
+  assert.deepEqual(await alice2.store.file(f), data);
+  const again = (await alice2.messages(bob.me.account)).find((m) => m.id === before.id);
+  assert.equal(again.file.have, true);
+  assert.equal(again.file.freed, undefined);
+  assert.equal(alice2.freed.has(f), false);
+});
+
 test("the GIF collection: only real GIFs, encrypted locally, sent as an ordinary file", async () => {
   const gif = Uint8Array.from(Buffer.from("R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==", "base64")); // 1 × 1
   assert.equal(await alice.saveGif(new Blob([gif], { type: "image/gif" })), "saved");

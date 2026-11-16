@@ -48,6 +48,8 @@ Open, in order of priority:
       file queue counts a file's real size (`DESIGN.md` §10.2, §13.8)
 - [x] Code in messages: inline code and fenced blocks with colours for common languages, nothing else of Markdown
       (`DESIGN.md` §6.10)
+- [x] Files view: every shared file in one place, by month and kind, with filters, a viewer with previous and next,
+      detailed transfer progress, and removing files from one device to free room (`DESIGN.md` §9.4)
 - [ ] Signed, reproducible client release with published hashes; installable copy not served by the server
 - [ ] History from contacts after every device is lost: a contact sends its copy of a conversation on request,
       shown as the contact's copy (`DESIGN.md` §7.1, option 3)
@@ -72,8 +74,8 @@ Kept in [DESIGN.md §13](DESIGN.md#13-ideas-not-decided) to be decided later: re
 social recovery of the paper key, QR verification, identity timeline, aliases, calm messaging, "what the server
 knows about me", duress password, sealed sender, one-time secrets, shared objects, voice, on-device translation,
 calls, a contact widget, alerts and bots (with a worked plan for an AI assistant as a contact), checking the served
-client, what is left of the faster file relay (receiver batching, larger chunks, §13.8), and a view of all shared
-files with removal from one device to free room (§13.9).
+client, what is left of the faster file relay (receiver batching, larger chunks, §13.8), and what is left of the files
+view (stored thumbnails, keeping a file on one device only, §13.9).
 
 ## Open questions
 

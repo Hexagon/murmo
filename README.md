@@ -34,6 +34,9 @@ that log rather than in trust in the server. The server is one Rust binary that 
   can the operator); otherwise the file is sent when both are connected. Images (PNG, JPEG, GIF, WebP) show inline.
   Your own devices can later fetch a file from each other. Chunks go as binary frames, and a file the recipient asked
   for comes as fast as both connections allow.
+- **Files view.** Every shared file in one place: photos and videos as tiles, documents as rows, by month, with
+  filters, a viewer and detailed progress for transfers. A file can be removed from one device to free room and
+  fetched again later from another of your devices (docs/DESIGN.md §9.4).
 - **Undo, edit and delete.** A text waits 5 seconds before it is sent, shown in the thread with an undo button
   ("Ångra"); a sent text can be edited within 24 hours (marked "redigerat" on both sides); a sent text or file can be
   deleted for everyone within 24 hours (it becomes "… tog bort ett meddelande" on both sides), or for yourself

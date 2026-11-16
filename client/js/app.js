@@ -141,6 +141,8 @@ const ICONS = {
   undo: "M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
   bellOff: "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0M3 3l18 18",
   search: "M10.5 4a6.5 6.5 0 1 0 0 13a6.5 6.5 0 0 0 0-13zM15.5 15.5L20 20",
+  folder: "M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z",
+  check: "M5 12.5l4.5 4.5L19 7.5",
   timer: "M12 6a7.5 7.5 0 1 0 0 15a7.5 7.5 0 0 0 0-15zM12 9.5v4l2.5 1.5M10 2.5h4M18.5 6.5l1.5-1.5",
 };
 
@@ -909,10 +911,11 @@ function recoveryHelp(home, handle) {
 
 async function enter({ store, account, handle, home }) {
   messenger = new Messenger({ api, store, account, handle, home, realms: info.realms, fileQueue: () => settings().fileQueue, queueLimit: () => queueLimit() ?? Infinity });
-  messenger.addEventListener("contacts", () => { renderSidebar(); refreshConversation(); });
+  messenger.addEventListener("contacts", () => { renderSidebar(); refreshConversation(); if (filesView) scheduleFiles(); });
   messenger.addEventListener("messages", (e) => {
     searchCache.delete(e.detail.conv);
     if (e.detail.conv === current) renderThread();
+    if (filesView) scheduleFiles();
     renderSidebar();
   });
   messenger.addEventListener("gifs", () => refreshGifHashes().then(renderThread).catch(() => {}));
@@ -922,7 +925,11 @@ async function enter({ store, account, handle, home }) {
     for (const el of document.querySelectorAll(`[data-coming="${CSS.escape(f)}"]`)) {
       el.textContent = `${bytes(Number(el.dataset.size))} · ${tr("msg.receiving", { pct: percent(done / total) })}`;
     }
+    if (done < total) trackTransfer(`in:${f}`, done / total);
+    else transfers.delete(`in:${f}`);
+    updateTransfers();
   });
+  messenger.addEventListener("file", (e) => transfers.delete(`in:${e.detail.f}`));
   messenger.addEventListener("status", (e) => {
     renderSidebar();
     if (e.detail !== "online") return;
@@ -1115,6 +1122,7 @@ function renderShell() {
     "aria-expanded": String(!!search), onclick: () => showSearch(ui.searchRow.classList.contains("hidden")),
     onmousedown: (e) => e.preventDefault(), // the field keeps the focus, so it is not closed by its blur first
   }, icon("search"));
+  ui.filesBtn = h("button", { class: "icon-btn files-btn", "aria-label": tr("files.title"), title: tr("files.title"), "aria-pressed": "false", onclick: () => openFiles() }, icon("folder"));
   ui.foot = h("div", { class: "side-foot" });
   ui.main = h("main", { class: "main" });
   ui.bell = h("button", { class: "icon-btn bell-off", hidden: true, onclick: async () => toast(await setNotifications(true).catch((x) => say(x))) }, icon("bellOff"));
@@ -1133,6 +1141,7 @@ function renderShell() {
           { class: "side-actions" },
           ui.bell,
           ui.searchBtn,
+          ui.filesBtn,
           h("button", { class: "icon-btn new-btn", "aria-label": tr("side.newConversation"), title: tr("side.newConversation"), onclick: () => openConversation(null, true) }, icon("plus")),
         ),
       ),
@@ -1165,6 +1174,7 @@ function convItem(c) {
 
 function renderSidebar() {
   if (!ui.sideList || !messenger) return;
+  ui.filesBtn?.setAttribute("aria-pressed", String(!!filesView && !filesView.conv));
   updateBell();
   renderFoot();
   if (search) return renderSearch();
@@ -1361,6 +1371,7 @@ function refreshConversation() {
 
 /** Open a conversation, or with `null` the start (`form`: the new-conversation form, also on a narrow screen). */
 function openConversation(account, form = false) {
+  closeFiles();
   current = account && messenger.contacts.has(account) ? account : null;
   for (const u of objectUrls.values()) URL.revokeObjectURL(u);
   objectUrls.clear();
@@ -1387,6 +1398,7 @@ function openConversation(account, form = false) {
   const head = topbar(
     h("div", { class: "title" }, name, h("span", { class: "tag", text: tag }), homeLabel(c.home) ? h("span", { class: "home", text: ` · ${homeLabel(c.home)}` }) : null, c.retention ? h("span", { class: "home", title: tr("conv.retentionTitle"), text: tr("conv.retention", { time: retentionLabel(c.retention) }) }) : null),
     c.state === "accepted" ? h("button", { class: "btn ghost small", onclick: () => showSafety(c) }, icon("shield"), h("span", { class: "wide", text: tr("conv.safety") })) : null,
+    h("button", { class: "btn ghost small wide files-open", title: tr("files.ofConversation"), onclick: () => openFiles(c.account, c.account) }, icon("folder"), h("span", { text: tr("files.title") })),
     h("button", { class: "icon-btn", "aria-label": tr("conv.more"), onclick: () => showContactMenu(c) }, icon("more")),
   );
   const parts = [head];
@@ -1648,6 +1660,7 @@ function composer(c) {
     } finally {
       if (id) {
         sending.delete(id);
+        transfers.delete(`out:${id}`);
         if (current === c.account) renderThread();
       }
     }
@@ -2266,6 +2279,8 @@ function sendingNote(id) {
 }
 
 function showSending(id) {
+  trackTransfer(`out:${id}`, sending.get(id) ?? 0);
+  updateTransfers();
   for (const el of ui.thread?.querySelectorAll(".sending") ?? []) {
     if (el.dataset.id === id) el.textContent = tr("msg.sending", { pct: percent(sending.get(id) ?? 0) });
   }
@@ -2773,6 +2788,668 @@ function fileCard(m, note, play = false) {
   );
 }
 
+// ── files view (DESIGN.md §13.9) ────────────────────────────────────────────────────────────────────────────────
+// Every file of the conversations in one place: the `file` messages this device has, decrypted while the view is
+// open and forgotten when it closes. Nothing new is stored or sent, except when the user removes files from this
+// device (`freeFiles`), which only changes this device's own records.
+
+const FILES_PAGE = 240; // files drawn at first; more as the end of the list nears the screen
+/** The open files view: `{ conv, back, tab, from, sort, q, select, limit, freeing }`, or null. */
+let filesView = null;
+let filesSeq = 0;
+/** The transfer keys the files drawn could have (`in:<file id>`, `out:<message id>`). */
+let fvShownKeys = new Set();
+let filesWait = 0;
+/** Pictures of the files view, by file id: the `<img>` once it has its picture (kept while the view is open). */
+const fvImgs = new Map();
+/** At most this many pictures are put together at once for tiles. */
+let fvLoading = 0;
+const fvQueue = [];
+
+function fvSlot(fn) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      fvLoading++;
+      fn().then(resolve, reject).finally(() => {
+        fvLoading--;
+        fvQueue.shift()?.();
+      });
+    };
+    if (fvLoading < 4) run();
+    else fvQueue.push(run);
+  });
+}
+
+// Transfers under way, for the files view's progress bars: key (`in:<file id>` or `out:<message id>`) →
+// `{ share, size, samples: [{ t, b }], at }`. The thread shows only a percentage; here also bytes, speed and time left.
+const transfers = new Map();
+
+function trackTransfer(key, share) {
+  const now = Date.now();
+  let x = transfers.get(key);
+  if (!x) transfers.set(key, (x = { share: 0, size: 0, samples: [] }));
+  x.share = Math.max(0, Math.min(1, share));
+  x.at = now;
+  x.samples.push({ t: now, s: x.share });
+  while (x.samples.length > 2 && now - x.samples[0].t > 8000) x.samples.shift();
+}
+
+/** `{ share, line }` for a transfer: "12,3 MB av 40,0 MB · 2,1 MB/s · cirka 15 s kvar", or null. */
+function transferInfo(key) {
+  const x = transfers.get(key);
+  if (!x) return null;
+  const done = x.share * x.size;
+  const parts = [tr("files.progressOf", { done: bytes(Math.round(done)), total: bytes(x.size) })];
+  const first = x.samples[0];
+  const last = x.samples[x.samples.length - 1];
+  if (Date.now() - x.at > 10_000) parts.push(tr("files.stalled"));
+  else if (first && last.t - first.t >= 800 && last.s > first.s) {
+    const rate = ((last.s - first.s) * x.size * 1000) / (last.t - first.t);
+    parts.push(tr("files.rate", { rate: bytes(Math.round(rate)) }));
+    parts.push(tr("files.left", { time: durationLabel((x.size - done) / rate) }));
+  }
+  return { share: x.share, line: parts.join(" · ") };
+}
+
+function durationLabel(s) {
+  if (!Number.isFinite(s) || s < 1) return tr("files.seconds", { n: i18n.num(1) });
+  if (s < 90) return tr("files.seconds", { n: i18n.num(Math.ceil(s)) });
+  if (s < 5400) return tr("files.minutes", { n: i18n.num(Math.round(s / 60)) });
+  return tr("files.hours", { n: i18n.num(Math.round(s / 360) / 10) });
+}
+
+/** The key of a file's transfer under way, or null. */
+function transferKey(m) {
+  if (m.dir === "out" && sending.has(m.id)) return `out:${m.id}`;
+  if (!m.file.have && transfers.has(`in:${m.file.f}`)) return `in:${m.file.f}`;
+  return null;
+}
+
+function transferLabel(key) {
+  return key.startsWith("out:") ? tr("files.sending") : tr("files.receiving");
+}
+
+/** A detailed progress bar: the bar, the share in per cent, bytes, speed and time left. Updated in place. */
+function progressView(key, label, size) {
+  const t = transfers.get(key);
+  if (t) t.size = size;
+  const bar = h("progress", { max: 1, value: transfers.get(key)?.share ?? 0, "aria-label": label });
+  const pct = h("span", { class: "pct" });
+  const line = h("span", { class: "line" });
+  const box = h("div", { class: "fprogress", "data-transfer": key }, h("div", { class: "fp-top" }, h("span", { class: "what", text: label }), pct), bar, line);
+  updateProgress(box);
+  return box;
+}
+
+function updateProgress(box) {
+  const x = transferInfo(box.dataset.transfer);
+  if (!x) return;
+  box.querySelector("progress").value = x.share;
+  box.querySelector(".pct").textContent = percent(x.share);
+  box.querySelector(".line").textContent = x.line;
+}
+
+function updateTransfers() {
+  if (!filesView || !ui.main) return;
+  let missing = false;
+  for (const box of ui.main.querySelectorAll(".fprogress[data-transfer]")) updateProgress(box);
+  // A transfer of a file on the screen that began after the view was drawn: draw it again, with its bar.
+  for (const key of transfers.keys()) if (fvShownKeys.has(key) && !ui.main.querySelector(`[data-transfer="${CSS.escape(key)}"]`)) missing = true;
+  if (missing) scheduleFiles();
+}
+
+function filesSettings() {
+  const s = settings().filesView ?? {};
+  return { tab: ["all", "media", "docs"].includes(s.tab) ? s.tab : "all" };
+}
+
+/** Open the files view: of all conversations, or of one (`conv`), with `back` the conversation to go back to. */
+function openFiles(conv = null, back = null) {
+  current = null;
+  for (const u of objectUrls.values()) URL.revokeObjectURL(u);
+  objectUrls.clear();
+  msgNodes.clear();
+  imgNodes.clear();
+  ui.thread = null;
+  filesView = { conv, back, tab: filesSettings().tab, from: "all", sort: "new", q: "", select: null, limit: FILES_PAGE, freeing: false };
+  ui.shell.classList.add("chat");
+  if (!pushed) {
+    history.pushState({ murmo: 1 }, "");
+    pushed = true;
+  }
+  renderSidebar();
+  renderFilesShell();
+}
+
+/** The view is left (another conversation, the start): let go of its pictures. */
+function closeFiles() {
+  if (!filesView) return;
+  filesView = null;
+  for (const img of fvImgs.values()) if (img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
+  fvImgs.clear();
+  fvQueue.length = 0;
+}
+
+function scheduleFiles() {
+  clearTimeout(filesWait);
+  filesWait = setTimeout(() => renderFiles(), 250);
+}
+
+/** Pictures and videos of the types the app shows (never SVG): tiles. Everything else is a row. */
+const isMedia = (mime) => p.IMAGE_TYPES.includes(mime) || p.VIDEO_TYPES.includes(mime);
+
+/** How a file stands on this device: `{ key, text }` (key null: here). */
+function fileStatus(m) {
+  const f = m.file;
+  if (f.have) return { key: null, text: "" };
+  if (f.freed !== undefined) return { key: "freed", text: tr("files.statusFreed") };
+  if (m.dir === "in" && f.ask) return { key: "ask", text: tr("msg.waitsToBeTaken") };
+  if (m.dir === "in") return { key: "missing", text: tr("msg.notReceived") };
+  return { key: "elsewhere", text: tr("files.statusElsewhere") };
+}
+
+/** The other words about a file that the thread shows too (sent but not delivered, waiting to be taken). */
+function fileNote(m) {
+  if (m.dir !== "out") return "";
+  if (m.file.ask && !m.delivered) return tr("files.awaitingTake");
+  if (Messenger.undelivered(m)) return tr("files.notSentYet");
+  return "";
+}
+
+function renderFilesShell() {
+  const v = filesView;
+  const c = v.conv && messenger.contacts.get(v.conv);
+  ui.fvSearch = h("input", {
+    class: "input", type: "search", placeholder: tr("files.search"), "aria-label": tr("files.search"),
+    spellcheck: "false", autocomplete: "off", autocapitalize: "off", enterkeyhint: "search",
+  });
+  let wait = 0;
+  ui.fvSearch.addEventListener("input", () => {
+    clearTimeout(wait);
+    wait = setTimeout(() => { v.q = ui.fvSearch.value; v.limit = FILES_PAGE; renderFiles(); }, 150);
+  });
+  ui.fvSelectBtn = h("button", { class: "btn ghost small", onclick: () => setSelecting(!v.select) });
+  const head = h(
+    "div",
+    { class: "topbar" },
+    h("button", { class: "icon-btn back-btn", "aria-label": tr("side.back"), onclick: () => (v.back && messenger.contacts.has(v.back) ? openConversation(v.back) : closeConversation()) }, icon("back")),
+    h("h1", { class: "title" }, tr("files.title"), c ? h("span", { class: "home", text: ` · ${c.handle}` }) : null),
+    ui.fvSelectBtn,
+  );
+  ui.fvControls = h("div", { class: "fv-controls" });
+  ui.fvBody = h("div", { class: "fv-body" });
+  ui.scroll = h("div", { class: "scroll fv-scroll" }, ui.fvBody);
+  ui.fvFoot = h("div", { class: "fv-foot" });
+  put(ui.main, head, ui.fvControls, ui.scroll, ui.fvFoot);
+  renderFiles();
+}
+
+function setSelecting(on) {
+  filesView.select = on ? new Set() : null;
+  if (!on) filesView.freeing = false;
+  renderFiles();
+}
+
+/** The files shown: the list filtered by the view's choices, and the contacts there is a choice of. */
+function filterFiles(all) {
+  const v = filesView;
+  const q = fold(v.q.trim());
+  const blockedOnly = v.from === "blocked";
+  let list = all.filter((x) => (blockedOnly ? x.state === "blocked" : x.state !== "blocked"));
+  const people = [...new Set(list.map((x) => x.conv))];
+  if (v.conv) list = list.filter((x) => x.conv === v.conv);
+  if (v.from === "me") list = list.filter((x) => x.m.dir === "out");
+  if (v.from === "others") list = list.filter((x) => x.m.dir === "in");
+  if (v.tab === "media") list = list.filter((x) => isMedia(x.m.file.mime));
+  if (v.tab === "docs") list = list.filter((x) => !isMedia(x.m.file.mime));
+  if (q) list = list.filter((x) => fold(x.m.file.name).includes(q));
+  if (v.freeing) list = list.filter((x) => x.m.file.have);
+  if (v.sort === "old") list = [...list].reverse();
+  if (v.sort === "big") list = [...list].sort((a, b) => (b.m.file.size ?? 0) - (a.m.file.size ?? 0));
+  return { list, people };
+}
+
+function monthLabel(t) {
+  const s = new Intl.DateTimeFormat(i18n.locale(), { month: "long", year: "numeric" }).format(new Date(t * 1000));
+  return s.charAt(0).toLocaleUpperCase(i18n.locale()) + s.slice(1);
+}
+
+async function renderFiles() {
+  if (!filesView || !ui.fvBody) return;
+  const seq = ++filesSeq;
+  const v = filesView;
+  const all = await messenger.fileList();
+  if (seq !== filesSeq || v !== filesView) return;
+  const { list, people } = filterFiles(all);
+  if (v.select) for (const id of [...v.select]) if (!list.some((x) => x.m.id === id)) v.select.delete(id);
+
+  // Controls: tabs, from, conversation, sort.
+  const tab = (k, label) => h("button", { role: "tab", class: v.tab === k ? "on" : "", "aria-selected": String(v.tab === k), text: label, onclick: () => {
+    v.tab = k;
+    v.limit = FILES_PAGE;
+    setSetting("filesView", { tab: k });
+    renderFiles();
+  } });
+  const select = (label, value, options, change) => {
+    const s = h("select", { class: "input small", "aria-label": label }, ...options.map(([k, text]) => h("option", { value: k, text })));
+    s.value = value;
+    s.addEventListener("change", () => { change(s.value); v.limit = FILES_PAGE; renderFiles(); });
+    return s;
+  };
+  const contacts = people.map((a) => messenger.contacts.get(a)).filter(Boolean).sort((a, b) => a.handle.localeCompare(b.handle));
+  if (v.conv && !contacts.some((c) => c.account === v.conv) && messenger.contacts.get(v.conv)) contacts.unshift(messenger.contacts.get(v.conv));
+  put(ui.fvControls,
+    h("div", { class: "seg fv-tabs", role: "tablist", "aria-label": tr("files.kind") }, tab("all", tr("files.tabAll")), tab("media", tr("files.tabMedia")), tab("docs", tr("files.tabDocs"))),
+    h("div", { class: "fv-filters" },
+      select(tr("files.from"), v.from, [["all", tr("files.fromAll")], ["me", tr("files.fromMe")], ["others", tr("files.fromOthers")], ["blocked", tr("files.fromBlocked")]], (x) => { v.from = x; }),
+      select(tr("files.conversation"), v.conv ?? "", [["", tr("files.allConversations")], ...contacts.map((c) => [c.account, c.handle])], (x) => { v.conv = x || null; }),
+      select(tr("files.sort"), v.sort, [["new", tr("files.sortNew")], ["old", tr("files.sortOld")], ["big", tr("files.sortBig")]], (x) => { v.sort = x; }),
+    ),
+    h("div", { class: "fv-search" }, ui.fvSearch),
+  );
+  ui.fvSelectBtn.textContent = tr(v.select ? "common.cancel" : "files.select");
+
+  // The files, by month (not when sorted by size): pictures and videos as tiles, then the other files as rows.
+  const shown = list.slice(0, v.limit);
+  fvShownKeys = new Set(shown.flatMap((x) => [`in:${x.m.file.f}`, `out:${x.m.id}`]));
+  const out = [];
+  const groups = [];
+  for (const x of shown) {
+    const key = v.sort === "big" ? "" : i18n.dayKey(x.m.time).slice(0, 7);
+    let g = groups[groups.length - 1];
+    if (!g || g.key !== key) groups.push((g = { key, time: x.m.time, items: [] }));
+    g.items.push(x);
+  }
+  const media = list.filter((x) => x.m.file.have && (fvViewable(x.m)));
+  for (const g of groups) {
+    const tiles = g.items.filter((x) => isMedia(x.m.file.mime));
+    const rows = g.items.filter((x) => !isMedia(x.m.file.mime));
+    if (g.key) {
+      const pickable = g.items.filter((x) => !v.freeing || x.m.file.have);
+      const allIn = v.select && pickable.length && pickable.every((x) => v.select.has(x.m.id));
+      out.push(h("div", { class: "fv-month" },
+        h("h2", { text: monthLabel(g.time) }),
+        v.select ? h("button", { class: "link", text: tr(allIn ? "files.unselectMonth" : "files.selectMonth"), onclick: () => {
+          for (const x of pickable) allIn ? v.select.delete(x.m.id) : v.select.add(x.m.id);
+          renderFiles();
+        } }) : null));
+    }
+    if (tiles.length) out.push(h("ul", { class: "fv-grid", role: "list", onkeydown: gridKeys }, ...tiles.map((x) => h("li", {}, fileTile(x, media)))));
+    if (rows.length) out.push(h("ul", { class: "fv-rows", role: "list" }, ...rows.map((x) => h("li", {}, fileRow(x)))));
+  }
+  if (list.length > shown.length) {
+    const more = h("button", { class: "link fv-more", text: tr("files.more"), onclick: () => { v.limit += FILES_PAGE; renderFiles(); } });
+    out.push(more);
+    nearScreen(more).then(() => { if (more.isConnected) more.click(); });
+  }
+  if (!list.length) out.push(h("p", { class: "hint fv-empty", text: tr(all.length ? "files.noneMatch" : "files.none") }));
+  put(ui.fvBody, ...out);
+  renderFilesFoot(list);
+}
+
+/** Whether a file can be opened in the viewer here (a picture within the limits is checked when it loads). */
+function fvViewable(m) {
+  return p.inlineImage(m.file.mime, m.file.size) || p.inlineVideo(m.file.mime, m.file.size);
+}
+
+function renderFilesFoot(list) {
+  const v = filesView;
+  if (v.select) {
+    const chosen = list.filter((x) => v.select.has(x.m.id));
+    const here = chosen.filter((x) => x.m.file.have);
+    const size = here.reduce((n, x) => n + (x.m.file.size ?? 0), 0);
+    put(ui.fvFoot,
+      h("div", { class: "fv-sum" },
+        h("strong", { text: tn("files.chosen", chosen.length) }),
+        here.length ? h("span", { text: ` · ${tr("files.onDevice", { size: bytes(size) })}` }) : null,
+        v.freeing ? h("span", { class: "hint fv-estimate" }) : null),
+      h("div", { class: "fv-acts" },
+        h("button", { class: "btn small", text: tr("common.cancel"), onclick: () => setSelecting(false) }),
+        h("button", { class: "btn small primary", disabled: !here.length, text: tr("files.free"), onclick: () => freeDialog(here.map((x) => x.m)) }),
+      ),
+    );
+    if (v.freeing) showEstimate(ui.fvFoot.querySelector(".fv-estimate"));
+    return;
+  }
+  const here = list.filter((x) => x.m.file.have);
+  const size = here.reduce((n, x) => n + (x.m.file.size ?? 0), 0);
+  put(ui.fvFoot,
+    h("div", { class: "fv-sum" }, h("span", { text: tn("files.count", list.length) }), h("span", { text: ` · ${tr("files.onDevice", { size: bytes(size) })}` })),
+    h("div", { class: "fv-acts" }, h("button", { class: "btn small", text: tr("files.freeSpace"), onclick: () => {
+      v.sort = "big";
+      v.freeing = true;
+      v.select = new Set();
+      v.limit = FILES_PAGE;
+      renderFiles();
+    } })),
+  );
+}
+
+async function showEstimate(el) {
+  if (!el || !navigator.storage?.estimate) return;
+  try {
+    const { usage, quota } = await navigator.storage.estimate();
+    if (Number.isFinite(usage) && Number.isFinite(quota) && el.isConnected) el.textContent = ` · ${tr("files.siteUses", { used: bytes(usage), quota: bytes(quota) })}`;
+  } catch {
+    // not known here
+  }
+}
+
+/** Who and where, for a file's second line: "Alice", "Du → Alice" (without the name when the view is one conversation's). */
+function fileWho(x) {
+  const name = splitHandle(messenger.contacts.get(x.conv)?.handle ?? "")[0] || tr("common.someoneName");
+  if (x.m.dir === "out") return filesView?.conv ? tr("common.you") : `${tr("common.you")} → ${name}`;
+  return name;
+}
+
+function fileDay(t) {
+  return i18n.daysAgo(t) === 0 ? clock(t) : dayLabel(t);
+}
+
+/** Toggle a file in the selection (only files here can be removed from the device). */
+function toggleChosen(x) {
+  const v = filesView;
+  if (v.freeing && !x.m.file.have) return;
+  v.select.has(x.m.id) ? v.select.delete(x.m.id) : v.select.add(x.m.id);
+  renderFiles();
+}
+
+/** Long press (touch) starts selecting with this file. */
+function longPress(el, x) {
+  let timer = 0;
+  let fired = false;
+  el.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "touch" || filesView.select) return;
+    fired = false;
+    timer = setTimeout(() => {
+      fired = true;
+      filesView.select = new Set([x.m.id]);
+      renderFiles();
+    }, 500);
+  });
+  for (const t of ["pointerup", "pointercancel", "pointerleave", "pointermove"]) el.addEventListener(t, (e) => {
+    if (t === "pointermove" && Math.abs(e.movementX) + Math.abs(e.movementY) < 4) return;
+    clearTimeout(timer);
+  });
+  el.addEventListener("click", (e) => {
+    if (fired) {
+      e.stopImmediatePropagation();
+      fired = false;
+    }
+  }, true);
+  el.addEventListener("contextmenu", (e) => { if (e.pointerType === "touch" || fired) e.preventDefault(); });
+}
+
+function fileTile(x, media) {
+  const { m } = x;
+  const f = m.file;
+  const v = filesView;
+  const st = fileStatus(m);
+  const chosen = v.select?.has(m.id);
+  const ext = (f.name.split(".").pop() || tr("msg.file")).slice(0, 4).toUpperCase();
+  const video = p.VIDEO_TYPES.includes(f.mime);
+  // The type is under the picture until it has loaded (and stays for a file that is not here); a video says it in a corner.
+  const inner = [h("span", { class: `fv-ext${video ? " corner" : ""}`, text: ext })];
+  if (f.have && p.inlineImage(f.mime, f.size)) inner.push(tileImage(f));
+  if (video) inner.push(h("span", { class: "fv-play" }, icon("play", 22)));
+  if (st.key) inner.push(h("span", { class: "fv-state", text: st.key === "freed" ? tr("files.tileFreed") : tr("files.tileMissing") }));
+  const key = transferKey(m);
+  const label = `${f.name}, ${bytes(f.size)}, ${fileWho(x)}, ${fileDay(m.time)}${st.text ? `, ${st.text}` : ""}`;
+  const btn = h("button", {
+    type: "button", class: `fv-tile${st.key ? " absent" : ""}${chosen ? " chosen" : ""}`, title: f.name, "aria-label": label,
+    "aria-pressed": v.select ? String(!!chosen) : null,
+    onclick: () => {
+      if (v.select) return toggleChosen(x);
+      if (f.have && fvViewable(m)) return showGallery(media, media.findIndex((y) => y.m.id === m.id));
+      fileActions(x);
+    },
+  }, ...inner, v.select ? h("span", { class: `fv-check${chosen ? " on" : ""}` }, chosen ? icon("check", 14) : null) : null);
+  longPress(btn, x);
+  return h("div", { class: "fv-tile-wrap" }, btn, key ? progressView(key, transferLabel(key), f.size) : null);
+}
+
+/** A tile's picture: put together from the stored parts when it nears the screen, at most a few at a time. */
+function tileImage(f) {
+  let img = fvImgs.get(f.f);
+  if (img) return img;
+  img = h("img", { alt: "", decoding: "async", draggable: "false" });
+  fvImgs.set(f.f, img);
+  (async () => {
+    const size = await messenger.imageSize(f.f);
+    if (!p.imageFits(size)) throw new Error("too big");
+    await nearScreen(img);
+    if (filesView === null) return;
+    const b = await fvSlot(() => messenger.fileBlob(f.f, f.mime));
+    if (!b || filesView === null) return;
+    img.src = URL.createObjectURL(b);
+  })().catch(() => {
+    img.remove(); // too large or unreadable: the type under it shows
+    fvImgs.delete(f.f);
+  });
+  return img;
+}
+
+/** Arrow keys move between the tiles of a grid. */
+function gridKeys(e) {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) return;
+  const tiles = [...ui.fvBody.querySelectorAll(".fv-tile")];
+  const i = tiles.indexOf(document.activeElement);
+  if (i < 0) return;
+  e.preventDefault();
+  const r = tiles[i].getBoundingClientRect();
+  let next = null;
+  if (e.key === "ArrowLeft") next = tiles[i - 1];
+  else if (e.key === "ArrowRight") next = tiles[i + 1];
+  else {
+    const down = e.key === "ArrowDown";
+    let best = Infinity;
+    for (const t of tiles) {
+      const q = t.getBoundingClientRect();
+      if (down ? q.top <= r.top + 4 : q.top >= r.top - 4) continue;
+      const d = Math.abs(q.top - r.top) * 4 + Math.abs(q.left - r.left);
+      if (d < best) [best, next] = [d, t];
+    }
+  }
+  next?.focus();
+}
+
+function fileRow(x) {
+  const { m } = x;
+  const f = m.file;
+  const v = filesView;
+  const st = fileStatus(m);
+  const chosen = v.select?.has(m.id);
+  const key = transferKey(m);
+  const note = fileNote(m);
+  const sub = [bytes(f.size), fileWho(x), fileDay(m.time)].join(" · ");
+  const ext = (f.name.split(".").pop() || tr("msg.file")).slice(0, 4).toUpperCase();
+  const row = h(
+    "div",
+    { class: `fv-row${st.key ? " absent" : ""}${chosen ? " chosen" : ""}` },
+    v.select
+      ? h("button", { type: "button", class: `fv-check row${chosen ? " on" : ""}`, role: "checkbox", "aria-checked": String(!!chosen), "aria-label": f.name, disabled: v.freeing && !f.have, onclick: () => toggleChosen(x) }, chosen ? icon("check", 14) : null)
+      : null,
+    h("div", { class: "ico", text: ext }),
+    h(
+      "div",
+      { class: "fi" },
+      h("div", { class: "fn", dir: "auto", text: f.name }),
+      h("div", { class: "fs" }, h("span", { text: sub }), st.text ? h("span", { class: `fv-status ${st.key}`, text: ` · ${st.text}` }) : null, note ? h("span", { class: "fv-status pending", text: ` · ${note}` }) : null),
+      key ? progressView(key, transferLabel(key), f.size) : null,
+    ),
+    v.select ? null : rowAction(x),
+    v.select ? null : h("button", { class: "icon-btn fv-more-btn", "aria-label": tr("files.actions", { name: f.name }), title: tr("conv.more"), onclick: () => fileActions(x) }, icon("more")),
+  );
+  if (v.select) row.addEventListener("click", (e) => { if (!e.target.closest("button")) toggleChosen(x); });
+  longPress(row, x);
+  return row;
+}
+
+/** The one action a row shows: save, take, fetch again. */
+function rowAction(x) {
+  const { m } = x;
+  const f = m.file;
+  if (f.have) return h("button", { class: "btn small", text: tr("common.save"), onclick: (e) => saveFile(f, e.currentTarget) });
+  if (transferKey(m)) return null;
+  return h("button", { class: "btn small", text: fetchLabel(m), onclick: (e) => fetchAgain(x, e.currentTarget) });
+}
+
+function fetchLabel(m) {
+  if (m.dir === "in" && m.file.ask) return tr("msg.take");
+  if (m.file.freed !== undefined) return tr("files.fetchAgain");
+  return tr("msg.fetchOwn");
+}
+
+/** Fetch a file that is not here: from the sending device (`ask`), or from the own devices. */
+async function fetchAgain(x, btn) {
+  const { m, conv } = x;
+  if (btn) btn.disabled = true;
+  try {
+    if (m.dir === "in" && m.file.ask && messenger.contacts.get(conv)?.state === "accepted") {
+      if (await messenger.acceptFile(conv, m.file.f)) toast(tr("msg.taking"));
+      else toast(tr("msg.senderAway"));
+    } else {
+      const n = await messenger.fetchFromOwnDevices(conv, m.file.f);
+      toast(tr(n ? "msg.asking" : "msg.noOwn"));
+    }
+  } catch (x2) {
+    toast(say(x2));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/** What can be done with one file. */
+function fileActions(x) {
+  const { m, conv } = x;
+  const f = m.file;
+  const st = fileStatus(m);
+  const note = fileNote(m);
+  const go = (fn) => () => { d.close(); fn(); };
+  const media = f.have && fvViewable(m);
+  const d = dialog(
+    h("h2", { class: "fv-dname", dir: "auto", text: f.name }),
+    h("p", { class: "hint" }, [bytes(f.size), fileWho({ m, conv }), i18n.dateTime(m.time)].join(" · "), st.text ? ` · ${st.text}` : "", note ? ` · ${note}` : ""),
+    h(
+      "div",
+      { class: "fv-menu" },
+      media ? h("button", { class: "btn", text: tr("files.open"), onclick: go(() => showGallery([x], 0)) }) : null,
+      f.have ? h("button", { class: "btn", text: tr("common.save"), onclick: (e) => saveFile(f, e.currentTarget) }) : null,
+      !f.have ? h("button", { class: "btn", text: fetchLabel(m), onclick: go(() => fetchAgain(x)) }) : null,
+      h("button", { class: "btn", text: tr("files.showInConversation"), onclick: go(() => { jumpTo = m.id; openConversation(conv); }) }),
+      f.have ? h("button", { class: "btn", text: tr("files.free"), onclick: go(() => freeDialog([m])) }) : null,
+      h("button", { class: "btn danger", text: tr("files.delete"), onclick: go(() => messageMenu(m)) }),
+    ),
+    h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
+  );
+}
+
+/** Confirm removing files from this device only, with a stronger word for files this device still has to serve. */
+function freeDialog(ms) {
+  const size = ms.reduce((n, m) => n + (m.file.size ?? 0), 0);
+  const serving = ms.filter((m) => Messenger.serves(m));
+  const d = dialog(
+    h("h2", { text: tr("files.freeTitle") }),
+    h("p", { text: tn("files.freeWhat", ms.length, { size: bytes(size) }) }),
+    h("p", { class: "hint", text: tr("files.freeHint") }),
+    serving.length ? h("p", { class: "warn-note", text: tn("files.freeServing", serving.length) }) : null,
+    h(
+      "div",
+      { class: "actions" },
+      h("button", { class: "btn", text: tr("common.cancel"), onclick: () => d.close() }),
+      h("button", { class: "btn primary", text: tr("files.free"), onclick: async (e) => {
+        const done = busy(e.currentTarget, tr("files.freeing"));
+        try {
+          const n = await messenger.freeFiles(ms.map((m) => ({ conv: m.conv, id: m.id })));
+          for (const m of ms) {
+            const img = fvImgs.get(m.file.f);
+            if (img?.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
+            fvImgs.delete(m.file.f);
+          }
+          d.close();
+          toast(tr("files.freed", { size: bytes(n) }));
+          if (filesView?.select) setSelecting(false);
+          else renderFiles();
+        } catch (x) {
+          done();
+          toast(say(x));
+        }
+      } }),
+    ),
+  );
+}
+
+/**
+ * The pictures and videos of the view, one at a time, with previous and next (buttons, arrow keys, a swipe).
+ * Pictures are put together from their stored parts only when shown, within the same limits as in the thread.
+ */
+function showGallery(items, start) {
+  if (start < 0 || !items.length) return;
+  let i = start;
+  let url = null;
+  const stage = h("div", { class: "fv-stage" });
+  const cap = h("div", { class: "fv-cap" });
+  const prev = h("button", { class: "fv-nav prev", "aria-label": tr("files.prev"), title: tr("files.prev"), onclick: (e) => { e.stopPropagation(); step(-1); } }, icon("back"));
+  const next = h("button", { class: "fv-nav next", "aria-label": tr("files.next"), title: tr("files.next"), onclick: (e) => { e.stopPropagation(); step(1); } }, icon("back"));
+  const d = dialog(
+    h("button", { class: "close", "aria-label": tr("common.close"), title: tr("common.close"), onclick: () => d.close() }, icon("close")),
+    prev, stage, next, cap,
+  );
+  d.classList.add("viewer", "gallery");
+  d.addEventListener("click", (e) => { if (!e.target.closest("video, .fv-cap button")) d.close(); });
+  d.addEventListener("close", () => { if (url) URL.revokeObjectURL(url); });
+  d.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") step(-1);
+    if (e.key === "ArrowRight") step(1);
+  });
+  let x0 = null;
+  d.addEventListener("pointerdown", (e) => { x0 = e.clientX; });
+  d.addEventListener("pointerup", (e) => {
+    if (x0 === null) return;
+    const dx = e.clientX - x0;
+    x0 = null;
+    if (Math.abs(dx) > 60) {
+      step(dx < 0 ? 1 : -1);
+      d.addEventListener("click", (c) => c.stopImmediatePropagation(), { capture: true, once: true });
+    }
+  });
+  const step = (n) => {
+    const j = i + n;
+    if (j < 0 || j >= items.length) return;
+    i = j;
+    show();
+  };
+  let seq = 0;
+  const show = async () => {
+    const my = ++seq;
+    const x = items[i];
+    const f = x.m.file;
+    prev.disabled = i === 0;
+    next.disabled = i === items.length - 1;
+    put(cap,
+      h("span", { class: "fn", dir: "auto", text: f.name }),
+      h("span", { text: ` · ${fileWho(x)} · ${i18n.dateTime(x.m.time)}` }),
+      items.length > 1 ? h("span", { class: "fv-pos", text: ` · ${i18n.num(i + 1)}/${i18n.num(items.length)}` }) : null,
+      h("button", { class: "btn small", text: tr("common.save"), onclick: (e) => { e.stopPropagation(); saveFile(f, e.currentTarget); } }),
+    );
+    put(stage, h("span", { class: "spinner" }));
+    try {
+      if (p.inlineImage(f.mime, f.size) && !p.imageFits(await messenger.imageSize(f.f))) throw new Error("msg.cannotShow");
+      const b = await messenger.fileBlob(f.f, f.mime);
+      if (my !== seq || !d.open) return;
+      if (!b) throw new ApiError(404, "no_file");
+      if (url) URL.revokeObjectURL(url);
+      url = URL.createObjectURL(b);
+      put(stage, f.mime.startsWith("video/")
+        ? h("video", { src: url, controls: true, autoplay: true, playsinline: true })
+        : h("img", { src: url, alt: f.name }));
+    } catch (x2) {
+      if (my === seq) put(stage, h("p", { class: "fv-cannot", text: x2?.message === "msg.cannotShow" ? tr("msg.cannotShow") : say(x2) }));
+    }
+  };
+  show();
+}
+
 // ── dialogs ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 async function showSafety(c) {
@@ -2800,6 +3477,7 @@ function showContactMenu(c) {
       "div",
       { style: "display:flex;flex-direction:column;gap:8px" },
       c.state === "accepted" ? h("button", { class: "btn", text: tr("contact.showSafety"), onclick: () => { d.close(); showSafety(c); } }) : null,
+      h("button", { class: "btn", text: tr("files.ofConversation"), onclick: () => { d.close(); openFiles(c.account, c.account); } }),
       retentionPicker(c),
       c.state !== "blocked" ? h("button", { class: "btn danger", text: tr("conv.block"), onclick: () => messenger.setState(c.account, "blocked").then(() => { d.close(); openConversation(null); }) }) : null,
       h("button", { class: "btn danger", text: tr("contact.delete"), onclick: () => messenger.setState(c.account, "declined").then(() => { d.close(); openConversation(null); }) }),
