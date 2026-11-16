@@ -43,6 +43,8 @@ Open, in order of priority:
       are saved part by part where the browser allows it (`showSaveFilePicker`) and not shown inline (`DESIGN.md` §8.1)
 - [x] Files over 50 MiB wait for the recipient: nothing is pushed or queued, and the recipient takes the file on the
       device of their choice, live from the sending device (`ask`, `DESIGN.md` §9)
+- [x] Code in messages: inline code and fenced blocks with colours for common languages, nothing else of Markdown
+      (`DESIGN.md` §6.10)
 - [ ] Signed, reproducible client release with published hashes; installable copy not served by the server
 - [ ] History from contacts after every device is lost: a contact sends its copy of a conversation on request,
       shown as the contact's copy (`DESIGN.md` §7.1, option 3)

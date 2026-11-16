@@ -398,6 +398,52 @@ decrypted for a search is held in memory per conversation while the field has a 
 conversation when its messages change, and is forgotten when the field is emptied. Nothing about a search is
 stored or sent.
 
+### 6.10 Code in messages
+
+A `text` message can hold code the way Markdown writes it, and nothing else of Markdown: `` `inline code` `` and
+fenced blocks,
+
+````
+```rust
+fn main() {}
+```
+````
+
+Nothing in the protocol changes: the text is sent as written and only the recipient's client decides how to show it.
+An older client shows the backticks as they are (§12), and search, editing and notifications see the plain text.
+
+- **What is understood** (`client/js/code.js`, a subset of CommonMark):
+  - *Inline code*: a run of backticks up to the next run of exactly as many on the same line; one space inside each
+    end is dropped, so ``` `` a`b `` ``` shows `` a`b ``. A run with no partner stays text, so `` it`s `` is unchanged.
+  - *Blocks*: a line of three or more backticks (at most three spaces before) opens a block. The first word after the
+    backticks names the language. A line of at least as many backticks closes the block. As in many chat apps, a run
+    at the end of the last code line also closes it (`` }``` `` closes and keeps `}`). An unclosed block runs to the end
+    of the message. `` ```x``` `` on one line is inline code, as in CommonMark. Blank lines next to a block are not
+    shown: the block has its own margins.
+  - Nothing else: no emphasis, headings, lists, quotes, links, images or HTML. Without any of those there is nothing
+    to strike by accident (`2*3*4`, `__init__.py`), and no formatting that could imitate the app's own notes (§6.6)
+    or show one link while leading to another.
+- **Showing it.** `parse` cuts the text into text, inline code and blocks. `highlight` cuts a block's code into
+  `[class, text]` tokens. app.js makes elements from them with `h()`: text only ever goes into text nodes, and the
+  only classes are the fixed token names (`code.CLASSES`, styled as `tk-*` in style.css). The CSP and `h()`'s checks
+  (no markup properties, no foreign URLs) apply unchanged. A block shows its language and a *Kopiera* button that
+  copies the code as written. It reads left to right (`dir="ltr"`) whatever the text around it, and scrolls
+  sideways rather than wrapping. A message without backticks is drawn exactly as before.
+- **Colours** only when the sender names a known language: JavaScript, TypeScript, JSON, Python, Rust, Go, C, C++,
+  Java, Shell, SQL, CSS, HTML/XML, YAML, TOML and diff (with common aliases such as `js`, `py`, `sh`). The language is
+  never guessed. Another name is shown as the block's label, uncoloured. The label is only taken if it is a plausible
+  word (letters, digits and `_+#.-`, at most 24 characters), and it is shown as text. Each colour has at least 4.5:1
+  contrast against the block's background in the light and dark themes.
+- **Hostile text.** The text comes from others, so every scan is linear in its length: there are no regular
+  expressions that can backtrack over the input, inline code is matched with one pass from each end, and the
+  highlighter only moves forward. A block over 16 KiB is not coloured; messages are limited to 8000 characters
+  anyway. Tests feed it pathological input (thousands of backticks, unclosed comments and strings, endless fences)
+  and random text, and check that the tokens join to exactly the source and that only the fixed classes come out
+  (`tests/code.test.mjs`).
+- **Composer.** Enter sends, except inside an open block (an unclosed ```` ``` ```` fence before the cursor): there it starts a new line,
+  so a block can be typed as it reads. Ctrl+Enter (⌘+Enter) sends anyway. Enter while an input method is composing
+  text no longer sends.
+
 ## 7. Multi-device history
 
 - Every message is also encrypted to the sender's own other devices, with `kind` unchanged and `to` set to that
@@ -723,7 +769,7 @@ checks `kind` against the kinds it knows (`KINDS` in `protocol.js`) before anyth
 message whose kind it does not know. Nothing is shown, stored or answered, and nothing breaks. So a new kind must
 never be needed for an old one to work, and what a new kind adds is lost on devices that do not know it.
 
-What clients from before emoji, reactions and the shared GIF collection get from newer ones:
+What clients from before emoji, reactions, the shared GIF collection and code formatting get from newer ones:
 
 | From a newer device | On an older device |
 |---|---|
@@ -739,6 +785,7 @@ What clients from before emoji, reactions and the shared GIF collection get from
 | `ephemeral` | dropped, never shown or stored, and not acknowledged with a receipt: a disappearing message is lost on an older device rather than kept for good |
 | a `file` message for a file over 100 MiB, and its chunks | dropped: clients before 1 GiB files took at most 100 MiB and 4096 chunks per file. The file is not shown there, also not after a later update; the sender cannot tell. Such clients last only until the page is reloaded (the server's `build` changes and an open page offers a reload) |
 | a `file` message with `ask` (over 50 MiB) | shown as a file not received yet, with only *Hämta från mina enheter*: the older device cannot take it. Once updated, it can |
+| `` `inline code` `` and ```` ``` ```` blocks in a text (§6.10) | the text with its backticks, as written; nothing is lost |
 | `gifs` to an own older device | dropped; that device has no collection until it is updated, and then gets only GIFs saved after that. The bytes are pulled with `file-req` (§9.2), so no chunks are pushed to it; a `file-req` for `gif:…` sent to an older device finds no file message and is ignored |
 
 An older device sends nothing new, so a newer device has nothing to handle from it.

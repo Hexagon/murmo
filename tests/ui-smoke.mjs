@@ -107,6 +107,36 @@ try {
   await a.waitForSelector(".composer textarea", { timeout: 20000 });
   await a.type(".composer textarea", "Hej! Här är en bild:");
   await a.keyboard.press("Enter");
+  // Code (DESIGN.md §6.10): inside an open ``` block Enter makes a new line; after the closing fence it sends.
+  const value = () => a.$eval(".composer textarea", (t) => t.value);
+  await a.type(".composer textarea", "Kör `npm test` först:");
+  await a.keyboard.down("Shift");
+  await a.keyboard.press("Enter");
+  await a.keyboard.up("Shift");
+  await a.type(".composer textarea", "```js");
+  await a.keyboard.press("Enter");
+  await a.type(".composer textarea", 'const x = "<b>hej</b>"; // ok');
+  await a.keyboard.press("Enter");
+  if ((await value()) !== 'Kör `npm test` först:\n```js\nconst x = "<b>hej</b>"; // ok\n') throw new Error(`Enter inside a code block: ${JSON.stringify(await value())}`);
+  await a.type(".composer textarea", "```");
+  await a.keyboard.press("Enter");
+  if (await value()) throw new Error("Enter after the closing fence did not send");
+  await b.waitForSelector(".msg .codeblock", { timeout: 20000 });
+  const shown = await b.evaluate(() => {
+    const m = [...document.querySelectorAll(".msg")].find((x) => x.querySelector(".codeblock"));
+    return {
+      inline: m.querySelector("code.ic")?.textContent,
+      lang: m.querySelector(".cb-lang")?.textContent,
+      code: m.querySelector(".codeblock pre").textContent,
+      kw: m.querySelector(".tk-k")?.textContent,
+      comment: m.querySelector(".tk-c")?.textContent,
+      bold: m.querySelector("b") !== null,
+    };
+  });
+  if (shown.inline !== "npm test" || shown.lang !== "JavaScript" || shown.code !== 'const x = "<b>hej</b>"; // ok' || shown.kw !== "const" || shown.comment !== "// ok" || shown.bold) {
+    throw new Error(`code shown wrongly: ${JSON.stringify(shown)}`);
+  }
+  await b.screenshot({ path: `${shots}/b-5c-code.png` });
   const [chooser] = await Promise.all([a.waitForFileChooser(), a.click(".composer .icon-btn")]);
   await chooser.accept([new URL("../client/icon.svg", import.meta.url).pathname]); // not an inline type: shown as a file card
   await sleep(1500);

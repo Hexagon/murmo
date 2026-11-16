@@ -43,6 +43,9 @@ that log rather than in trust in the server. The server is one Rust binary that 
   own, kept encrypted and shared between your devices: save a GIF someone sent, pick one from a file or, if the
   operator set a GIPHY key, search GIPHY, and send it with a tap. GIPHY search runs directly from the browser and the
   app says so: GIPHY sees your address and what you search for, protected by HTTPS only.
+- **Code.** `` `inline code` `` and fenced ```` ``` ```` blocks, coloured for common languages when the sender names
+  one (`` ```rust ``), with a copy button; nothing else of Markdown, so no links or HTML can hide in a message. Enter
+  makes a new line inside an open block (docs/DESIGN.md §6.10).
 - **Notifications** in the browser and the installed app (PWA), on by default once the browser's permission is given (and a setting per device): an empty Web Push wakes the browser,
   the notification says only "Nytt meddelande", and being woken does not make the device look connected.
 - **Encrypted local storage** unlocked by the rootcard password: a secret in the rootcard vault unlocks each device's
