@@ -1,0 +1,54 @@
+# Hosting Murmo
+
+How to run your own Murmo server. Build and run it as described in the [README](../README.md#run-your-own-server); put a
+TLS reverse proxy (Caddy, nginx, …) in front of it and set `MURMO_ORIGIN` to the public `https://` address.
+
+## Configuration
+
+Set in the environment:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MURMO_ORIGIN` | `http://127.0.0.1:8080` | public origin; must be `https://` except on loopback |
+| `MURMO_OLD_ORIGINS` | empty | earlier public origins that still reach this server after a move of domain (comma-separated), see below |
+| `MURMO_BIND` | `127.0.0.1:8080` | listen address (put a TLS reverse proxy in front) |
+| `MURMO_DB` | `murmo.sqlite` | SQLite database |
+| `MURMO_HOST_KEY_FILE` | `murmo-host.key` | rootcard host key, created on first start (back it up, keep it secret) |
+| `MURMO_CLIENT_DIR` | `client` | static client to serve (empty: none) |
+| `MURMO_REALM` | `global` | rootcard realm for identities registered here |
+| `MURMO_REMOTE_HOMES` | `https://rootcard.org` | other homes whose identities may log in (comma-separated origins, `*` for any https host, empty for none) |
+| `MURMO_REALMS` | `global` | realms accepted from other homes |
+| `MURMO_TRUST_PROXY` | `0` | proxies whose `X-Forwarded-For` is believed: `0` none, `1` loopback and private networks, or a list of addresses and CIDR ranges (`10.1.2.3,fd00::/8`) |
+| `MURMO_FILE_QUEUE_MB` | `150` | encrypted file chunks kept per device that is away (`0`: files only go live) |
+| `MURMO_FILE_QUEUE_TOTAL_MB` | `2048` | file chunks kept in total |
+| `MURMO_FILE_QUEUE_SENDER_MB` | `50` | file chunks one account may queue for one device of another account |
+| `MURMO_FILE_QUEUE_ACCOUNT_MB` | `300` | file chunks one account may queue in total |
+| `MURMO_RELAY_GRANTED_MB` | `1024` | MiB per minute one device may stream to devices that asked it for a file (`0`: no grants, everything on the live budgets) |
+| `MURMO_RELAY_STORE_MB` | `128` | MiB per minute one account may put into the file queue |
+| `MURMO_PUSH_HOSTS` | the push services of Chrome, Firefox, Safari, Edge | push-service hosts accepted for notifications (`*.` for subdomains, empty: no push) |
+| `MURMO_PUSH_CONTACT` | `MURMO_ORIGIN` | contact sent to push services (`mailto:` or `https:` URL) |
+| `MURMO_GIPHY_KEY` | empty | GIPHY API key; lets users search GIPHY to fill their GIF collection, directly from the browser (empty: no search). A beta key allows 100 searches an hour for the whole server |
+| `MURMO_GIPHY_RATING` | `pg-13` | GIPHY content rating for searches (`g`, `pg`, `pg-13`, `r`) |
+
+Murmo was called mesg before. The old variable names (`MESG_…`) still work when the new ones are not set, and an
+existing `mesg.sqlite` / `mesg-host.key` is used when the new default files do not exist yet.
+
+The version shown in the app ("Säkerhet och integritet") is the commit the server was built from: `MURMO_COMMIT` or
+`GITHUB_SHA` at build time, otherwise `git rev-parse HEAD`.
+
+The `MURMO_ORIGIN` goes into users' signed rootcard logs as their home address: choose it once.
+
+## Moving to a new domain
+
+The page's origin must be one the server knows: proofs and the WebSocket are signed for it, and the browser keeps
+each origin's data (devices, conversations) apart. To move, keep the old domain pointing at the same server and set:
+
+```sh
+MURMO_ORIGIN=https://new.example          # new identities get their home here
+MURMO_OLD_ORIGINS=https://old.example     # still answered: old devices keep working, old identities keep their home
+```
+
+Identities registered under the old domain keep `https://old.example/id` as their home for good (it is in their
+signed log), so the old domain must keep reaching the server, at least `/id` and `/.well-known/rootcard`. Each user
+moves their conversations by logging in on the new domain and approving that device on a device on the old domain:
+the history is handed over as for any new device. Identities from other homes (rootcard.org) are not affected.

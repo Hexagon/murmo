@@ -583,7 +583,7 @@ fn parse_binary(b: &[u8]) -> Result<RelayReq<'_>, ApiError> {
         return Err(bad());
     }
     let mut to: Vec<String> = Vec::with_capacity(k);
-    for id in ids.chunks_exact(16) {
+    for id in ids.as_chunks::<16>().0 {
         let d = base64url_encode(id);
         if !to.contains(&d) {
             to.push(d);
