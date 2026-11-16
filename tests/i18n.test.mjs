@@ -41,7 +41,7 @@ test("every key the client uses exists", () => {
   for (const m of app.matchAll(/\[\s*[\d *]+,\s*"(ret\.\w+)"\]/g)) used.add(m[1]);
   for (const m of app.matchAll(/"(theme\.\w+)"/g)) used.add(m[1]);
   for (const m of app.matchAll(/"(about\.\d)"/g)) used.add(m[1]);
-  for (const m of app.matchAll(/\["(help\.\w+)", (\d+)\]/g)) for (let i = 1; i <= Number(m[2]); i++) used.add(`${m[1]}.${i}`);
+  for (const m of app.matchAll(/\["((?:help|terms)\.\w+)", (\d+)\]/g)) for (let i = 1; i <= Number(m[2]); i++) used.add(`${m[1]}.${i}`);
   for (const c of emoji.CATEGORIES) used.add(`emoji.${c.id}`);
   const page = read("index.html");
   for (const m of page.matchAll(/data-i18n="([\w.]+)"/g)) used.add(m[1]);

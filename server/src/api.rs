@@ -106,6 +106,8 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
         .with("realms", Value::Array(realms))
         .with("homes", homes)
         .with("file_queue", app.cfg.file_queue > 0)
+        .with("beta", app.cfg.beta)
+        .with("demo", app.cfg.demo)
         .with("version", env!("CARGO_PKG_VERSION"))
         .with("source", env!("CARGO_PKG_REPOSITORY"));
     if !env!("MURMO_COMMIT").is_empty() {
@@ -125,6 +127,24 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
                 .into(),
         );
     }
+    if app.cfg.federation != crate::federation::Policy::Off {
+        m.insert(
+            "federation",
+            Map::new().with("key", app.fed.public.as_str()).into(),
+        );
+    }
+    // What this server takes per minute from each account for each of its devices, live and into the file queue:
+    // other servers keep their users' transfers within it (federation).
+    m.insert(
+        "relay",
+        Map::new()
+            .with(
+                "peer",
+                i64::from(app.limits.budget(crate::ws::RELAY_PEER_BYTES)),
+            )
+            .with("store", i64::from(app.limits.budget(app.cfg.relay_store)))
+            .into(),
+    );
     if app.push.enabled() {
         m.insert("push_key", app.push.public.as_str().into());
     }
@@ -221,6 +241,11 @@ pub async fn lookup(
             Some((h, d)) => (h.to_string(), Some(d.to_ascii_lowercase())),
             None => (raw, None),
         };
+        // `@` this server's own host is the full address a user copies (federation): any identity that uses it.
+        let host = host.filter(|d| {
+            !app.origins()
+                .any(|o| o.split("://").nth(1).is_some_and(|x| x == d))
+        });
         let h =
             rootcard::id::parse_handle(&handle).map_err(|_| ApiError::new(400, "bad_handle"))?;
         let mut found: Vec<(String, String, String)> = Vec::new(); // account, home, username
@@ -273,6 +298,28 @@ pub async fn lookup(
             _ => Err(ApiError::new(409, "ambiguous_handle")),
         }
     })())
+}
+
+/// `GET /api/v1/accounts/{account}/log`: the identity's rootcard log as this server has it (its own, or the newest it
+/// fetched from another home). Other Murmo servers pass it to their clients, which verify it (it is self-certifying)
+/// before they trust the device list it anchors (federation, DESIGN.md §14).
+pub async fn get_log(
+    State(app): State<Arc<App>>,
+    crate::ClientAddr(addr): crate::ClientAddr,
+    Path(account): Path<String>,
+) -> Response {
+    let run = async {
+        app.limits.by_addr("log", addr, 240, 60)?;
+        check_account(&account)?;
+        remote::refresh_if_remote(&app, &account, 60).await;
+        Ok(json(
+            200,
+            &Map::new()
+                .with("events", Value::Array(app.events(&account)?))
+                .into(),
+        ))
+    };
+    respond(run.await)
 }
 
 /// `POST /api/v1/accounts/{account}/connect` with `{ home }`: make an identity from another allowed home known to this

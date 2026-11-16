@@ -5,6 +5,7 @@
 // that is being set up instead of failing at once.
 
 import * as p from "./protocol.js";
+import { ApiError } from "./api.js";
 
 const HEARTBEAT = 25_000;
 const PONG_WAIT = 8_000;
@@ -23,6 +24,7 @@ const RELAY_DEFAULT = {
   peer: 96 * 1024 * 1024,
   granted: 0,
   store: 0,
+  remote: 0,
   frames: 3000,
   slowFrames: 3000,
   grant: 0,
@@ -215,6 +217,7 @@ export class Socket extends EventTarget {
         this.dispatchEvent(new CustomEvent(f.t, { detail: f }));
         return;
       case "sent":
+      case "remote":
       case "presence":
       case "seen":
       case "prekey-ok":
@@ -223,6 +226,15 @@ export class Socket extends EventTarget {
         this.settle(f.id ?? f.ref, f);
         return;
       case "error":
+        if (f.error === "replaced") {
+          // This device connected again elsewhere (another tab or window of this browser): that one has the
+          // connection now. Connecting again here would push it out in turn, so this page stops until it is reloaded.
+          this.closed = true;
+          clearTimeout(this.retry);
+          this.dispatchEvent(new CustomEvent("replaced"));
+          this.dropped(this.ws);
+          return;
+        }
         if (f.error === "rate_limited" && Number.isSafeInteger(f.retry) && f.retry > 0) {
           this.relayPause = Math.max(this.relayPause, Date.now() + Math.min(f.retry, 3600) * 1000);
         }
@@ -280,6 +292,19 @@ export class Socket extends EventTarget {
     });
   }
 
+  /**
+   * Ask this server to ask another Murmo server (federation): `remote-lookup` or `remote-devices`. Only over this
+   * authenticated connection, so the server answers for its own users only. Returns the other server's answer.
+   */
+  async remote(frame) {
+    const ref = p.b64(p.random(12));
+    try {
+      return (await this.call({ ...frame, ref }, ref)).value;
+    } catch (e) {
+      throw new ApiError(502, e?.message ?? "server_error");
+    }
+  }
+
   async sendEnvelopes(to) {
     for (let i = 0; i < to.length; i += 24) {
       const id = p.b64(p.random(12));
@@ -331,12 +356,12 @@ export class Socket extends EventTarget {
   }
 
   /** `store`: the server keeps the chunk for devices that are not connected. Misses come as "relay-missed". */
-  relay(to, data, { store = false, ref, ttl = 0, stored } = {}) {
+  relay(to, data, { store = false, ref, ttl = 0, stored, remote } = {}) {
     const frame = { t: "relay", to, data };
     if (store) frame.store = true;
     if (store && ttl > 0) frame.ttl = ttl; // queued chunks kept no longer (disappearing pictures)
     if (ref) frame.ref = ref;
-    const routes = this.routes(to, data.length, stored);
+    const routes = this.routes(to, data.length, stored, remote);
     this.send(frame);
     this.logRelay(routes, data.length);
   }
@@ -348,7 +373,11 @@ export class Socket extends EventTarget {
    * asked before each frame; it returns false when it said to stop. `ref` is 8 random bytes as base64url, so that
    * it fits a binary frame.
    */
-  async sendChunk(to, chunk, { store = false, ref, ttl = 0, stored = new Set(), stop = () => false } = {}) {
+  /**
+   * `remote`: devices on other servers (federation), each with what its server takes per minute from this account
+   * for this transfer. They count against this server's budget for other servers and against theirs, the smaller.
+   */
+  async sendChunk(to, chunk, { store = false, ref, ttl = 0, stored = new Set(), remote = new Map(), stop = () => false } = {}) {
     to = [...new Set(to)];
     const frames = [];
     const payload = this.relayLimits.binary ? p.chunkPayload(chunk) : null;
@@ -361,14 +390,14 @@ export class Socket extends EventTarget {
       frames.push({ to: text, data: packed, len: packed.length });
     }
     for (const fr of frames) {
-      await this.pace(fr.to, fr.len, stored);
+      await this.pace(fr.to, fr.len, stored, remote);
       await this.drain();
       if (stop()) return false;
       if (typeof fr.data === "string") {
-        this.relay(fr.to, fr.data, { store, ref, ttl, stored });
+        this.relay(fr.to, fr.data, { store, ref, ttl, stored, remote });
       } else {
         if (!this.ready) throw new Error("offline");
-        const routes = this.routes(fr.to, fr.len, stored);
+        const routes = this.routes(fr.to, fr.len, stored, remote);
         this.ws.send(fr.data);
         this.logRelay(routes, fr.len);
       }
@@ -380,12 +409,13 @@ export class Socket extends EventTarget {
    * How the server counts a chunk of `len` bytes to each of `to`: devices that granted this one at least `len` more,
    * devices it is queued for (`stored`, on a server with a queue budget), and the rest, which go live.
    */
-  routes(to, len, stored = new Set()) {
-    const r = { live: [], granted: [], stored: 0 };
+  routes(to, len, stored = new Set(), remote = new Map()) {
+    const r = { live: [], granted: [], stored: 0, remote: [] };
     const now = Date.now();
     for (const d of new Set(to)) {
       const g = this.grants.get(d);
-      if (stored.has(d) && this.relayLimits.store > 0) r.stored++;
+      if (remote.has(d)) r.remote.push(d);
+      else if (stored.has(d) && this.relayLimits.store > 0) r.stored++;
       else if (this.relayLimits.granted > 0 && g && g.until > now && g.bytes >= len) r.granted.push(d);
       else r.live.push(d);
     }
@@ -407,7 +437,7 @@ export class Socket extends EventTarget {
    * (sliding, so the server's fixed windows are never exceeded either), with a margin, and no earlier than a
    * "rate_limited" said. Each route has its own budgets (see RELAY_DEFAULT).
    */
-  async pace(to, len, stored = new Set()) {
+  async pace(to, len, stored = new Set(), remote = new Map()) {
     const L = this.relayLimits;
     const m = RELAY_MARGIN;
     for (;;) {
@@ -416,24 +446,32 @@ export class Socket extends EventTarget {
       while (this.relayLog.length && this.relayLog[0].at <= since) this.relayLog.shift();
       let wait = this.relayPause - now;
       if (wait <= 0) {
-        const next = this.routes(to, len, stored);
+        const next = this.routes(to, len, stored, remote);
         let live = 0;
         let granted = 0;
         let store = 0;
+        let far = 0;
         let slow = 0;
         const per = new Map(next.live.map((d) => [d, 0]));
+        const perFar = new Map(next.remote.map((d) => [d, 0]));
         for (const e of [...this.relayLog, { ...next, len }]) {
           live += e.len * e.live.length;
           granted += e.len * e.granted.length;
           store += e.len * e.stored;
-          if (e.live.length || e.stored) slow++;
+          far += e.len * (e.remote?.length ?? 0);
+          if (e.live.length || e.stored || e.remote?.length) slow++;
           for (const d of e.live) if (per.has(d)) per.set(d, per.get(d) + e.len);
+          for (const d of e.remote ?? []) if (perFar.has(d)) perFar.set(d, perFar.get(d) + e.len);
         }
         const over =
           live > L.bytes * m ||
           [...per.values()].some((n) => n > L.peer * m) ||
           granted > L.granted * m ||
           store > L.store * m ||
+          // Chunks to other servers: this server's budget for them (none announced: an older server, which has no
+          // remote route), and each other server's own limit for this transfer, whichever is smaller.
+          (L.remote > 0 && far > L.remote * m) ||
+          [...perFar].some(([d, n]) => n > Math.min(L.remote || Infinity, remote.get(d) ?? L.peer) * m) ||
           this.relayLog.length + 1 > L.frames * m ||
           slow > L.slowFrames * m;
         // Nothing left to wait for: one frame larger than the whole budget is sent anyway (and refused).
@@ -484,6 +522,7 @@ export function relayLimits(r) {
     peer: r.peer,
     granted: opt(r.granted, 0),
     store: opt(r.store, 0),
+    remote: opt(r.remote, 0),
     frames: ok(r.frames) ? r.frames : RELAY_DEFAULT.frames,
     slowFrames: ok(r.slow_frames) ? r.slow_frames : RELAY_DEFAULT.slowFrames,
     grant: opt(r.grant, 0),

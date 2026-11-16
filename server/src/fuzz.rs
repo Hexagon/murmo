@@ -97,6 +97,10 @@ fn harness() -> &'static Harness {
             push_hosts: Vec::new(),
             giphy_key: String::new(),
             giphy_rating: "pg-13".into(),
+            beta: true,
+            demo: false,
+            federation: crate::federation::Policy::Off,
+            federation_block: Vec::new(),
             push_contact: String::new(),
         };
         let db = crate::db::Db::open(":memory:").expect("database");

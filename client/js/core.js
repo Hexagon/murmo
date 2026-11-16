@@ -9,7 +9,7 @@ import * as rc from "../vendor/rootcard/src/index.js";
 import * as p from "./protocol.js";
 import { PART_BATCH, Store } from "./store.js";
 import { Socket } from "./net.js";
-import { fetchState, lookup, proveToServer } from "./identity.js";
+import { fetchState, isServerOrigin, lookup, proveToServer, stateFromEvents } from "./identity.js";
 import { ApiError } from "./api.js";
 import { emojiOnly } from "./emoji.js";
 
@@ -26,6 +26,13 @@ export const EPHEMERAL_WAIT = 7 * 24 * 3600;
 /** A file nobody could take is offered again for this long (the mailbox lifetime). */
 const FILE_RETRY = 14 * 24 * 3600;
 const FILE_RETRY_EVERY = 60_000;
+// An incoming file that has not come whole, with no part for this long, is asked for: from the sender and from the
+// own other devices (a live chunk can be lost on the way, for example to a page whose connection had died without
+// the server noticing yet). Then again after these waits, as long as FILE_RETRY.
+const FILE_STALL = 45_000;
+const FILE_ASK_AGAIN = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3600_000, 12 * 3600_000];
+// One file is streamed to one device that asks for it at most this often.
+const SERVE_AGAIN = 60_000;
 // Chunks that come before their `file` message wait in IndexedDB, within these limits (bytes): per sender account
 // and for all senders. More is not taken (a queued chunk is then not acknowledged, so it comes again later).
 const EARLY_SENDER = 16 * 1024 * 1024;
@@ -226,6 +233,8 @@ export class Messenger extends EventTarget {
     this.queueLimit = queueLimit;
     this.askAbove = () => p.ASK_ABOVE; // files larger than this wait for the recipient to take them
     this.pendingFiles = []; // [{ conv, id, time }] files some device has not been given yet
+    this.wantedFiles = []; // [{ conv, id, f, since, at, tries }] files this device has the message of but not the content
+    this.served = new Map(); // `file device` → when it was last streamed to that device on request
     this.missed = new Map(); // f → Set(device): "relay-missed" during a transfer
     this.refused = new Set(); // refs of transfers of which the server refused a chunk
     this.api = api;
@@ -236,6 +245,12 @@ export class Messenger extends EventTarget {
     this.realms = realms;
     this.lists = new Map(); // account → { state, list, prekeys: Map, at }
     this.contacts = new Map();
+    this.servers = new Map(); // account → origin of its Murmo server, for accounts on another server that are not contacts yet
+    // Other Murmo servers, asked by ours over the logged-in connection (federation, DESIGN.md §14.2).
+    this.remote = {
+      lookup: (server, handle) => this.ws.remote({ t: "remote-lookup", server, handle }),
+      devices: (server, account, fresh = false) => this.ws.remote({ t: "remote-devices", server, account, fresh }),
+    };
     this.prekeys = new Map(); // id → { privateKey, publicRaw, time }
     this.files = new Map(); // f → transfer state, see fileState()
     this.freed = new Set(); // files removed from this device to free room, not to be taken again unasked (§13.9)
@@ -261,6 +276,7 @@ export class Messenger extends EventTarget {
     }
     for (const c of await this.store.contacts()) this.contacts.set(c.account, c);
     this.pendingFiles = (await this.store.secret("pendingFiles")) ?? [];
+    this.wantedFiles = (await this.store.secret("wantedFiles")) ?? [];
     this.freed = new Set((await this.store.secret("freedFiles")) ?? []);
     for (const t of (await this.store.secret("timed")) ?? []) this.timed.set(t.id, { conv: t.conv, at: t.at });
     await this.sweepTimed(); // the app may have been closed in the middle of a countdown
@@ -271,11 +287,16 @@ export class Messenger extends EventTarget {
       sig: await p.wsAuth(this.me.account, this.device, nonce, this.api.origin),
     }));
     this.ws.addEventListener("status", (e) => {
-      this.status = e.detail;
+      // Replaced by another page of this device: it stays so (this page no longer connects).
+      if (this.status !== "replaced") this.status = e.detail;
       this.emit("status", e.detail);
       if (e.detail === "online") this.onOnline().catch((err) => this.fail(err));
     });
     this.ws.addEventListener("msg", (e) => this.onEnvelope(e.detail));
+    this.ws.addEventListener("replaced", () => {
+      this.status = "replaced";
+      this.emit("replaced");
+    });
     this.ws.addEventListener("relay", (e) => {
       const f = e.detail;
       // file-req streams a whole file: not in the queue, or arriving chunks would wait for it
@@ -291,6 +312,7 @@ export class Messenger extends EventTarget {
     clearInterval(this.pruneTimer);
     this.retryTimer = setInterval(() => {
       this.flushFiles().catch(() => {});
+      this.askWanted().catch(() => {});
       this.fetchMissingGifs().catch(() => {}); // a device that has them may have connected since
     }, FILE_RETRY_EVERY);
     this.pruneTimer = setInterval(() => this.prune().catch(() => {}), PRUNE_EVERY);
@@ -335,13 +357,31 @@ export class Messenger extends EventTarget {
 
   // ── device lists ──────────────────────────────────────────────────────────────────────────────────────────────
 
+  /**
+   * The Murmo server an account uses, when it is not this one (federation): a contact's, or the server a message from
+   * an account that is not a contact yet came through. Null for this server.
+   */
+  serverOf(account) {
+    if (account === this.me.account) return null;
+    const s = this.contacts.get(account)?.server ?? this.servers.get(account);
+    return isServerOrigin(s) ? s : null;
+  }
+
   /** The verified device list of an account with verified prekeys; cached for a minute. */
   async list(account, fresh = false) {
     const c = this.lists.get(account);
     if (c && !fresh && Date.now() - c.at < LIST_TTL) return c;
-    // The server says where the identity lives; its log is fetched from there and verified here.
-    const r = await this.api.devices(account);
-    const state = await fetchState(this.api, r.home, this.realms, account);
+    const server = this.serverOf(account);
+    let r, state;
+    if (server) {
+      // On another server: ours fetches the list and the log from there; both are verified here as always.
+      r = await this.remote.devices(server, account, fresh);
+      state = await stateFromEvents(r.events, this.realms, account);
+    } else {
+      // The server says where the identity lives; its log is fetched from there and verified here.
+      r = await this.api.devices(account);
+      state = await fetchState(this.api, r.home, this.realms, account);
+    }
     const list = r.entries.length
       ? await p.verifyDevices(account, state.instance.account_key, r.entries)
       : { entries: [], present: [], head: "" };
@@ -355,7 +395,9 @@ export class Messenger extends EventTarget {
         // a prekey that does not verify is ignored
       }
     }
-    const entry = { state, list, prekeys, home: r.home, at: Date.now() };
+    // What the other server takes from accounts elsewhere (its relay and file queue limits), for files to it.
+    const limits = server && r.limits && typeof r.limits === "object" ? r.limits : null;
+    const entry = { state, list, prekeys, home: r.home, server, limits, at: Date.now() };
     this.lists.set(account, entry);
     if (account !== this.me.account) await this.checkPinned(account, list);
     return entry;
@@ -380,6 +422,21 @@ export class Messenger extends EventTarget {
     }
   }
 
+  /**
+   * A sender's device, looked up on the server the envelope came through (`via`, null for this one). An account is
+   * on one server for us: one that is a contact (or our own) must keep coming through the same server.
+   */
+  async lookupDeviceVia(account, id, via) {
+    if (account === this.me.account) return via ? undefined : this.lookupDevice(account, id);
+    const c = this.contacts.get(account);
+    if (c && (isServerOrigin(c.server) ? c.server : null) !== via) return undefined;
+    if (!c) {
+      if (via) this.servers.set(account, via);
+      else this.servers.delete(account);
+    }
+    return this.lookupDevice(account, id);
+  }
+
   async lookupDevice(account, id) {
     let l = await this.list(account);
     let d = l.list.present.find((x) => x.id === id);
@@ -399,6 +456,7 @@ export class Messenger extends EventTarget {
     await this.flushReceipts();
     await this.flushFiles();
     await this.fetchMissingGifs();
+    await this.askWanted();
   }
 
   async rotatePrekey() {
@@ -439,9 +497,12 @@ export class Messenger extends EventTarget {
     if (this.contacts.get(account)?.state !== "accepted") throw new ApiError(409, "not_accepted");
   }
 
-  /** Bring a contact's handle and home up to date from its verified rootcard state. */
+  /**
+   * Bring a contact's handle and home up to date from its verified rootcard state. A contact on another Murmo server
+   * (`c.server`) is shown with that server: `Name#TAG@host`.
+   */
   static fromState(c, state) {
-    c.handle = state.handle;
+    c.handle = isServerOrigin(c.server) ? `${state.handle}@${new URL(c.server).host}` : state.handle;
     c.home = state.instance.home.url;
     c.updated = p.now();
   }
@@ -452,18 +513,25 @@ export class Messenger extends EventTarget {
 
   /** Start a conversation with an exact identifier (`Name#TAG`): a message request (DESIGN.md §6.1). */
   async request(handle, note = "") {
-    const state = await lookup(this.api, this.realms, handle);
+    const { state, server } = await lookup(this.api, this.realms, handle, this.remote);
     if (state.account === this.me.account) throw new ApiError(400, "self");
     const existing = this.contacts.get(state.account);
     if (existing?.state === "accepted") return existing;
+    // An account that is known on another server than the one now asked for: a different device list.
+    if (existing && (existing.server ?? null) !== server) throw new ApiError(409, "other_server");
+    if (server) this.servers.set(state.account, server);
+    else this.servers.delete(state.account);
     const l = await this.list(state.account, true);
     if (l.list.present.length === 0) throw new ApiError(409, "no_devices");
     const c = existing ?? { account: state.account, handle: state.handle, created: p.now() };
+    if (server) c.server = server;
     Messenger.fromState(c, state);
     c.state = existing?.state === "incoming" ? "accepted" : "outgoing";
     c.pinned = { head: l.list.head, length: l.list.entries.length };
     await this.saveContact(c);
     const body = { note: String(note).slice(0, NOTE_MAX) };
+    // Our other devices learn from it where the contact is (the contact itself ignores it).
+    if (server) body.server = server;
     const kind = c.state === "accepted" ? "accept" : "request";
     const { id, time } = await this.send(c.account, kind, body);
     if (body.note) await this.record({ id, conv: c.account, dir: "out", time, kind: "text", text: body.note, delivered: 0 });
@@ -548,6 +616,7 @@ export class Messenger extends EventTarget {
         this.device.privateKey,
       );
       const item = { device: t.device, env: await p.seal(t.device, t.prekey, bytes) };
+      if (t.server) item.server = t.server; // a device on another Murmo server: ours hands it over
       if (t.account !== this.me.account && NOTIFY_KINDS.includes(kind)) item.notify = true;
       if (ttl) item.ttl = ttl;
       to.push(item);
@@ -577,7 +646,9 @@ export class Messenger extends EventTarget {
     const c = this.contacts.get(account);
     if (c?.fork) throw new ApiError(409, "fork");
     const l = await this.list(account);
-    return l.list.present.filter((d) => l.prekeys.has(d.id)).map((d) => ({ account, device: d.id, prekey: l.prekeys.get(d.id) }));
+    return l.list.present
+      .filter((d) => l.prekeys.has(d.id))
+      .map((d) => ({ account, device: d.id, prekey: l.prekeys.get(d.id), server: l.server }));
   }
 
   /** A message to the other party and to our own other devices; `id` may be chosen beforehand. */
@@ -818,7 +889,8 @@ export class Messenger extends EventTarget {
     let m;
     try {
       const plain = await p.open(this.me.device, this.prekeys, f.env);
-      m = await p.verifyMessage(plain, this.me, (a, d) => this.lookupDevice(a, d));
+      const via = isServerOrigin(f.server) ? f.server : null;
+      m = await p.verifyMessage(plain, this.me, (a, d) => this.lookupDeviceVia(a, d, via));
     } catch {
       this.ws.ack([f.id]); // undecryptable or forged: drop it
       return;
@@ -852,6 +924,8 @@ export class Messenger extends EventTarget {
           c.state = "accepted";
         } else {
           c = { account: peer, handle: state.handle, created: p.now(), state: "incoming", note };
+          const server = this.serverOf(peer);
+          if (server) c.server = server;
         }
         Messenger.fromState(c, state);
         await this.saveContact(c);
@@ -921,8 +995,12 @@ export class Messenger extends EventTarget {
     switch (m.kind) {
       case "request": {
         if (conv === this.me.account) return;
+        const known = this.contacts.get(conv);
+        // A request to a contact on another server says which (from our own device, so it is trusted as ours).
+        if (!known && isServerOrigin(m.body?.server)) this.servers.set(conv, m.body.server);
         const state = (await this.list(conv, true)).state;
-        const c = this.contacts.get(conv) ?? { account: conv, handle: state.handle, created: p.now() };
+        const c = known ?? { account: conv, handle: state.handle, created: p.now() };
+        if (!known && isServerOrigin(m.body?.server)) c.server = m.body.server;
         if (c.state !== "accepted") c.state = c.state === "incoming" ? "accepted" : "outgoing";
         Messenger.fromState(c, state);
         await this.saveContact(c);
@@ -1199,7 +1277,8 @@ export class Messenger extends EventTarget {
     const away = all.filter((d) => !online.includes(d));
     // Asked before the transfer, so that a file is queued whole or not at all; not at all when it can never fit.
     const need = p.queuedBytes(size, this.ws.relayLimits.binary);
-    const tooBig = this.fileQueue() && need > this.queueLimit();
+    // A contact on another server: its server's file queue limit counts too, whichever is smaller (DESIGN.md §14.6).
+    const tooBig = this.fileQueue() && need > Math.min(this.queueLimit(), await this.remoteQueueLimit(conv));
     const queued = this.fileQueue() && !tooBig ? await this.ws.relaySpace(away, need) : [];
     await this.store.finishFile(f, n, size, meta.sha256);
     // A disappearing picture waits on the server (message and chunks) no longer than it may wait unread.
@@ -1227,6 +1306,37 @@ export class Messenger extends EventTarget {
     return r;
   }
 
+  /** The most queued bytes another server takes for one file from here, for a contact on it (Infinity otherwise). */
+  async remoteQueueLimit(account) {
+    if (!this.serverOf(account)) return Infinity;
+    const l = (await this.list(account)).limits;
+    if (l?.file_queue === false) return 0;
+    const n = l?.file_queue_limits?.file;
+    return Number.isSafeInteger(n) && n >= 0 ? n : Infinity;
+  }
+
+  /**
+   * The devices among `devices` that are on other servers, each with what its server takes per minute from this
+   * account for this transfer: per device live (`relay.peer`) and, for queued chunks, the server's queue budget per
+   * account (`relay.store`) shared by its devices in this transfer. Their own limits, announced in their `/api/v1/info`;
+   * this server's budget for other servers applies too (net.js `pace`).
+   */
+  remoteCaps(devices, store) {
+    const caps = new Map();
+    const want = new Set(devices);
+    for (const e of this.lists.values()) {
+      if (!e.server) continue;
+      const on = e.list.present.map((d) => d.id).filter((d) => want.has(d));
+      if (!on.length) continue;
+      const ok = (n) => (Number.isSafeInteger(n) && n > 0 ? n : null);
+      const peer = ok(e.limits?.relay?.peer) ?? this.ws.relayLimits.peer;
+      const queued = ok(e.limits?.relay?.store);
+      const cap = store && queued ? Math.min(peer, Math.floor(queued / on.length)) : peer;
+      for (const d of on) caps.set(d, cap);
+    }
+    return caps;
+  }
+
   /**
    * Stream the chunks of a file to devices; `read(i)` gives part `i` (Store.fileReader). Returns the devices the server
    * could not give them to. `ttl`: how long the server may keep queued chunks (seconds; 0: its own limit). `stored`:
@@ -1238,6 +1348,7 @@ export class Messenger extends EventTarget {
     const missed = new Set();
     this.missed.set(ref, missed);
     const away = new Set(stored);
+    const remote = this.remoteCaps(devices, store);
     const seal = async (i) => {
       const part = await read?.(i);
       if (!part) throw new Error("no_file");
@@ -1250,7 +1361,7 @@ export class Messenger extends EventTarget {
         const chunk = await next;
         next = i + 1 < meta.n ? seal(i + 1) : null;
         next?.catch(() => {}); // a failure is seen when it is awaited
-        const sent = await this.ws.sendChunk(devices, chunk, { store, ref, ttl, stored: away, stop: () => this.refused.has(ref) });
+        const sent = await this.ws.sendChunk(devices, chunk, { store, ref, ttl, stored: away, remote, stop: () => this.refused.has(ref) });
         if (!sent) return devices;
         progress?.(i + 1);
       }
@@ -1365,6 +1476,8 @@ export class Messenger extends EventTarget {
       await this.record(rec);
       // A file counts as arrived when its content is here (otherwise tryAssemble says so later).
       if (dir === "in" && have) this.queueReceipt(conv, m.id);
+      // Not here yet: asked for if it does not come (a large one waits to be taken instead, §9).
+      if (!have && !e && !b.ask) await this.wantFile(conv, m.id, b.f);
     }
     await this.serial(() => this.expectFile(b, { id: m.id, conv }));
     return fresh;
@@ -1512,19 +1625,23 @@ export class Messenger extends EventTarget {
   }
 
   /**
-   * A contact's device asks for a file that waits for it to be taken (`ask`): streamed to that device only, if it is
-   * one of the contact's verified devices and the file was sent to that conversation. One stream per file and device
-   * at a time, so repeated asking cannot make this device send a large file over and over at once.
+   * A contact's device asks for a file this device sent in that conversation: one that waits to be taken (`ask`), or
+   * one that was pushed and did not come whole (a live chunk lost on the way). Streamed to that device only, if it is
+   * one of the contact's verified devices. One stream per file and device at a time and at most every SERVE_AGAIN, so
+   * repeated asking cannot make this device send a file over and over.
    */
   async serveAsked(f, r) {
     if (typeof r.f !== "string" || r.f.startsWith("gif:") || this.contacts.get(f.account)?.state !== "accepted") return;
     const m = await this.findFileMessage(r.f, f.account);
-    if (m?.dir !== "out" || !m.file?.ask) return;
+    if (m?.dir !== "out" || !m.file) return;
     if (!(await this.peerTargets(f.account)).some((t) => t.device === f.from)) return;
     const ref = `${r.f}:${f.from}`;
     if (this.serving.has(ref)) return;
+    if (Date.now() - (this.served.get(ref) ?? 0) < SERVE_AGAIN) return;
     const read = await this.store.fileReader(r.f);
     if (!read) return;
+    this.served.set(ref, Date.now());
+    if (this.served.size > 1000) this.served.clear();
     this.serving.add(ref);
     try {
       await this.streamFile(m.file, read, [f.from]);
@@ -1629,6 +1746,7 @@ export class Messenger extends EventTarget {
     if (m && TOMBSTONES.includes(m.kind)) return this.dropTransfer(f, t, true); // taken back meanwhile
     await this.store.finishFile(f, t.meta.n, t.meta.size, t.meta.sha256);
     await this.dropTransfer(f, t);
+    await this.unwantFile(f);
     if (m?.file) {
       m.file.have = true;
       await this.store.putMessage(m);
@@ -1650,17 +1768,80 @@ export class Messenger extends EventTarget {
 
   /** Ask our own connected devices for a file we know about but do not have. Returns how many were asked. */
   async fetchFromOwnDevices(conv, f) {
+    return this.fetchFile(conv, f, { sender: false });
+  }
+
+  /**
+   * Ask for a file we know about but do not have: our own connected devices and, for a file from a contact, one of the
+   * contact's connected devices (the one that sent it, if it is there), which streams it again. Returns how many
+   * devices were asked.
+   */
+  async fetchFile(conv, f, { sender = true } = {}) {
     const m = await this.findFileMessage(f, conv);
     if (!m) return 0;
     await this.unfree(m);
     await this.serial(() => this.expectFile(m.file, { id: m.id, conv }));
+    if (await this.store.hasFile(f)) return 0;
     const own = (await this.ownTargets()).map((x) => x.device);
-    const online = await this.ws.presence(own);
-    if (online.length) {
-      await this.grantFor(online, m.file.size);
-      this.ws.relay(online, p.pack({ k: "file-req", f, conv }));
+    const asked = await this.ws.presence(own);
+    if (sender && m.dir === "in" && this.contacts.get(conv)?.state === "accepted") {
+      const theirs = await this.ws.presence((await this.peerTargets(conv)).map((t) => t.device));
+      const from = theirs.includes(m.device) ? m.device : theirs[0];
+      if (from) asked.push(from);
     }
-    return online.length;
+    if (asked.length) {
+      await this.grantFor(asked, m.file.size);
+      this.ws.relay(asked, p.pack({ k: "file-req", f, conv }));
+    }
+    return asked.length;
+  }
+
+  /** Remember that this device waits for the content of file `f` (of message `id`). */
+  async wantFile(conv, id, f) {
+    if (this.wantedFiles.some((w) => w.f === f)) return;
+    this.wantedFiles.push({ conv, id, f, since: Date.now(), at: 0, tries: 0 });
+    if (this.wantedFiles.length > 500) this.wantedFiles.shift();
+    await this.store.setSecret("wantedFiles", this.wantedFiles);
+  }
+
+  async unwantFile(f) {
+    if (!this.wantedFiles.some((w) => w.f === f)) return;
+    this.wantedFiles = this.wantedFiles.filter((w) => w.f !== f);
+    await this.store.setSecret("wantedFiles", this.wantedFiles);
+  }
+
+  /**
+   * Ask for the files this device waits for and that do not come: no part for FILE_STALL, then again after the waits
+   * in FILE_ASK_AGAIN. Forgotten when they are here, gone, removed on purpose, waiting to be taken, or FILE_RETRY old.
+   * Returns how many files were asked for.
+   */
+  async askWanted() {
+    if (this.asking || !this.wantedFiles.length || this.status !== "online") return 0;
+    this.asking = true;
+    let n = 0;
+    try {
+      const now = Date.now();
+      for (const w of [...this.wantedFiles]) {
+        const m = await this.store.message(w.id);
+        const f = m?.file;
+        if (!f || m.kind !== "file" || f.f !== w.f || f.have || f.ask || f.freed !== undefined || now - w.since > FILE_RETRY * 1000 || (await this.store.hasFile(w.f))) {
+          await this.unwantFile(w.f);
+          continue;
+        }
+        const t = this.files.get(w.f);
+        if (now - Math.max(t?.updated ?? 0, w.since) < FILE_STALL) continue; // still coming
+        if (w.at && now - w.at < FILE_ASK_AGAIN[Math.min(w.tries, FILE_ASK_AGAIN.length - 1)]) continue;
+        w.at = now;
+        if (await this.fetchFile(w.conv, w.f)) {
+          w.tries++;
+          n++;
+        }
+        await this.store.setSecret("wantedFiles", this.wantedFiles);
+      }
+    } finally {
+      this.asking = false;
+    }
+    return n;
   }
 
   /**

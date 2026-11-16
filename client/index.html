@@ -37,6 +37,8 @@
 <body class="landing">
   <header class="site-head">
     <a class="logo" href="#top"><img src="icon.svg" alt="" width="28" height="28">Murmo</a>
+    <span class="beta demo" id="demo-mark" hidden data-i18n="demo.mark">Demo</span>
+    <span class="beta" id="beta-mark" hidden data-i18n="beta.mark">Öppen beta</span>
     <nav aria-label="Sidan" data-i18n-attr="aria-label:page.nav">
       <a href="#sa-fungerar-det" data-i18n="page.navHow">Så fungerar det</a>
       <a href="#sakerhet" data-i18n="page.navSecurity">Säkerhet</a>
@@ -211,6 +213,12 @@
             <a href="https://github.com/Hexagon/murmo" rel="noopener">GitHub</a>, och vem som helst kan köra en egen server.</p>
         </details>
         <details>
+          <summary data-i18n="page.faq7q">Kan jag skriva till någon på en annan Murmo-server?</summary>
+          <p data-i18n="page.faq7a">Ja. Murmo är federerat: vem som helst kan köra en egen server, privat eller öppen, och servrarna lämnar
+            krypterade meddelanden till varandra. Skriv personens identifierare med servern efter, till exempel
+            <code>Alice#3F9C@murmo.example</code>. Den här servern är en av många – <a href="https://github.com/Hexagon/murmo/blob/main/docs/HOSTING.md" rel="noopener">kör din egen</a>.</p>
+        </details>
+        <details>
           <summary data-i18n="page.faq6q">Är Murmo granskat?</summary>
           <p data-i18n="page.faq6a">Inte än. Murmo och rootcard är tidiga versioner som ingen utomstående har granskat. Läs
             <a href="https://github.com/Hexagon/murmo/blob/main/docs/THREAT_MODEL.md" rel="noopener">hotmodellen</a> innan
@@ -226,6 +234,7 @@
     <p data-i18n="page.foot2">Öppen källkod under MIT eller Apache-2.0 ·
       <a href="https://github.com/Hexagon/murmo" rel="noopener">Källkod</a> ·
       <a href="https://github.com/Hexagon/murmo/blob/main/SECURITY.md" rel="noopener">Rapportera en säkerhetsbrist</a></p>
+    <p><a href="#villkor" id="terms-link" data-i18n="terms.title">Villkor och integritet</a></p>
   </footer>
 </body>
 </html>

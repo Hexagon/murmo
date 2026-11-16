@@ -807,7 +807,7 @@ test("a large file waits for the recipient, who takes it on the device of their 
     bob.ws.presence = presence;
   }
 
-  // Alice's device streams it only to a verified device of the contact it was sent to, and only a file that waits.
+  // Alice's device streams it only to a verified device of the contact it was sent to.
   let streamed = 0;
   const stream = alice.streamFile;
   alice.streamFile = async (...a) => {
@@ -817,9 +817,14 @@ test("a large file waits for the recipient, who takes it on the device of their 
   try {
     await alice.serveAsked({ account: bob.me.account, from: "not-a-device" }, { k: "file-req", f });
     await alice.serveAsked({ account: "B".repeat(52), from: bob.me.device }, { k: "file-req", f });
+    assert.equal(streamed, 0);
+    // A pushed file is streamed again too when that device asks (its live chunks may have been lost, DESIGN.md §9
+    // step 6), but not twice within a minute.
     const small = (await alice.messages(conv)).find((m) => m.file && !m.file.ask && m.file.have);
     await alice.serveAsked({ account: bob.me.account, from: bob.me.device }, { k: "file-req", f: small.file.f });
-    assert.equal(streamed, 0);
+    await alice.serveAsked({ account: bob.me.account, from: bob.me.device }, { k: "file-req", f: small.file.f });
+    assert.equal(streamed, 1);
+    streamed = 0;
 
     // Bob takes it here: it comes live from Alice's device, and Alice sees it delivered.
     const got = waitFor(bob, "file", (d) => d.f === f, 20000);

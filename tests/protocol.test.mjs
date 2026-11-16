@@ -235,7 +235,7 @@ test("relay pacing: stays under the server's byte budgets and waits out a refusa
   await s.onFrame(JSON.stringify({ t: "ready", relay: { bytes: 1000, peer: 500, window: 1 } }));
   clearInterval(s.beat);
   // An older server announces only these: no grants, no queue budget (queued chunks count as live), text frames.
-  assert.deepEqual(s.relayLimits, { bytes: 1000, peer: 500, granted: 0, store: 0, frames: 3000, slowFrames: 3000, grant: 0, binary: false, window: 1 });
+  assert.deepEqual(s.relayLimits, { bytes: 1000, peer: 500, granted: 0, store: 0, remote: 0, frames: 3000, slowFrames: 3000, grant: 0, binary: false, window: 1 });
   s.relay(["b", "b"], "x".repeat(400));
   // Another recipient fits at once; the same one waits until the first frame leaves the window.
   let t = Date.now();

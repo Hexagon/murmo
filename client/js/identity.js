@@ -81,6 +81,38 @@ export async function fetchState(api, home, realms, account) {
   return state;
 }
 
+/**
+ * Verify an account's log that another Murmo server passed on (federation): it is self-certifying, so it does not
+ * matter who carried it. Where it lives is the log's own business.
+ */
+export async function stateFromEvents(events, realms, account) {
+  if (!Array.isArray(events)) throw new ApiError(502, "bad_log");
+  const state = await rc.verifyLog(events, { realms, now: now() });
+  if (state.account !== account) throw new ApiError(502, "bad_log");
+  if (!state.instance) throw new ApiError(410, "account_retired");
+  return state;
+}
+
+/** A Murmo server's origin, as written after `@` in an identifier: a host name (https), or a full origin. */
+export function serverOrigin(host) {
+  const t = String(host ?? "").trim().toLowerCase().replace(/\/+$/, "");
+  let url;
+  try {
+    // Loopback (development and tests) is plain http; everything else is https.
+    const loop = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(t);
+    url = new URL(/^https?:\/\//.test(t) ? t : `${loop ? "http" : "https"}://${t}`);
+  } catch {
+    throw new ApiError(400, "bad_server");
+  }
+  if (url.pathname !== "/" || url.search || url.hash || url.username || url.password) throw new ApiError(400, "bad_server");
+  return url.origin;
+}
+
+/** Whether `s` is a server origin as this client stores it (`https://host[:port]`, or http on loopback). */
+export function isServerOrigin(s) {
+  return typeof s === "string" && s.length <= 255 && /^https?:\/\/[a-z0-9.\-[\]:]+$/.test(s);
+}
+
 /** Check the shape of an identifier: `Name#TAG`, optionally `@host` for an identity from another home. */
 export function checkHandle(handle) {
   const [h] = handle.trim().split("@");
@@ -89,12 +121,38 @@ export function checkHandle(handle) {
 }
 
 /**
- * Look up an exact identifier among the identities known to this murmo server, then verify the identity's log from
- * its own home. There is no search: the full handle is required.
+ * Look up an exact identifier and verify the identity's log. There is no search: the full handle is required.
+ * Returns `{ state, server }`: `server` is the origin of the other Murmo server the account uses (federation), or null
+ * for an account on this server.
+ *
+ * `Name#TAG` is an account on this server. `Name#TAG@host` is first an identity from the home `host` that uses this
+ * server (as before federation), otherwise an account on the Murmo server at `host`. That last step needs `remote`
+ * (`{ lookup(server, handle), devices(server, account) }`): this server asks the other one, over the logged-in
+ * connection.
  */
-export async function lookup(api, realms, handle) {
-  const found = await api.lookup(checkHandle(handle));
-  return fetchState(api, found.home, realms, found.account);
+export async function lookup(api, realms, handle, remote = null) {
+  const h = checkHandle(handle);
+  const at = h.indexOf("@");
+  if (at < 0) {
+    const found = await api.lookup(h);
+    return { state: await fetchState(api, found.home, realms, found.account), server: null };
+  }
+  const server = serverOrigin(h.slice(at + 1));
+  if (server !== api.origin) {
+    try {
+      const found = await api.lookup(h);
+      return { state: await fetchState(api, found.home, realms, found.account), server: null };
+    } catch (e) {
+      if (e?.code !== "unknown_account") throw e;
+    }
+  } else {
+    const found = await api.lookup(h.slice(0, at));
+    return { state: await fetchState(api, found.home, realms, found.account), server: null };
+  }
+  if (!remote) throw new ApiError(404, "unknown_account");
+  const found = await remote.lookup(server, h.slice(0, at));
+  const r = await remote.devices(server, found.account);
+  return { state: await stateFromEvents(r.events, realms, found.account), server };
 }
 
 /**

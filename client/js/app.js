@@ -182,8 +182,23 @@ function busy(btn, text) {
   };
 }
 
+/**
+ * The identifier others use to reach this account from another Murmo server: `Name#TAG@this.server` (federation).
+ * Null when this server does not exchange messages with others.
+ */
+function fullAddress() {
+  return info?.federation ? `${messenger.handle.split("@")[0]}@${location.host}` : null;
+}
+
+/** Copy the identifier: the full address when there is federation (it works on this server too). */
 function copyHandle() {
-  return navigator.clipboard?.writeText(messenger.handle).then(() => toast(tr("common.handleCopied")));
+  return navigator.clipboard?.writeText(fullAddress() ?? messenger.handle).then(() => toast(tr("common.handleCopied")));
+}
+
+/** "From another Murmo server: Name#TAG@host", or null. */
+function addressHint() {
+  const a = fullAddress();
+  return a ? h("div", { class: "hint", text: tr("fed.address", { address: a }) }) : null;
 }
 
 function say(err) {
@@ -392,7 +407,7 @@ const HELP = [
   ["help.limits", 3],
 ];
 
-/** "Version 0.1.0 · commit 1a2b3c4d5e6f", linking to the source of that commit; null if the server does not say. */
+/** "Version 0.2.0 · commit 1a2b3c4d5e6f", linking to the source of that commit; null if the server does not say. */
 function versionLine() {
   if (typeof info?.version !== "string") return null;
   const commit = /^[0-9a-f]{7,40}$/.test(info.commit ?? "") ? info.commit : null;
@@ -416,10 +431,94 @@ function showHelp() {
       HELP.map(([title, n]) => h("section", {}, h("h3", { text: tr(title) }), h("ul", {}, Array.from({ length: n }, (_, i) => h("li", { text: tr(`${title}.${i + 1}`) }))))),
     ),
     versionLine(),
+    h("div", { class: "actions" },
+      h("button", { class: "btn", text: tr("terms.title"), onclick: () => { d.close(); showTerms(); } }),
+      h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() }),
+    ),
+  );
+  d.classList.add("wide");
+  d.scrollTop = 0;
+}
+
+// ── terms, privacy and the open beta ────────────────────────────────────────────────────────────────────────────
+
+/** The day the terms below last changed (Unix seconds), shown with them. */
+const TERMS_DATE = Date.UTC(2026, 10, 16) / 1000;
+
+/** The sections of the terms, as HELP; the demo section only on a demo server (`MURMO_DEMO`). */
+const termSections = () => [
+  ...(isDemo() ? [["terms.demo", 2]] : []),
+  ["terms.fed", 3],
+  ["terms.data", 3],
+  ["terms.beta", 3],
+  ["terms.warranty", 3],
+  ["terms.use", 4],
+  ["terms.privacy", 5],
+  ["terms.other", 2],
+];
+
+/** Whether this server calls itself an open beta (`MURMO_BETA`, on unless turned off). */
+function isBeta() {
+  return info?.beta !== false;
+}
+
+/** Whether this server calls itself a demo (`MURMO_DEMO`): its data may be wiped at any time. */
+function isDemo() {
+  return info?.demo === true;
+}
+
+/** Where to read about running one's own server. */
+const HOSTING_URL = "https://github.com/Hexagon/murmo/blob/main/docs/HOSTING.md";
+
+/** The "Demo" and "Open beta" marks, as this server says (none, one or both). */
+function betaMark() {
+  return [
+    isDemo() ? h("span", { class: "beta demo", title: tr("demo.note"), text: tr("demo.mark") }) : null,
+    isBeta() ? h("span", { class: "beta", title: tr("beta.note"), text: tr("beta.mark") }) : null,
+  ];
+}
+
+/** The notices under the login card: a demo server's, then the open beta's. */
+function serverNotes() {
+  return [
+    isDemo()
+      ? h("p", { class: "hint beta-note" }, tr("demo.note"), " ", h("a", { href: HOSTING_URL, target: "_blank", rel: "noopener noreferrer", text: tr("demo.own") }))
+      : null,
+    isBeta() ? h("p", { class: "hint beta-note" }, tr("beta.note")) : null,
+  ];
+}
+
+function showTerms() {
+  const section = ([title, n]) => h("section", {}, h("h3", { text: tr(title) }), h("ul", {}, Array.from({ length: n }, (_, i) => h("li", { text: tr(`${title}.${i + 1}`) }))));
+  const date = new Date(TERMS_DATE * 1000).toLocaleDateString(i18n.locale(), { dateStyle: "long", timeZone: "UTC" });
+  const d = dialog(
+    h("h2", {}, tr("terms.title"), " ", betaMark()),
+    h("p", { class: "hint", text: tr("terms.updated", { date }) }),
+    h("p", { text: tr("terms.intro") }),
+    h(
+      "div",
+      { class: "help" },
+      termSections().map(section),
+    ),
+    versionLine(),
     h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
   );
   d.classList.add("wide");
   d.scrollTop = 0;
+}
+
+/** The static page's beta mark and its link to the terms (index.html), and `#villkor` opening the terms. */
+function wirePage() {
+  const mark = document.getElementById("beta-mark");
+  if (mark) mark.hidden = !isBeta();
+  const demo = document.getElementById("demo-mark");
+  if (demo) demo.hidden = !isDemo();
+  const link = document.getElementById("terms-link");
+  link?.addEventListener("click", (e) => {
+    e.preventDefault();
+    showTerms();
+  });
+  if (location.hash === "#villkor") showTerms();
 }
 
 /**
@@ -444,6 +543,7 @@ async function boot() {
     return;
   }
   info = await api.info();
+  wirePage();
   const origins = info.origins ?? (info.origin ? [info.origin] : []);
   if (origins.length && !origins.includes(location.origin)) {
     // The server signs and checks everything for its configured origin (MURMO_ORIGIN): proofs to it and the
@@ -491,7 +591,10 @@ function showAuth(tab = "login", prefill = "") {
       h(
         "div",
         { class: "auth-foot" },
+        h("div", { class: "marks" }, betaMark()),
+        serverNotes(),
         h("button", { class: "link", type: "button", text: tr("about.more"), onclick: showHelp }),
+        h("button", { class: "link", type: "button", text: tr("terms.title"), onclick: showTerms }),
         themePicker(),
         languagePicker(() => showAuth(tab)),
       ),
@@ -614,6 +717,7 @@ function registerForm(body, err) {
       h("div", { class: "field" }, h("label", { text: tr("auth.repeat") }), pw2),
       h("p", { class: "hint", text: tr("auth.handleHint") }),
       (info?.homes ?? []).length ? h("p", { class: "hint", text: tr("auth.haveIdentity", { homes: allowedHomes() }) }) : null,
+      h("p", { class: "hint" }, tr("terms.accept"), " ", h("button", { class: "link", type: "button", text: tr("terms.read"), onclick: showTerms })),
       btn,
     ),
   );
@@ -941,6 +1045,9 @@ async function enter({ store, account, handle, home }) {
   messenger.addEventListener("incoming", (e) => onIncoming(e.detail));
   messenger.addEventListener("link", (e) => showLinkRequest(e.detail));
   messenger.addEventListener("error", (e) => console.warn(e.detail.message));
+  // Murmo was opened again in another tab or window on this device, which has the connection now: this page says so
+  // and offers to take it back (a reload: what the other page stored is read afresh).
+  messenger.addEventListener("replaced", () => showReplaced());
   messenger.addEventListener("removed", async () => {
     toast(tr("main.removed"));
     await logout(true);
@@ -949,6 +1056,18 @@ async function enter({ store, account, handle, home }) {
   await refreshGifHashes().catch(() => {});
   renderShell();
   askNotifications();
+}
+
+/** "Murmo is open in another tab": not closed, only left by using Murmo here (a reload) or closing the tab. */
+function showReplaced() {
+  if (document.querySelector("dialog.replaced")) return;
+  const d = dialog(
+    h("h2", { text: tr("main.replacedTitle") }),
+    h("p", { text: tr("main.replaced") }),
+    h("div", { class: "actions" }, h("button", { class: "btn primary", text: tr("main.useHere"), onclick: () => location.reload() })),
+  );
+  d.classList.add("replaced");
+  d.addEventListener("cancel", (e) => e.preventDefault());
 }
 
 // A page that was in the background comes back with a dead connection: check it at once.
@@ -1149,7 +1268,7 @@ function renderShell() {
       h(
         "div",
         { class: "side-top" },
-        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo"),
+        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo", betaMark()),
         h(
           "div",
           { class: "side-actions" },
@@ -1506,7 +1625,7 @@ function renderWelcome() {
         "div",
         { class: "welcome-inner" },
         form,
-        h("div", { class: "card mine" }, h("div", {}, h("div", { class: "hint", text: tr("new.mine") }), h("strong", { text: messenger.handle })), h("button", { class: "btn small", text: tr("common.copy"), onclick: copyHandle })),
+        h("div", { class: "card mine" }, h("div", {}, h("div", { class: "hint", text: tr("new.mine") }), h("strong", { text: messenger.handle }), addressHint()), h("button", { class: "btn small", text: tr("common.copy"), onclick: copyHandle })),
         offer,
         singleDeviceReminder(),
         about(),
@@ -2697,7 +2816,7 @@ function fileView(m) {
       // Put together from its stored parts only when it nears the screen: a long thread does not read all its pictures.
       await nearScreen(img);
       const b = await messenger.fileBlob(f.f, f.mime);
-      if (!b) return;
+      if (!b) throw new Error("no_file");
       const url = objectUrls.get(f.f) ?? URL.createObjectURL(b);
       objectUrls.set(f.f, url);
       img.addEventListener("load", () => {
@@ -2707,8 +2826,9 @@ function fileView(m) {
       const gif = f.mime === "image/gif" && m.kind === "file" ? () => messenger.fileBlob(f.f, "image/gif") : null;
       img.addEventListener("click", () => showImage(url, f.name, gif, f.f, m.kind === "ephemeral"));
     }).catch(() => {
+      // Not cached: the next drawing tries the picture again (its parts may not all be readable yet).
       const card = fileCard(m);
-      imgNodes.set(f.f, card);
+      imgNodes.delete(f.f);
       img.replaceWith(card);
     });
     return img;
@@ -2777,7 +2897,7 @@ function fileCard(m, note, play = false) {
         title: tr("msg.fetchOwnTitle"),
         onclick: async () => {
           try {
-            const n = await messenger.fetchFromOwnDevices(current, f.f);
+            const n = await messenger.fetchFile(current, f.f);
             toast(tr(n ? "msg.asking" : "msg.noOwn"));
           } catch (x) {
             toast(say(x));
@@ -3324,7 +3444,7 @@ async function fetchAgain(x, btn) {
       if (await messenger.acceptFile(conv, m.file.f)) toast(tr("msg.taking"));
       else toast(tr("msg.senderAway"));
     } else {
-      const n = await messenger.fetchFromOwnDevices(conv, m.file.f);
+      const n = await messenger.fetchFile(conv, m.file.f);
       toast(tr(n ? "msg.asking" : "msg.noOwn"));
     }
   } catch (x2) {
@@ -3576,12 +3696,14 @@ function showAccountMenu() {
   const d = dialog(
     h("h2", { text: messenger.handle }),
     h("p", { class: "hint", text: homeLabel(messenger.home) ? tr("acct.yourHandleFrom", { home: homeLabel(messenger.home) }) : tr("acct.yourHandle") }),
+    addressHint(),
     h(
       "div",
       { style: "display:flex;flex-direction:column;gap:8px" },
       h("button", { class: "btn", text: tr("acct.copy"), onclick: () => copyHandle()?.then(() => d.close()) }),
       h("button", { class: "btn", text: tr("acct.devices"), onclick: () => { d.close(); showDevices(); } }),
       h("button", { class: "btn", text: tr("help.title"), onclick: () => { d.close(); showHelp(); } }),
+      h("button", { class: "btn", text: tr("terms.title"), onclick: () => { d.close(); showTerms(); } }),
       h("label", { class: "check" }, notice, h("span", {}, tr("acct.notify"), noticeHint)),
       h(
         "label",
