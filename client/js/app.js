@@ -239,7 +239,7 @@ function queueLimit() {
 /** The largest file the server's queue takes (null: no known limit), and -1 if none. */
 function queueMaxFile() {
   const l = queueLimit();
-  return l === null ? null : p.largestQueued(l);
+  return l === null ? null : p.largestQueued(l, !!messenger?.ws?.relayLimits?.binary);
 }
 
 function bytes(n) {
