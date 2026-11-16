@@ -1155,8 +1155,9 @@ export class Messenger extends EventTarget {
     const online = await this.ws.presence(all);
     const away = all.filter((d) => !online.includes(d));
     // Asked before the transfer, so that a file is queued whole or not at all; not at all when it can never fit.
-    const tooBig = this.fileQueue() && p.queuedBytes(size) > this.queueLimit();
-    const queued = this.fileQueue() && !tooBig ? await this.ws.relaySpace(away, p.queuedBytes(size)) : [];
+    const need = p.queuedBytes(size, this.ws.relayLimits.binary);
+    const tooBig = this.fileQueue() && need > this.queueLimit();
+    const queued = this.fileQueue() && !tooBig ? await this.ws.relaySpace(away, need) : [];
     await this.store.finishFile(f, n, size, meta.sha256);
     // A disappearing picture waits on the server (message and chunks) no longer than it may wait unread.
     const wait = ttl ? this.ephemeralWait(conv) : 0;
@@ -1171,7 +1172,7 @@ export class Messenger extends EventTarget {
     await this.record(m);
     const to = [...online, ...queued];
     const sending = (done) => progress?.({ phase: "send", done, total: n, id });
-    if (to.length) m.file.missed.push(...(await this.streamFile(meta, await this.store.fileReader(f), to, queued.length > 0, sending, wait)));
+    if (to.length) m.file.missed.push(...(await this.streamFile(meta, await this.store.fileReader(f), to, queued.length > 0, sending, wait, queued)));
     await this.settleFile(m);
     const isPeer = (d) => m.file.peers.includes(d);
     const r = {
@@ -1185,22 +1186,29 @@ export class Messenger extends EventTarget {
 
   /**
    * Stream the chunks of a file to devices; `read(i)` gives part `i` (Store.fileReader). Returns the devices the server
-   * could not give them to. `ttl`: how long the server may keep queued chunks (seconds; 0: its own limit).
+   * could not give them to. `ttl`: how long the server may keep queued chunks (seconds; 0: its own limit). `stored`:
+   * the devices that are away and get the chunks through the file queue (paced against its own budget).
    */
-  async streamFile(meta, read, devices, store = false, progress = null, ttl = 0) {
+  async streamFile(meta, read, devices, store = false, progress = null, ttl = 0, stored = []) {
     const key = p.unb64(meta.key);
-    const ref = `${meta.f}.${p.b64(p.random(6))}`;
+    const ref = p.b64(p.random(8)); // 8 bytes: it goes into binary frames as it is
     const missed = new Set();
     this.missed.set(ref, missed);
+    const away = new Set(stored);
+    const seal = async (i) => {
+      const part = await read?.(i);
+      if (!part) throw new Error("no_file");
+      return p.sealChunk(key, meta.f, i, meta.n, part);
+    };
     try {
+      // The next chunk is read and encrypted while this one is paced and sent.
+      let next = seal(0);
       for (let i = 0; i < meta.n; i++) {
-        const part = await read?.(i);
-        if (!part) throw new Error("no_file");
-        const data = await p.encryptChunk(key, meta.f, i, meta.n, part);
-        await this.ws.pace(devices, data.length);
-        await this.ws.drain();
-        if (this.refused.has(ref)) return devices;
-        this.ws.relay(devices, data, { store, ref, ttl });
+        const chunk = await next;
+        next = i + 1 < meta.n ? seal(i + 1) : null;
+        next?.catch(() => {}); // a failure is seen when it is awaited
+        const sent = await this.ws.sendChunk(devices, chunk, { store, ref, ttl, stored: away, stop: () => this.refused.has(ref) });
+        if (!sent) return devices;
         progress?.(i + 1);
       }
       await this.ws.presence([this.me.device]); // answered after every chunk before it was handled
@@ -1327,6 +1335,7 @@ export class Messenger extends EventTarget {
   }
 
   isChunk(f) {
+    if (f.chunk !== undefined) return true; // a binary frame carries only chunks
     try {
       return p.unpack(f.data).k === "chunk";
     } catch {
@@ -1376,7 +1385,8 @@ export class Messenger extends EventTarget {
       t.earlyBytes = 0;
       for (const i of early) {
         const c = await this.store.incoming(f, i);
-        if (c && i < meta.n && c.n === meta.n) await this.storeChunk(f, t, { f, i, n: c.n, c: c.c });
+        // `ct`: bytes; `c`: base64url, as kept by earlier versions
+        if (c && i < meta.n && c.n === meta.n) await this.storeChunk(f, t, { f, i, n: c.n, ct: c.ct, c: c.c });
       }
       await this.store.deleteIncoming(f);
     }
@@ -1385,15 +1395,29 @@ export class Messenger extends EventTarget {
 
   async onRelay(f) {
     let r;
-    try {
-      r = p.unpack(f.data);
-    } catch {
-      return;
+    const ack = () => f.id && this.ws.relayAck([f.id]);
+    if (f.chunk !== undefined) {
+      // A binary frame: the ciphertext as bytes, nothing to decode.
+      if (!f.chunk) return ack();
+      r = f.chunk;
+    } else {
+      try {
+        r = p.unpack(f.data);
+      } catch {
+        return;
+      }
+      if (r.k === "chunk") {
+        if (typeof r.c !== "string" || r.c.length > MAX_CHUNK_TEXT) return ack();
+        try {
+          r = { k: "chunk", f: r.f, i: r.i, n: r.n, ct: p.unb64(r.c) };
+        } catch {
+          return ack();
+        }
+      }
     }
     if (r.k === "chunk") {
-      const ack = () => f.id && this.ws.relayAck([f.id]);
       if (typeof r.f !== "string" || r.f.length > 64 || !Number.isSafeInteger(r.i) || !Number.isSafeInteger(r.n) || r.i < 0 || r.i >= r.n || r.n > p.MAX_PARTS) return ack();
-      if (typeof r.c !== "string" || r.c.length > MAX_CHUNK_TEXT) return ack();
+      if (!(r.ct instanceof Uint8Array) || r.ct.length > p.CHUNK + 16) return ack();
       // Chunks only from own devices and from contacts we talk to: anyone else could fill storage, or this device's
       // share of the server's file queue (queued copies are acknowledged so the server drops them).
       if (!this.mayRelay(f)) return ack();
@@ -1414,7 +1438,7 @@ export class Messenger extends EventTarget {
         if (r.n !== t.meta.n || !(await this.storeChunk(r.f, t, r))) return ack();
       } else {
         // Before the file message: kept in IndexedDB, within a budget per sender, until the key is known.
-        const size = Math.ceil((r.c.length * 3) / 4);
+        const size = r.ct.length;
         this.sweepFiles();
         let mine = 0;
         let all = 0;
@@ -1423,7 +1447,7 @@ export class Messenger extends EventTarget {
           if (x.from === f.account) mine += x.earlyBytes;
         }
         if (mine + size > EARLY_SENDER || all + size > EARLY_TOTAL) return; // not acknowledged: it comes again
-        await this.store.putIncoming(r.f, r.i, { n: r.n, c: r.c });
+        await this.store.putIncoming(r.f, r.i, { n: r.n, ct: r.ct });
         t.from ??= f.account;
         t.early.set(r.i, size);
         t.earlyBytes += size;
@@ -1476,8 +1500,17 @@ export class Messenger extends EventTarget {
     if (await this.store.hasFile(f)) return true;
     const online = await this.ws.presence([m.device]);
     if (!online.length) return false;
+    await this.grantFor(online, m.file.size);
     this.ws.relay(online, p.pack({ k: "file-req", f }));
     return true;
+  }
+
+  /**
+   * Before asking `devices` for a file of `size` bytes: let them stream it here beyond the live budgets (the server
+   * counts it against a grant this device gives, DESIGN.md §10.2). Nothing happens on a server without grants.
+   */
+  async grantFor(devices, size) {
+    for (const d of devices) await this.ws.grant(d, p.queuedBytes(size));
   }
 
   /** Decrypt a chunk with the file key and store it as a part; false if it does not decrypt. */
@@ -1576,7 +1609,10 @@ export class Messenger extends EventTarget {
     await this.serial(() => this.expectFile(m.file, { id: m.id, conv }));
     const own = (await this.ownTargets()).map((x) => x.device);
     const online = await this.ws.presence(own);
-    if (online.length) this.ws.relay(online, p.pack({ k: "file-req", f, conv }));
+    if (online.length) {
+      await this.grantFor(online, m.file.size);
+      this.ws.relay(online, p.pack({ k: "file-req", f, conv }));
+    }
     return online.length;
   }
 

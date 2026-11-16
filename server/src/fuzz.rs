@@ -92,6 +92,8 @@ fn harness() -> &'static Harness {
             file_queue_total: 1 << 22,
             file_queue_sender: 1 << 19,
             file_queue_account: 1 << 21,
+            relay_granted: crate::ws::RELAY_GRANTED_BYTES,
+            relay_store: crate::ws::RELAY_STORE_BYTES,
             push_hosts: Vec::new(),
             giphy_key: String::new(),
             giphy_rating: "pg-13".into(),
@@ -113,6 +115,14 @@ pub fn ws_frame(data: &[u8]) {
     let _guard = h.rt.enter();
     let _ = crate::ws::fuzz_frame(&h.app, ACCOUNT, &device().id, data);
     // Keep the database from growing across runs.
+    let _ = h.app.db.purge(i64::MAX);
+}
+
+/// A binary WebSocket frame (a file chunk, DESIGN.md §10.2) from an authenticated device.
+pub fn ws_binary(data: &[u8]) {
+    let h = harness();
+    let _guard = h.rt.enter();
+    let _ = crate::ws::fuzz_binary(&h.app, ACCOUNT, &device().id, data);
     let _ = h.app.db.purge(i64::MAX);
 }
 
@@ -151,6 +161,28 @@ mod tests {
             http_text(s.as_bytes());
             ws_frame(s.as_bytes());
         }
+        // Binary relay frames: valid, truncated, and with bad fields.
+        let mut frame = vec![1u8, 1, 2];
+        frame.extend_from_slice(&[1; 16]);
+        frame.extend_from_slice(&[2; 16]);
+        frame.extend_from_slice(&[3; 8]);
+        frame.extend_from_slice(&60u32.to_be_bytes());
+        frame.extend_from_slice(b"payload");
+        for n in 0..=frame.len() {
+            ws_binary(&frame[..n]);
+        }
+        for (i, v) in [(0, 2u8), (1, 0xfe), (2, 0), (2, 25)] {
+            let mut f = frame.clone();
+            f[i] = v;
+            ws_binary(&f);
+        }
+        ws_binary(
+            &[1, 0, 1]
+                .iter()
+                .copied()
+                .chain(std::iter::repeat_n(0, 100_000))
+                .collect::<Vec<u8>>(),
+        );
         let deep = "[".repeat(100_000);
         json_body(deep.as_bytes());
         ws_frame(deep.as_bytes());

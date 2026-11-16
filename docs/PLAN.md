@@ -43,6 +43,9 @@ Open, in order of priority:
       are saved part by part where the browser allows it (`showSaveFilePicker`) and not shown inline (`DESIGN.md` §8.1)
 - [x] Files over 50 MiB wait for the recipient: nothing is pushed or queued, and the recipient takes the file on the
       device of their choice, live from the sending device (`ask`, `DESIGN.md` §9)
+- [x] Faster file relay: chunks as binary WebSocket frames (1.0× instead of 1.78× the file); a device that asks for
+      a file grants the sender a budget of its own (`relay-grant`); queued chunks have a budget of their own; the
+      file queue counts a file's real size (`DESIGN.md` §10.2, §13.8)
 - [ ] Signed, reproducible client release with published hashes; installable copy not served by the server
 - [ ] History from contacts after every device is lost: a contact sends its copy of a conversation on request,
       shown as the contact's copy (`DESIGN.md` §7.1, option 3)
@@ -67,7 +70,7 @@ Kept in [DESIGN.md §13](DESIGN.md#13-ideas-not-decided) to be decided later: re
 social recovery of the paper key, QR verification, identity timeline, aliases, calm messaging, "what the server
 knows about me", duress password, sealed sender, one-time secrets, shared objects, voice, on-device translation,
 calls, a contact widget, alerts and bots (with a worked plan for an AI assistant as a contact), checking the served
-client, a faster file relay (binary chunk frames, §13.8).
+client, and what is left of the faster file relay (receiver batching, larger chunks, §13.8).
 
 ## Open questions
 

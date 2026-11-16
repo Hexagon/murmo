@@ -234,7 +234,8 @@ test("relay pacing: stays under the server's byte budgets and waits out a refusa
   // As the server announces them in "ready" (bad values fall back to the defaults).
   await s.onFrame(JSON.stringify({ t: "ready", relay: { bytes: 1000, peer: 500, window: 1 } }));
   clearInterval(s.beat);
-  assert.deepEqual(s.relayLimits, { bytes: 1000, peer: 500, window: 1 });
+  // An older server announces only these: no grants, no queue budget (queued chunks count as live), text frames.
+  assert.deepEqual(s.relayLimits, { bytes: 1000, peer: 500, granted: 0, store: 0, frames: 3000, slowFrames: 3000, grant: 0, binary: false, window: 1 });
   s.relay(["b", "b"], "x".repeat(400));
   // Another recipient fits at once; the same one waits until the first frame leaves the window.
   let t = Date.now();
@@ -266,16 +267,206 @@ test("relay pacing: stays under the server's byte budgets and waits out a refusa
 
 test("queued bytes of a file and the largest file a queue limit takes", () => {
   assert.equal(p.queuedBytes(0), 256);
-  assert.equal(p.queuedBytes(p.CHUNK), Math.ceil(p.CHUNK * 1.4) + 256);
-  assert.equal(p.queuedBytes(p.CHUNK + 1), Math.ceil((p.CHUNK + 1) * 1.4) + 512);
-  for (const limit of [256, 100_000, 50 * 1024 * 1024, 150 * 1024 * 1024]) {
-    const max = p.largestQueued(limit);
-    assert.ok(p.queuedBytes(max) <= limit, `${limit}`);
-    if (max < p.MAX_FILE) assert.ok(p.queuedBytes(max + 1) > limit, `${limit}`);
+  assert.equal(p.queuedBytes(p.CHUNK), Math.ceil((p.CHUNK * 16) / 9) + 256);
+  assert.equal(p.queuedBytes(p.CHUNK + 1), Math.ceil(((p.CHUNK + 1) * 16) / 9) + 512);
+  assert.equal(p.queuedBytes(p.CHUNK, true), p.CHUNK + 96);
+  for (const binary of [false, true]) {
+    for (const limit of [256, 100_000, 50 * 1024 * 1024, 150 * 1024 * 1024]) {
+      const max = p.largestQueued(limit, binary);
+      assert.ok(p.queuedBytes(max, binary) <= limit, `${limit}`);
+      if (max < p.MAX_FILE) assert.ok(p.queuedBytes(max + 1, binary) > limit, `${limit}`);
+    }
+    assert.equal(p.largestQueued(0, binary), -1);
+    assert.equal(p.largestQueued(1e12, binary), p.MAX_FILE);
   }
   assert.equal(p.largestQueued(255), -1);
-  assert.equal(p.largestQueued(0), -1);
-  assert.equal(p.largestQueued(1e12), p.MAX_FILE);
+  // Binary frames fit 1.7× more file into the same queue.
+  assert.ok(p.largestQueued(150 * 1024 * 1024, true) > 1.7 * p.largestQueued(150 * 1024 * 1024));
+});
+
+test("queued bytes are an upper bound for what the server really stores, in text and in binary", async () => {
+  // The bug this replaces: 1.4× counted, but text chunks are base64url inside base64url (16/9 = 1.78×), so the
+  // server's queue could grant room that the file then overran.
+  const key = p.random(32);
+  const ids = [p.b64(p.random(16)), `gif:${p.b64(p.random(16))}`, "x".repeat(64)];
+  for (const size of [0, 1, 1000, p.CHUNK - 1, p.CHUNK, p.CHUNK + 1, 3 * p.CHUNK + 5, 20 * p.CHUNK]) {
+    for (const f of ids) {
+      const n = p.chunkCount(size);
+      let text = 0;
+      let bin = 0;
+      for (let i = 0; i < n; i++) {
+        const part = p.random(Math.min(p.CHUNK, size - i * p.CHUNK));
+        // The largest indices a file of this many chunks could have make the JSON longest.
+        const c = await p.sealChunk(key, f, i, n, part);
+        text += p.packChunk({ ...c, i: p.MAX_PARTS - 1, n: p.MAX_PARTS }).length;
+        bin += p.chunkPayload(c).length;
+      }
+      assert.ok(text <= p.queuedBytes(size), `text ${size} ${f.length}: ${text} > ${p.queuedBytes(size)}`);
+      assert.ok(bin <= p.queuedBytes(size, true), `binary ${size} ${f.length}: ${bin} > ${p.queuedBytes(size, true)}`);
+      // ... and not far above it.
+      assert.ok(p.queuedBytes(size) - text <= 512 * n, `text ${size}`);
+    }
+  }
+});
+
+test("base64url: the fast codec matches rootcard's and is as strict", () => {
+  for (let n = 0; n < 70; n++) {
+    const b = p.random(n);
+    const s = p.b64(b);
+    assert.equal(s, rc.base64urlEncode(b));
+    assert.deepEqual(p.unb64(s), b);
+  }
+  const big = new Uint8Array(300_000).map((_, i) => (i * 7919) & 255);
+  assert.deepEqual(p.unb64(p.b64(big)), big);
+  // Not base64url, padded, a length of 4k + 1, or unused bits set: refused like rootcard refuses them.
+  for (const bad of ["a", "ab=", "ab+c", "ab/c", "ab c", "AB==", "AB", "AAB", "abcde", "\u00e9a", 7]) {
+    let mine = null;
+    let theirs = null;
+    try {
+      p.unb64(bad);
+    } catch (e) {
+      mine = e.code ?? e.message;
+    }
+    try {
+      rc.base64urlDecode(bad);
+    } catch (e) {
+      theirs = e.code ?? e.message;
+    }
+    assert.equal(mine === null, theirs === null, `${bad}`);
+    if (mine !== null) assert.equal(mine, "bad_base64", `${bad}`);
+  }
+  assert.deepEqual(p.unb64("AA"), new Uint8Array([0]));
+  assert.deepEqual(p.unb64("AAA"), new Uint8Array([0, 0]));
+});
+
+test("binary relay frames: chunk payload, frame to the server and frame from it", async () => {
+  const key = p.random(32);
+  const f = p.b64(p.random(16));
+  const c = await p.sealChunk(key, f, 3, 9, p.random(1000));
+  const payload = p.chunkPayload(c);
+  assert.equal(payload.length, 1 + f.length + 8 + 1016);
+  const back = p.parseChunkPayload(payload);
+  assert.deepEqual({ ...back, ct: [...back.ct] }, { k: "chunk", f, i: 3, n: 9, ct: [...c.ct] });
+  assert.equal(await p.decryptChunk(key, back).then((x) => x.length), 1000);
+  // The same chunk as text decrypts the same.
+  assert.deepEqual(await p.decryptChunk(key, p.unpack(p.packChunk(c))), await p.decryptChunk(key, back));
+  // Ids that do not fit the frame go as text; malformed payloads are refused.
+  assert.equal(p.chunkPayload({ ...c, f: "é" }), null);
+  assert.equal(p.chunkPayload({ ...c, f: "x".repeat(65) }), null);
+  for (const bad of [new Uint8Array(0), new Uint8Array([0]), new Uint8Array([65, 1, 2]), payload.subarray(0, 5)]) {
+    assert.equal(p.parseChunkPayload(bad), null);
+  }
+  // To the server: type, flags, k, ids, ref, ttl, payload.
+  const d1 = p.random(16);
+  const d2 = p.random(16);
+  const ref = p.random(8);
+  const frame = p.relayFrame([p.b64(d1), p.b64(d2)], payload, { store: true, ttl: 60, ref });
+  assert.deepEqual([...frame.subarray(0, 3)], [1, 1, 2]);
+  assert.deepEqual(frame.subarray(3, 19), d1);
+  assert.deepEqual(frame.subarray(19, 35), d2);
+  assert.deepEqual(frame.subarray(35, 43), ref);
+  assert.equal(new DataView(frame.buffer).getUint32(43), 60);
+  assert.deepEqual(frame.subarray(47), payload);
+  assert.equal(p.relayFrame([p.b64(d1)], payload, { ttl: 60, ref })[1], 0);
+  assert.equal(new DataView(p.relayFrame([p.b64(d1)], payload, { ttl: 60, ref }).buffer).getUint32(19 + 8), 0, "ttl only with store");
+  assert.equal(p.relayFrame(["short"], payload, { ref }), null);
+  assert.equal(p.relayFrame([], payload, { ref }), null);
+  assert.equal(p.relayFrame([p.b64(d1)], payload, { ref: p.random(4) }), null);
+  // From the server: type, sender, account, queue id, payload.
+  const from = p.random(16);
+  const account = "0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJK";
+  const msg = new Uint8Array(1 + 16 + 1 + account.length + 8 + payload.length);
+  msg[0] = 2;
+  msg.set(from, 1);
+  msg[17] = account.length;
+  msg.set(new TextEncoder().encode(account), 18);
+  new DataView(msg.buffer).setBigInt64(18 + account.length, 42n);
+  msg.set(payload, 26 + account.length);
+  const got = p.parseDelivered(msg.buffer);
+  assert.equal(got.from, p.b64(from));
+  assert.equal(got.account, account);
+  assert.equal(got.id, 42);
+  assert.deepEqual(got.payload, payload);
+  new DataView(msg.buffer).setBigInt64(18 + account.length, 0n);
+  assert.equal(p.parseDelivered(msg).id, undefined, "live: no queue id");
+  assert.equal(p.parseDelivered(new Uint8Array([1, 2, 3])), null);
+  msg[0] = 1;
+  assert.equal(p.parseDelivered(msg), null);
+});
+
+test("relay pacing: live, granted and queued chunks each have their own budget", async () => {
+  const s = new Socket("ws://unused", async () => ({}));
+  const sent = [];
+  s.ready = true;
+  s.ws = { send: (x) => sent.push(x), bufferedAmount: 0 };
+  await s.onFrame(
+    JSON.stringify({ t: "ready", relay: { bytes: 1000, peer: 500, granted: 5000, store: 800, frames: 100, slow_frames: 100, grant: 9999, binary: 1, window: 1 } }),
+  );
+  clearInterval(s.beat);
+  assert.equal(s.relayLimits.binary, true);
+  const fast = async (to, len, stored) => {
+    const t = Date.now();
+    await s.pace(to, len, stored);
+    return Date.now() - t < 100;
+  };
+  // Live into b is used up ...
+  s.relay(["b"], "x".repeat(450));
+  assert.equal(await fast(["b"], 100), false);
+  // ... but once b grants more, chunks to it count against the grant and the granted budget.
+  await s.onFrame(JSON.stringify({ t: "relay-grant", to: "b", bytes: 3000, ttl: 60 }));
+  s.relayLog = [];
+  s.relay(["b"], "x".repeat(450));
+  assert.equal(await fast(["b"], 2000), true);
+  s.relay(["b"], "x".repeat(2000));
+  assert.equal(s.grants.get("b").bytes, 550, "the grant is used up as chunks go");
+  // What is left of the grant is too little for this chunk: it is live again, and live into b is spent.
+  assert.equal(await fast(["b"], 600), false);
+  // Queued chunks have a budget of their own (800), independent of live.
+  s.relayLog = [];
+  s.relay(["c"], "x".repeat(450));
+  assert.equal(await fast(["q"], 700, new Set(["q"])), true);
+  s.relayLog.push({ at: Date.now(), len: 700, live: [], granted: [], stored: 1 });
+  assert.equal(await fast(["q"], 200, new Set(["q"])), false);
+  // A grant of 0 takes it back.
+  await s.onFrame(JSON.stringify({ t: "relay-grant", to: "b", bytes: 0, ttl: 60 }));
+  assert.equal(s.grants.has("b"), false);
+});
+
+test("sendChunk: binary to devices that take it, text to those the server said do not", async () => {
+  const s = new Socket("ws://unused", async () => ({}));
+  const sent = [];
+  s.ready = true;
+  s.ws = { send: (x) => sent.push(x), bufferedAmount: 0 };
+  await s.onFrame(JSON.stringify({ t: "ready", relay: { bytes: 1e8, peer: 1e8, binary: 1, window: 60 } }));
+  clearInterval(s.beat);
+  const c = await p.sealChunk(p.random(32), p.b64(p.random(16)), 0, 1, p.random(100));
+  const [a, b] = [p.b64(p.random(16)), p.b64(p.random(16))];
+  const ref = p.b64(p.random(8));
+  assert.equal(await s.sendChunk([a, b], c, { ref }), true);
+  assert.equal(sent.length, 1);
+  assert.ok(sent[0] instanceof Uint8Array && sent[0][2] === 2);
+  const missed = [];
+  s.addEventListener("relay-missed", (e) => missed.push(e.detail));
+  await s.onFrame(JSON.stringify({ t: "relay-missed", devices: [b], text: [b], ref }));
+  assert.equal(missed.length, 1);
+  sent.length = 0;
+  await s.sendChunk([a, b], c, { ref });
+  assert.equal(sent.length, 2);
+  assert.ok(sent[0] instanceof Uint8Array && sent[0][2] === 1);
+  const text = JSON.parse(sent[1]);
+  assert.deepEqual(text.to, [b]);
+  assert.equal(p.unpack(text.data).k, "chunk");
+  // On a server without binary frames everything is text.
+  await s.onFrame(JSON.stringify({ t: "ready", relay: { bytes: 1e8, peer: 1e8, window: 60 } }));
+  clearInterval(s.beat);
+  sent.length = 0;
+  await s.sendChunk([a, b], c, { ref });
+  assert.equal(sent.length, 1);
+  assert.equal(typeof sent[0], "string");
+  // A stop asked for before a frame sends nothing.
+  sent.length = 0;
+  assert.equal(await s.sendChunk([a], c, { ref, stop: () => true }), false);
+  assert.equal(sent.length, 0);
 });
 
 test("live files go up to 1 GiB; only files up to 100 MiB are put together in memory to be shown", () => {

@@ -32,7 +32,8 @@ that log rather than in trust in the server. The server is one Rust binary that 
 - **Files.** Files go live, encrypted, to connected devices through an in-memory relay. For devices that are away the
   server can keep the encrypted chunks until they are fetched (at most 14 days; the sender can turn this off, and so
   can the operator); otherwise the file is sent when both are connected. Images (PNG, JPEG, GIF, WebP) show inline.
-  Your own devices can later fetch a file from each other.
+  Your own devices can later fetch a file from each other. Chunks go as binary frames, and a file the recipient asked
+  for comes as fast as both connections allow.
 - **Undo, edit and delete.** A text waits 5 seconds before it is sent, shown in the thread with an undo button
   ("Ångra"); a sent text can be edited within 24 hours (marked "redigerat" on both sides); a sent text or file can be
   deleted for everyone within 24 hours (it becomes "… tog bort ett meddelande" on both sides), or for yourself
@@ -87,6 +88,8 @@ Configuration (environment):
 | `MURMO_FILE_QUEUE_TOTAL_MB` | `2048` | file chunks kept in total |
 | `MURMO_FILE_QUEUE_SENDER_MB` | `50` | file chunks one account may queue for one device of another account |
 | `MURMO_FILE_QUEUE_ACCOUNT_MB` | `300` | file chunks one account may queue in total |
+| `MURMO_RELAY_GRANTED_MB` | `1024` | MiB per minute one device may stream to devices that asked it for a file (`0`: no grants, everything on the live budgets) |
+| `MURMO_RELAY_STORE_MB` | `128` | MiB per minute one account may put into the file queue |
 | `MURMO_PUSH_HOSTS` | the push services of Chrome, Firefox, Safari, Edge | push-service hosts accepted for notifications (`*.` for subdomains, empty: no push) |
 | `MURMO_PUSH_CONTACT` | `MURMO_ORIGIN` | contact sent to push services (`mailto:` or `https:` URL) |
 | `MURMO_GIPHY_KEY` | empty | GIPHY API key; lets users search GIPHY to fill their GIF collection, directly from the browser (empty: no search). A beta key allows 100 searches an hour for the whole server |

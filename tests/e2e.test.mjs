@@ -751,6 +751,11 @@ test("a large file waits for the recipient, who takes it on the device of their 
     await got;
     bob.removeEventListener("fileProgress", onProgress);
     assert.equal(streamed, 1);
+    // Bob let Alice's device stream it beyond the live budgets: her device heard of the grant and used it up as it
+    // sent (DESIGN.md §10.2).
+    const grant = alice.ws.grants.get(bob.me.device);
+    assert.ok(grant, "Alice's device was told of Bob's grant");
+    assert.ok(grant.bytes < p.queuedBytes(data.length) - data.length, `used: ${grant.bytes}`);
     assert.equal(progress.at(-1), p.chunkCount(data.length));
     assert.deepEqual(await bob.store.file(f), data);
     await until(async () => (await alice.messages(conv)).find((m) => m.file?.f === f)?.delivered > 0);
@@ -761,6 +766,41 @@ test("a large file waits for the recipient, who takes it on the device of their 
   assert.equal(await alice2.store.hasFile(f), false);
   // Only the recipient takes a file: the sender's own devices fetch it from each other as before.
   await assert.rejects(alice.acceptFile(conv, f), (x) => x.code === "no_file");
+});
+
+test("binary chunks: a device that does not take them still gets the file, as text", async () => {
+  const conv = bob.me.account;
+  // Bob's device connects like an older client, without `caps`: the server sends it no binary frames.
+  bob.ws.caps = [];
+  let back = waitFor(bob, "status", (s) => s === "online");
+  bob.ws.dropped(bob.ws.ws);
+  await back;
+  try {
+    assert.equal(alice.ws.relayLimits.binary, true);
+    const data = noise(3 * p.CHUNK + 10);
+    const r = await alice.sendFile(conv, new File([data], "old.bin", { type: "application/octet-stream" }));
+    // The first chunks went as binary frames; the server said Bob's device takes text only, so it missed some.
+    assert.ok(alice.ws.textOnly.has(bob.me.device));
+    assert.equal(r.waiting, 1);
+    const sent = (await alice.messages(conv)).find((m) => m.file?.name === "old.bin");
+    // Offered again, it goes as text and arrives whole.
+    const got = waitFor(bob, "file", (d) => d.f === sent.file.f, 20000);
+    assert.ok((await alice.flushFiles()) >= 1);
+    await got;
+    assert.deepEqual(await bob.store.file(sent.file.f), data);
+  } finally {
+    bob.ws.caps = ["bin"];
+    back = waitFor(bob, "status", (s) => s === "online");
+    bob.ws.dropped(bob.ws.ws);
+    await back;
+  }
+  // Back to a binary connection, the next file goes binary again.
+  assert.equal(alice.ws.textOnly.has(bob.me.device), true, "until Alice's device reconnects");
+  alice.ws.textOnly.clear();
+  const data = noise(2 * p.CHUNK);
+  const got = waitFor(bob, "file", undefined, 20000);
+  assert.deepEqual(await alice.sendFile(conv, new File([data], "new.bin")), { live: 1, queued: 0, waiting: 0 });
+  assert.deepEqual(await bob.store.file((await got).f), data);
 });
 
 test("a file id already here or under way cannot be taken over from another conversation", async () => {

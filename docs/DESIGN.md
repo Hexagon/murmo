@@ -512,13 +512,15 @@ The queue has four byte budgets, checked together when a chunk is queued and whe
 real contacts, nor the whole server. Chunks to the sender's own devices count against its account budget only.
 A file that does not fit is sent live later, when both devices are connected.
 
-`/api/v1/info` advertises the budgets as `file_queue_limits: { file, device, sender, account }`, in bytes of queued
-chunk text (the encrypted chunks as sent, larger than the file): `device`, `sender` and `account` are the first
+`/api/v1/info` advertises the budgets as `file_queue_limits: { file, device, sender, account }`, in queued bytes
+(the encrypted chunks as sent: the payload of binary frames, or the text of JSON frames, §10.2): `device`, `sender` and `account` are the first
 three budgets above, and `file` is the most one file can take for one device of another account, the smallest of
 the four. They are upper bounds for a sender to compare a file against; whether it fits right now, with other
 files queued, is still answered by `relay-space`. Without a file queue the field is absent.
 The client compares a file against `file` before it sends it (a file of `size` bytes is counted as
-`ceil(size × 1.4) + 256 × chunks` queued bytes): one that can never fit is not offered to the queue, its row above
+`size + 96 × chunks` queued bytes with binary frames, and `ceil(size × 16/9) + 256 × chunks` as text: the
+ciphertext is base64url inside JSON that is base64url again. Clients before this counted `1.4 ×`, so the server could
+grant room in `relay-space` that the file then overran, and the transfer was refused partway): one that can never fit is not offered to the queue, its row above
 the composer says so before the transfer starts, and account settings show the largest file the queue takes.
 
 1. The sender picks a file (at most 1 GiB, `MAX_FILE`: files are read, stored and sent part by part, so the limit
@@ -564,8 +566,13 @@ can take it too, or fetch it from that one (step 5). The receipt is sent when th
 message says *waiting for the recipient* until then. The sender's own other devices are not pushed the file either,
 and fetch it with step 5. A file below the limit behaves as before.
 
-Relay frames carry `{ k: "chunk", f, i, n, c }` or `{ k: "file-req", f }` as base64url canonical JSON. Chunks are
-authenticated by the file key from the signed `file` message and the final hash, so the relay needs no extra signature.
+Relay frames carry `{ k: "chunk", f, i, n, c }` or `{ k: "file-req", f }` as base64url canonical JSON, or a chunk as
+a binary frame (§10.2). Chunks are authenticated by the file key from the signed `file` message and the final hash,
+so the relay needs no extra signature.
+
+A device that asks for a file (*Ta emot* for an `ask` file, or step 5 from its own devices) first grants the device it
+asks a budget of its own (`relay-grant`, §10.2): the file then comes as fast as the connections allow instead of
+within the budget for chunks nobody asked for.
 
 ### 9.1 Emoji
 
@@ -642,12 +649,15 @@ WebSocket frames (JSON):
 |---|---|
 | server → client | `{ t: "challenge", nonce }` |
 | client → server | `{ t: "auth", account, device, sig }` with `sig` over `frame("mesg/ws-auth/v1", canonical({account, device, nonce, origin}))` |
-| server → client | `{ t: "ready", relay: { bytes, peer, window } }` (the relay budgets below) then queued `{ t: "msg", id, env }` frames |
+| client → server | `auth` may carry `caps: ["bin"]`: the connection takes binary relay frames (§10.2) |
+| server → client | `{ t: "ready", relay: { bytes, peer, granted, store, frames, slow_frames, grant, binary, window } }` (the relay budgets below and in §10.2) then queued `{ t: "msg", id, env }` frames |
 | client → server | `{ t: "send", id, to: [{ device, env }] }` → `{ t: "sent", id }` |
 | client → server | `{ t: "ack", ids: [...] }` (deletes) |
 | client → server | `{ t: "prekey", prekey }` |
 | client → server | `{ t: "presence", devices, ref }` → `{ t: "presence", online, ref }` |
-| client → server | `{ t: "relay", to, data, ref }` → forwarded as `{ t: "relay", from, account, data }` to connected devices only; `{ t: "relay-missed", devices, ref }` for the rest |
+| client → server | `{ t: "relay", to, data, ref }` → forwarded as `{ t: "relay", from, account, data }` to connected devices only; `{ t: "relay-missed", devices, text?, ref }` for the rest (`text`: connected devices that take no binary frames, for a binary chunk) |
+| client → server | binary relay frame (§10.2): the same, with the chunk as bytes |
+| client → server | `{ t: "relay-grant", from, bytes, ref }` → `{ t: "ok", ref }`; the device `from` is told `{ t: "relay-grant", to, bytes, ttl }` (§10.2) |
 | server → client | queued file chunks `{ t: "relay", id, from, account, data }`, a few at a time after the envelopes |
 | client → server | `{ t: "relay", to, data, ref, store: true, ttl? }`: as above, and chunks for devices that are not connected are queued (for `ttl` seconds when given, at most 14 days) |
 | client → server | `{ t: "relay-space", devices, bytes, ref }` → `{ t: "relay-space", ok, ref }` (room in the file queue) |
@@ -662,13 +672,21 @@ WebSocket frames (JSON):
 Limits (v0): envelope ≤ 64 KiB, ≤ 24 recipients per send, ≤ 2 000 queued envelopes per device, mailbox TTL 14 days,
 60 sends per minute per device, 20 lookups per minute and 5 link requests per hour per network address.
 
-Relay (live file chunks and the file queue): at most 3 000 frames per minute per device, and bytes of chunk text per
-minute: 384 MiB per sending device, counted once for each recipient device (a chunk to five devices counts five
-times), and 96 MiB per sending account into any one recipient device, whichever of the account's devices sends. A
-frame that would go over either budget is refused whole, with `{ t: "error", error: "rate_limited", id: ref, retry }`
-(`retry`: seconds), and counts nothing. The budgets are announced in `ready`; the client paces a transfer to stay
-under 90 % of them over any sliding minute, and a transfer whose chunk is refused anyway stops and is offered again
-later, like one whose connection broke.
+Relay (live file chunks and the file queue): bytes per minute (of chunk text, or of a binary frame's payload), with a
+budget per route; each chunk is counted once for each recipient device it goes to, by where it goes:
+- **live**, to a connected device that did not ask for it: 384 MiB per sending device and 96 MiB per sending account
+  into any one recipient device, whichever of the account's devices sends;
+- **granted**, to a connected device that granted the sending device more (§10.2): 1 GiB per sending device
+  (`MURMO_RELAY_GRANTED_MB`), within what the grant has left;
+- **queued**, into the file queue for a device that is away: 128 MiB per sending account (`MURMO_RELAY_STORE_MB`),
+  besides the queue's own limits (§9);
+- to a device that is neither connected nor queued for: nothing (it is only listed in `relay-missed`).
+
+At most 24 000 relay frames per minute per device, of which 3 000 may go live without a grant or into the queue. A
+frame that would go over any of its budgets is refused whole, with `{ t: "error", error: "rate_limited", id: ref,
+retry }` (`retry`: seconds), and counts nothing. The budgets are announced in `ready`; the client paces a transfer
+to stay under 90 % of them over any sliding minute, and a transfer whose chunk is refused anyway stops and is offered
+again later, like one whose connection broke.
 
 Rate limits count per IPv4 address and per IPv6 /64. Counters are keyed by a hash of the address under a random
 secret in the database (HKDF-SHA-256, 128 bits), never by the address itself. Windows of ten minutes or more
@@ -698,6 +716,60 @@ service reports as gone (404/410) is deleted.
 While the page runs in the background (not frozen), it shows the notification itself with the sender's handle, which
 never leaves the device.
 
+### 10.2 File relay: binary frames and grants
+
+**Binary frames.** File chunks go as binary WebSocket frames; everything else, `file-req` included, stays JSON text.
+A JSON chunk is base64url ciphertext inside canonical JSON that is base64url again: 1.78× the file, all of it
+counted against the relay budgets and the file queue, and decoded twice by the receiver. A binary chunk is 1.0×, and
+its ciphertext goes to `crypto.subtle` without decoding. The server still forwards bytes it cannot read.
+
+*Client → server* (all integers big-endian):
+
+| Bytes | Field |
+|---|---|
+| 1 | frame type `0x01`; any other value is refused (`bad_relay`) |
+| 1 | flags: bit 0 `store`; other bits must be 0 |
+| 1 | `k`, the number of recipient devices (1–24) |
+| 16 × k | recipient device ids, raw (a device id is base64url of 16 bytes) |
+| 8 | `ref`, random; echoed as base64url in `relay-missed` and `error` frames |
+| 4 | `ttl` in seconds, 0 for none (only with `store`) |
+| rest | payload, 1 to 64 KiB: `f` (1 byte length, 1–64, then the ASCII id), `i` (4), `n` (4), the AES-GCM ciphertext |
+
+*Server → client:* type `0x02`, the sending device id (16 bytes), the sending account (1 byte length, then the id),
+the queue id (8 bytes; 0 when live), then the payload unchanged.
+
+- A connection takes binary frames only when it said so in `auth` (`caps: ["bin"]`); to one that did not, the server
+  delivers nothing and lists the device in `relay-missed` under `devices` and `text`. The sender then sends that
+  device text frames, and the file is offered again (§9, step 3). The server never turns a binary chunk into text: it
+  would have to build the client's payload format. The server announces `binary: 1` in `ready`; a client sends binary
+  frames only to such a server, and text otherwise.
+- The server reads fixed offsets with checked bounds and refuses a frame that is truncated, has `k = 0` or `k > 24`,
+  sets unknown flags, or has an empty or larger payload. A binary frame before `auth` closes the connection, as any
+  unexpected frame does. `from` and `account` come from the authenticated connection, never from the frame.
+  Duplicates are dropped, and the budgets are charged all or nothing, as for JSON frames. The fuzz target `ws_binary`
+  runs in CI.
+- The file queue keeps a binary chunk as a `BLOB` in the same column as text chunks, and delivers each in the form it
+  came in. A queued binary chunk is held back from a connection that takes no binary frames (it stays until it
+  expires); older pages last only until the next reload.
+- The receiver's checks are those of JSON chunks (§9, step 4); only the decoding in front of them changed. No
+  `permessage-deflate`: ciphertext does not compress.
+
+**Grants.** The live budgets are there because nobody asked for those chunks. When a device asks for a file
+(`file-req`), it first tells the server it wants it: `{ t: "relay-grant", from, bytes }` lets the device `from` send it
+up to `bytes` (at most 2 GiB, the client asks for the file's size as text) in the next 30 minutes, and `bytes: 0` takes
+it back. The server tells `from`, if it is connected, so that it can pace for the larger budget. While a grant has
+room for a chunk, the chunk is counted against it and the granted budget (1 GiB per minute per sending device) instead
+of the live ones. A grant is between two devices: the sending account's other devices, and other senders, are still
+on the live budgets.
+- It cannot be used to flood anyone: only the receiving device can grant, and only for chunks to itself. The granted
+  budget bounds what one sending device costs the server in bandwidth.
+- Grants are in memory, at most 16 per receiving device (a new one replaces the oldest), and gone on a restart; the
+  transfer then falls back to the live budgets.
+- The server learns that a device asked another for something, and roughly how large. It could already see that from
+  the `file-req` frame's timing and the stream of chunks that followed.
+- Measured end to end (two Node clients against a release build with the default budgets, one machine): a 120 MiB
+  `ask` file took 125 s as text on the live budget, and 6.2 s as binary frames on a grant.
+
 ## 11. Data the server stores
 
 | Data | Why | Retention |
@@ -709,6 +781,7 @@ never leaves the device.
 | link requests | linking | memory only, 10 minutes |
 | relay frames (file chunks) | live transfer | not stored when the recipient device is connected |
 | queued file chunks (ciphertext) | files for devices that are away (sender's choice) | until acknowledged, at most 14 days (a disappearing picture's: its unread limit) |
+| relay grants (receiving device, sending device, bytes left), in memory | a faster transfer of a file the receiving device asked for (§10.2) | used up, taken back, 30 minutes, or a restart |
 | push endpoint per device | notifications (the user's choice) | until turned off, logged out, or reported gone |
 | VAPID key | signing push requests | while the server exists |
 | network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
@@ -740,6 +813,9 @@ What clients from before emoji, reactions and the shared GIF collection get from
 | a `file` message for a file over 100 MiB, and its chunks | dropped: clients before 1 GiB files took at most 100 MiB and 4096 chunks per file. The file is not shown there, also not after a later update; the sender cannot tell. Such clients last only until the page is reloaded (the server's `build` changes and an open page offers a reload) |
 | a `file` message with `ask` (over 50 MiB) | shown as a file not received yet, with only *Hämta från mina enheter*: the older device cannot take it. Once updated, it can |
 | `gifs` to an own older device | dropped; that device has no collection until it is updated, and then gets only GIFs saved after that. The bytes are pulled with `file-req` (§9.2), so no chunks are pushed to it; a `file-req` for `gif:…` sent to an older device finds no file message and is ignored |
+
+| a file chunk as a binary frame (§10.2) | not sent to it: an older page does not ask for binary frames in `auth`, so the server lists it in `relay-missed` (`text`), and the sender sends it text frames and offers the file again. A binary chunk queued while it was away stays queued until it expires; such pages last only until the next reload |
+| `relay-grant` | not sent by older devices, so a file they ask for comes on the live budgets as before; an older sender ignores the server's note and paces for the live budgets, which still leaves the transfer within the grant |
 
 An older device sends nothing new, so a newer device has nothing to handle from it.
 
@@ -923,104 +999,11 @@ key is replaced.
 
 ### 13.8 Faster file relay
 
-**Why.** A 400 MB file takes about 8 minutes even between two 250 Mbit/s connections. Three causes, largest first:
-- *The budget.* The relay allows 96 MiB of chunk text per minute from one account into one device (§10), and the
-  client paces to 90 % of it. Files over `ASK_ABOVE` go to one device only, so this is the limit they meet.
-- *Double base64.* The ciphertext is base64url in `c`, and the whole `{ k, f, i, n, c }` is base64url again by
-  `pack()`. A 48 KiB chunk becomes about 87.5 KB of text (1.78×), and the budget counts text. With binary frames it
-  would be about 49.2 KB (1.0×), so the same budget carries 1.78× more file: about 4.4 minutes for 400 MB.
-- *Work per chunk.* Each of the ~8 100 chunks of a 400 MB file is base64-encoded twice by the sender, parsed as JSON,
-  checked character by character and copied once per recipient by the server, and then base64-decoded twice and
-  parsed by the receiver, which also writes it to IndexedDB in a transaction of its own. Base64 runs in pure JS
-  (`rc.base64urlEncode`). Before the budget is raised, this is not the limit. After, it is.
-
-Related bug, fixed in step 1 below: `queuedBytes()` counts a queued file as `1.4 × size`, but the server stores the
-double-base64 text (about 1.78×). `relay-space` can therefore grant room that the file then overruns, and the
-transfer is refused partway through.
-
-**How it could fit: binary WebSocket frames for file chunks only.** Everything else stays JSON text, `file-req`
-included. The server still forwards bytes it cannot read; only the encoding on the way changes.
-
-*Client → server* (one binary frame per chunk; all integers big-endian):
-
-| Bytes | Field |
-|---|---|
-| 1 | frame type `0x01` (relay chunk); any other value closes the connection |
-| 1 | flags: bit 0 `store`; other bits must be 0 |
-| 1 | `k`, the number of recipient devices (1–24, `MAX_RECIPIENTS`) |
-| 16 × k | recipient device ids, raw (a device id is base64url of 16 bytes) |
-| 8 | `ref`, random; echoed in base64url in `relay-missed` and `error` frames |
-| 4 | `ttl` in seconds, 0 for none (only with `store`) |
-| rest | payload, at most `MAX_RELAY_BIN` (64 KiB): `f` (1 byte length, at most 64, then the ASCII id), `i` (4), `n` (4), AES-GCM ciphertext |
-
-*Server → client:* type `0x02`, the sender's device id (16 bytes, raw), the sender's account (1 byte length, then the
-id), the queue id (8 bytes; 0 when live), then the payload unchanged. The receiver sets `binaryType = "arraybuffer"`,
-and the ciphertext goes to `crypto.subtle` with no copy and no decoding.
-
-**Security.** None of the following may be weaker than today:
-- *Parsing.* The server reads fixed offsets with checked bounds. It refuses a frame that is truncated, has `k = 0` or
-  `k > 24`, sets unknown flags, or has a payload over the limit. It never allocates more than the frame's own length.
-  Axum's `max_message_size` stays the hard limit, and binary frames are smaller than `MAX_FRAME`. A new fuzz target,
-  `ws_binary`, joins the existing ones and runs in CI.
-- *State.* A binary frame is accepted only after `auth`. Before it, the connection closes, as for any unexpected
-  frame.
-- *Identity.* As today, `from` and `account` come from the authenticated connection, never from the frame.
-- *Recipients and limits.* The same rules as the JSON `relay` frame: duplicates and the sender's own device are
-  dropped, and the frame limit (3 000 per minute) and the byte budgets are charged all or nothing, before anything is
-  forwarded. The payload's bytes are counted where the text was counted before.
-- *What the server learns.* It sees the same as today, since it could already decode `f`, `i` and `n` (T20). The
-  AAD (`f:i:n`) and the file key are unchanged, so a chunk is authenticated exactly as now (§9).
-- *Receiver.* The checks of `onRelay` are unchanged: chunks only from own devices and contacts, `i < n ≤ MAX_PARTS`,
-  ciphertext no longer than one chunk plus the tag, decrypted on arrival, the whole file hashed. Only the decoding
-  in front of them changes.
-- *No compression* (`permessage-deflate`): ciphertext does not compress, and it would only add CPU and parser
-  surface.
-- *At rest.* Parts stay encrypted in IndexedDB with the local key (§8.1). Removing that re-encryption is not part of
-  this change.
-
-**Performance.**
-- Server: `Push` gains a `Binary(Bytes)` variant. A chunk to several devices then shares one reference-counted
-  buffer instead of a copy of an 87 KB `String` for each device, and the per-character check of `data` goes away.
-- File queue: `relay_queue` stores chunks as `BLOB` with a format column. Chunks queued as text by older clients are
-  delivered as text, unchanged.
-- Receiver: write parts to IndexedDB in batches (for example 16 per transaction, or every 100 ms), as the sender
-  already does with `PART_BATCH`. Hashing stays in order. Acknowledgements are unchanged: queued chunks are still
-  acknowledged when the file is complete. A `QuotaExceededError` drops the whole batch together with the transfer,
-  as it drops one part today.
-- Sender: read and encrypt the next chunk while the current one is sent (one ahead), and wait in `drain()` for the
-  socket's buffer to empty instead of checking it every 20 ms where that is possible.
-
-**Mixed versions (§12).**
-- The server announces `relay.binary: 1` in `ready`. A client sends binary frames only to such a server, and falls
-  back to text otherwise.
-- A connection opts in to receiving binary frames with `caps: ["bin"]` in `auth`. To a connection that did not, the
-  server delivers nothing and lists the device in `relay-missed`. The file is then offered again later (§9, step 3),
-  which reaches the device once it is updated, and older pages last only until the next reload.
-  The server never converts a binary chunk to text: that would make it build the client's payload format.
-
-**Decide first.**
-1. *The budget.* Should it stay 96 MiB per minute in bytes of payload (1.78× more file per minute; T31 then allows
-   1.78× more data into a device), or be lowered so that the data a device can be sent stays the same? And should a
-   transfer the recipient asked for (`file-req` for an `ask` file, §9) be allowed a larger budget? It cannot be
-   flooding, because the recipient asked for it, but the server cannot see `file-req` either. It would have to be a
-   budget the receiving device grants, such as a short-lived token the recipient's device gives the server, with its
-   own limits.
-2. *A larger chunk size* (for example 256 KiB), for fewer frames, transactions and round trips. Older clients reject
-   a chunk larger than 48 KiB, so it would need a `chunk` field in the `file` message and a §12 row. Better as a
-   separate step after this one.
-3. *Whether `MURMO_LIMIT_SCALE` is enough for now.* It raises the relay budgets today without code, but also every
-   other limit, so a separate `MURMO_RELAY_SCALE` may be wanted.
-
-**Order of work.**
-1. Fix `queuedBytes()` to count the real overhead, which is safe today. Use the browser's native
-   `Uint8Array.prototype.toBase64` / `fromBase64` where it exists, keeping the JS version as a fallback.
-2. Server: parse binary frames (types and tests), add the fuzz target, add `Push::Binary`, charge the same limits,
-   and announce `relay.binary`. Also take `caps` in `auth`, and change the `relay_queue` migration (`BLOB` and a
-   format column).
-3. Client: `binaryType`, the frame codec in `protocol.js` with its own tests, `streamFile` and `onRelay` on binary
-   frames with text as the fallback, and pace by payload bytes.
-4. Receiver batching and sending one chunk ahead.
-5. Tests: Rust tests for the parser and the limits, protocol tests in Node, and an e2e test with a binary and a text
-   client in the same conversation (the binary one listed in `relay-missed` to the text one), plus a large-file
-   timing test.
-6. Update §9, §10 (frames and limits), §12 (a row for binary chunks), THREAT_MODEL T20/T31, and PLAN.md.
+Built: binary chunk frames, grants for files the recipient asked for, and a budget of its own for the file queue
+(§10, §10.2). What is left of the plan:
+- **Receiver batching:** write arriving parts to IndexedDB a few at a time (as the sender reads them with
+  `PART_BATCH`) instead of one transaction per chunk; in the measurement in §10.2 this, and hashing, is now the limit.
+- **A larger chunk size** (for example 256 KiB), for fewer frames, transactions and round trips. Older clients refuse
+  a chunk larger than 48 KiB, so it needs a `chunk` field in the `file` message and a §12 row.
+- **A larger live budget** for files that are pushed (below `ASK_ABOVE`)? It is now 1.78× more file per minute than
+  before, since binary chunks are counted by their payload (T31).
