@@ -1,156 +1,84 @@
-# Murmo Secure Messenger
+<p align="center">
+  <img src="client/icon.svg" alt="" width="72" height="72">
+</p>
 
-A small web messenger with end-to-end encryption between browsers, **built on [rootcard](https://rootcard.org) for
-identity**.
+<h1 align="center">Murmo Secure Messenger</h1>
 
-You need no phone number or e-mail address: you log in with a rootcard identity, one at the Murmo server's own
-rootcard home, or at another home such as rootcard.org. rootcard gives the identity a verifiable log of keys, an
-encrypted vault and a recovery card, and Murmo roots its device lists, and with them the end-to-end encryption, in
-that log rather than in trust in the server. The server is one Rust binary that stores as little as possible.
+<p align="center">
+  End-to-end encrypted messaging in the browser, with no phone number and no e-mail address.<br>
+  <strong><a href="https://murmo.org">Try it at murmo.org</a></strong> ·
+  <a href="docs/DESIGN.md">Design</a> ·
+  <a href="docs/THREAT_MODEL.md">Threat model</a> ·
+  <a href="docs/HOSTING.md">Hosting</a> ·
+  <a href="SECURITY.md">Security</a>
+</p>
 
-> **Status: early.** Murmo 0.1 is a working first version built on rootcard 0.3.5 (pre-1.0, not externally reviewed).
-> Neither has had a security review. Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) before trusting it with anything.
-> Report security problems privately, as described in [SECURITY.md](SECURITY.md).
+---
 
-## What it does
+Murmo is a small web messenger. Messages are encrypted on your device, separately for each of the recipient's
+devices, and only those devices can read them. Your identity is a [rootcard](https://rootcard.org) identity: you
+reach someone only with their exact identifier (`Alice#3F9C`), and the device lists behind the encryption are rooted
+in rootcard's verifiable key log rather than in trust in the server. The server is a single Rust binary that stores
+as little as possible.
 
-- **rootcard login.** Register here (the recovery card is shown and must be saved *before* the account is created),
-  or log in with an identity from another rootcard home (`rootcard.org`). The password never leaves the browser.
-- **No search.** You reach someone only with their exact identifier, `Alice#3F9C` (or `Alice#3F9C@rootcard.org`).
-- **Message requests.** The first message is a request; nothing else from that sender appears until it is accepted.
-  Decline and block are local decisions, so the server learns no social graph.
-- **End-to-end encryption per device**, with signed device lists rooted in the rootcard log: a password alone cannot
-  add a device; a new device must be approved on an existing one (compare the code on both screens).
-- **Queued or delivered.** A sent message shows a ring while the server holds it for the recipient and a ring with a
-  check once one of their devices has it. The receipt comes end-to-end encrypted from the recipient's device, only
-  between accepted contacts; the server reports nothing.
-- **Paper key** for when no device is left: written down, it approves a new device together with the password, so the
-  account and contacts' trust survive losing the only browser (the history does not: it was only on that device).
-- **Safety codes** to compare in person; device-list changes are gossiped inside messages and forks are refused.
-- **Several devices.** Messages go to all your devices; a newly linked device receives the history from the device
-  that approved it.
-- **Files.** Files go live, encrypted, to connected devices through an in-memory relay. For devices that are away the
-  server can keep the encrypted chunks until they are fetched (at most 14 days; the sender can turn this off, and so
-  can the operator); otherwise the file is sent when both are connected. Images (PNG, JPEG, GIF, WebP) show inline.
-  Your own devices can later fetch a file from each other. Chunks go as binary frames, and a file the recipient asked
-  for comes as fast as both connections allow.
-- **Files view.** Every shared file in one place: photos and videos as tiles, documents as rows, by month, with
-  filters, a viewer and detailed progress for transfers. A file can be removed from one device to free room and
-  fetched again later from another of your devices (docs/DESIGN.md §9.4).
-- **Undo, edit and delete.** A text waits 5 seconds before it is sent, shown in the thread with an undo button
-  ("Ångra"); a sent text can be edited within 24 hours (marked "redigerat" on both sides); a sent text or file can be
-  deleted for everyone within 24 hours (it becomes "… tog bort ett meddelande" on both sides), or for yourself
-  on all your devices. Deleting for everyone cannot reach what the other person has already seen, or a device with an
-  older or modified client, and the app says so (docs/DESIGN.md §6.6).
-- **Emoji, reactions and GIFs.** An emoji picker in the composer (plain Unicode drawn by the system font; messages of
-  only a few emoji are shown larger), end-to-end encrypted emoji reactions on messages, and a GIF collection of your
-  own, kept encrypted and shared between your devices: save a GIF someone sent, pick one from a file or, if the
-  operator set a GIPHY key, search GIPHY, and send it with a tap. GIPHY search runs directly from the browser and the
-  app says so: GIPHY sees your address and what you search for, protected by HTTPS only.
-- **Code.** `` `inline code` `` and fenced ```` ``` ```` blocks, coloured for common languages when the sender names
-  one (`` ```rust ``), with a copy button; nothing else of Markdown, so no links or HTML can hide in a message. Enter
-  makes a new line inside an open block (docs/DESIGN.md §6.10).
-- **Notifications** in the browser and the installed app (PWA), on by default once the browser's permission is given (and a setting per device): an empty Web Push wakes the browser,
-  the notification says only "Nytt meddelande", and being woken does not make the device look connected.
-- **Encrypted local storage** unlocked by the rootcard password: a secret in the rootcard vault unlocks each device's
-  local data, but the E2E private keys never enter the vault (docs/DESIGN.md §8).
-- **Calm interface** with light, dark and automatic themes; works on phones.
-- **In your language**: German, English, Spanish and Swedish, chosen from the browser's languages (or picked in the
-  app), with English for any other. Times are Unix seconds (UTC) on the wire, on the server and on the device, and are
-  only turned into local time, in the browser's time zone, when shown (`client/js/i18n.js`, texts in `client/js/lang/`).
+> **Status: early.** Murmo 0.1 builds on rootcard 0.3.5. Neither has had an external security review. Read the
+> [threat model](docs/THREAT_MODEL.md) before trusting it with anything sensitive, and report vulnerabilities
+> privately as described in [SECURITY.md](SECURITY.md).
 
-## What the server stores
+## Features
 
-rootcard data for its own identities (log, encrypted vault, profile), verified logs of connected identities from
-other homes, device lists and current prekeys, ciphertext addressed to devices until it is delivered (at most
-14 days), encrypted file chunks for devices that are away (same limit, can be turned off), and push endpoints of
-devices that asked for notifications. No message history, no contact lists, no files, no access logs with addresses. Details:
-[docs/DESIGN.md §11](docs/DESIGN.md).
+- **No phone number, no search.** Log in with a rootcard identity, created here or at another home such as
+  rootcard.org. The password never leaves the browser.
+- **Message requests.** A stranger's first message is a request; block and decline are local decisions.
+- **Several devices.** A new device is approved on an existing one (compare a code), and gets the history from it.
+  A paper key replaces a lost last device.
+- **Safety codes** to compare in person; changes to a contact's devices are detected and forks refused.
+- **Files and images**, encrypted end to end, sent live or queued on the server for at most 14 days.
+- **Edit, undo, delete for everyone**, reactions, emoji, GIFs and highlighted code blocks.
+- **Installable app (PWA)** with notifications that reveal nothing but "New message".
+- **German, English, Spanish and Swedish**, light and dark themes, works on phones.
 
-## Run it
+The server keeps no message history, no contact lists and no access logs: only ciphertext waiting for delivery,
+public device keys and what rootcard needs. Full list in [DESIGN.md §11](docs/DESIGN.md).
 
-Requirements: Rust 1.95+, a modern browser (WebCrypto Ed25519 and X25519).
+## Run your own server
+
+Requirements: Rust 1.95+ and a modern browser.
 
 ```sh
+git clone https://github.com/Hexagon/murmo.git
+cd murmo
 cargo run --release
 # open http://127.0.0.1:8080
 ```
 
-Configuration (environment):
+For a public server, put a TLS reverse proxy in front and set `MURMO_ORIGIN=https://your.domain` (choose it once: it
+goes into users' signed identity logs). All settings, and how to move to a new domain, are in
+[docs/HOSTING.md](docs/HOSTING.md).
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `MURMO_ORIGIN` | `http://127.0.0.1:8080` | public origin; must be `https://` except on loopback |
-| `MURMO_OLD_ORIGINS` | empty | earlier public origins that still reach this server after a move of domain (comma-separated), see below |
-| `MURMO_BIND` | `127.0.0.1:8080` | listen address (put a TLS reverse proxy in front) |
-| `MURMO_DB` | `murmo.sqlite` | SQLite database |
-| `MURMO_HOST_KEY_FILE` | `murmo-host.key` | rootcard host key, created on first start (back it up, keep it secret) |
-| `MURMO_CLIENT_DIR` | `client` | static client to serve (empty: none) |
-| `MURMO_REALM` | `global` | rootcard realm for identities registered here |
-| `MURMO_REMOTE_HOMES` | `https://rootcard.org` | other homes whose identities may log in (comma-separated origins, `*` for any https host, empty for none) |
-| `MURMO_REALMS` | `global` | realms accepted from other homes |
-| `MURMO_TRUST_PROXY` | `0` | proxies whose `X-Forwarded-For` is believed: `0` none, `1` loopback and private networks, or a list of addresses and CIDR ranges (`10.1.2.3,fd00::/8`) |
-| `MURMO_FILE_QUEUE_MB` | `150` | encrypted file chunks kept per device that is away (`0`: files only go live) |
-| `MURMO_FILE_QUEUE_TOTAL_MB` | `2048` | file chunks kept in total |
-| `MURMO_FILE_QUEUE_SENDER_MB` | `50` | file chunks one account may queue for one device of another account |
-| `MURMO_FILE_QUEUE_ACCOUNT_MB` | `300` | file chunks one account may queue in total |
-| `MURMO_RELAY_GRANTED_MB` | `1024` | MiB per minute one device may stream to devices that asked it for a file (`0`: no grants, everything on the live budgets) |
-| `MURMO_RELAY_STORE_MB` | `128` | MiB per minute one account may put into the file queue |
-| `MURMO_PUSH_HOSTS` | the push services of Chrome, Firefox, Safari, Edge | push-service hosts accepted for notifications (`*.` for subdomains, empty: no push) |
-| `MURMO_PUSH_CONTACT` | `MURMO_ORIGIN` | contact sent to push services (`mailto:` or `https:` URL) |
-| `MURMO_GIPHY_KEY` | empty | GIPHY API key; lets users search GIPHY to fill their GIF collection, directly from the browser (empty: no search). A beta key allows 100 searches an hour for the whole server |
-| `MURMO_GIPHY_RATING` | `pg-13` | GIPHY content rating for searches (`g`, `pg`, `pg-13`, `r`) |
+## Development
 
-Murmo was called mesg before. The old variable names (`MESG_…`) still work when the new ones are not set, and an
-existing `mesg.sqlite` / `mesg-host.key` is used when the new default files do not exist yet.
+The client is plain ES modules with no build step and no dependencies besides the vendored rootcard core: edit and
+reload. `client/vendor/rootcard` is rootcard 0.3.5 from npm, unmodified.
 
-The version shown in the app ("Säkerhet och integritet") is the commit the server was built from: `MURMO_COMMIT` or
-`GITHUB_SHA` at build time, otherwise `git rev-parse HEAD`.
-
-The `MURMO_ORIGIN` goes into users' signed rootcard logs as their home address: choose it once.
-
-### Moving to a new domain
-
-The page's origin must be one the server knows: proofs and the WebSocket are signed for it, and the browser keeps
-each origin's data (devices, conversations) apart. To move, keep the old domain pointing at the same server and set:
+```
+server/   the Rust server: rootcard home, device lists, WebSocket mailbox, file relay
+client/   the web client (js/protocol.js protocol, js/core.js engine, js/app.js interface, js/lang/ texts)
+docs/     DESIGN.md (protocol), THREAT_MODEL.md, HOSTING.md, PLAN.md
+tests/    protocol, end-to-end and browser smoke tests
+fuzz/     cargo-fuzz targets
+```
 
 ```sh
-MURMO_ORIGIN=https://new.example          # new identities get their home here
-MURMO_OLD_ORIGINS=https://old.example     # still answered: old devices keep working, old identities keep their home
+cargo test                           # server tests
+cargo build && npm ci && npm test    # protocol and end-to-end tests (Node 22+)
+npm run test:ui                      # browser smoke test, see tests/ui-smoke.mjs for setup
+cd fuzz && cargo +nightly fuzz run ws_frame   # fuzzing (also json_body, http_text)
 ```
 
-Identities registered under the old domain keep `https://old.example/id` as their home for good (it is in their
-signed log), so the old domain must keep reaching the server, at least `/id` and `/.well-known/rootcard`. Each user
-moves their conversations by logging in on the new domain and approving that device on a device on the old domain:
-the history is handed over as for any new device. Identities from other homes (rootcard.org) are not affected.
-
-## Layout
-
-```
-server/        murmo-server (Rust): rootcard home (rootcard-host), device lists, link requests, WebSocket mailbox,
-               live relay, remote homes, rate limits, security headers
-client/        the web client: plain ES modules, no build step, no dependencies besides the vendored rootcard core
-  js/protocol.js   device lists, prekeys, envelopes, signatures, codes, file chunks (pure, also runs in Node)
-  js/core.js       the messenger engine (requests, sync, history, files)
-  js/app.js        the interface
-  vendor/rootcard  rootcard 0.3.5 from npm, unmodified (npm tarball SHA-256 cb4cd6d4…89670ef); its keytool.html is
-                   offered as a download for resetting an identity of this home with the recovery card
-docs/          DESIGN.md (protocol), THREAT_MODEL.md, PLAN.md
-tests/         protocol tests, end-to-end tests (two servers, a move of domain, real client engine), browser smoke test
-```
-
-## Tests
-
-```sh
-cargo test                    # server unit tests, incl. a device list made by the JS client
-cargo build && npm ci && npm test        # protocol tests + end to end against two running servers
-# Browser smoke test (headless Chrome, fails on any console error such as a CSP violation):
-MURMO_ORIGIN=http://127.0.0.1:18100 MURMO_BIND=127.0.0.1:18100 MURMO_LIMIT_SCALE=10 cargo run &
-CHROME=/path/to/chrome npm run test:ui
-# Fuzzing (nightly, cargo install cargo-fuzz): json_body, http_text, ws_frame
-cd fuzz && cargo +nightly fuzz run ws_frame
-```
+Contributions are welcome: open an issue or a pull request. Security issues go through
+[SECURITY.md](SECURITY.md), not public issues.
 
 ## License
 
-MIT OR Apache-2.0.
+[MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
