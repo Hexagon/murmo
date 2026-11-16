@@ -18,6 +18,9 @@
 //! | `MURMO_LIMIT_SCALE` | `1` | multiply every rate limit (tests only) |
 //! | `MURMO_GIPHY_KEY` | empty | GIPHY API key: lets browsers search GIPHY directly for their GIF collection (empty: no search) |
 //! | `MURMO_GIPHY_RATING` | `pg-13` | GIPHY content rating for searches (`g`, `pg`, `pg-13`, `r`) |
+//! | `MURMO_OPERATOR` | empty | who runs this server (a person or an organisation), named in the terms and privacy notice |
+//! | `MURMO_CONTACT` | empty | how to reach the operator about privacy, abuse and authorities (an e-mail address or an https URL) |
+//! | `MURMO_BETA` | `1` | mark the service as an open beta in the client (`0`: no mark) |
 //!
 //! Each variable is also read under its old name, `MESG_…`, when the `MURMO_…` name is not set. The default files
 //! `murmo.sqlite` and `murmo-host.key` fall back to `mesg.sqlite` and `mesg-host.key` when only those exist.
@@ -130,6 +133,17 @@ fn rate_mb(name: &str, default: u32) -> u32 {
         * 1024
 }
 
+/// A line of text for the terms page: control characters dropped, whitespace collapsed, at most 200 characters.
+fn notice_text(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect()
+}
+
 fn megabytes(name: &str, default: i64) -> i64 {
     env(name, &default.to_string())
         .parse::<i64>()
@@ -191,6 +205,9 @@ fn config() -> Result<Config, String> {
             r @ ("g" | "pg" | "pg-13" | "r") => r.to_string(),
             _ => "pg-13".to_string(),
         },
+        operator: notice_text(&env("MURMO_OPERATOR", "")),
+        contact: notice_text(&env("MURMO_CONTACT", "")),
+        beta: env("MURMO_BETA", "1") != "0",
     })
 }
 

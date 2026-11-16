@@ -1017,6 +1017,9 @@ mod tests {
             push_hosts: Vec::new(),
             giphy_key: String::new(),
             giphy_rating: "pg-13".into(),
+            operator: String::new(),
+            contact: String::new(),
+            beta: true,
             push_contact: String::new(),
         };
         let db = crate::db::Db::open(":memory:").expect("database");

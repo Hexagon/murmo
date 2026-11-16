@@ -106,6 +106,7 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
         .with("realms", Value::Array(realms))
         .with("homes", homes)
         .with("file_queue", app.cfg.file_queue > 0)
+        .with("beta", app.cfg.beta)
         .with("version", env!("CARGO_PKG_VERSION"))
         .with("source", env!("CARGO_PKG_REPOSITORY"));
     if !env!("MURMO_COMMIT").is_empty() {
@@ -122,6 +123,15 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
                 .with("device", l.device)
                 .with("sender", l.pair)
                 .with("account", l.account)
+                .into(),
+        );
+    }
+    if !app.cfg.operator.is_empty() || !app.cfg.contact.is_empty() {
+        m.insert(
+            "operator",
+            Map::new()
+                .with("name", app.cfg.operator.as_str())
+                .with("contact", app.cfg.contact.as_str())
                 .into(),
         );
     }

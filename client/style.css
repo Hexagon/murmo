@@ -510,6 +510,10 @@ dialog.wide { width: min(640px, calc(100% - 24px)); max-height: calc(100dvh - 32
 .help li { margin: 4px 0; font-size: 14px; }
 .version { margin-top: 16px; font-variant-numeric: tabular-nums; }
 .version a { color: inherit; }
+.beta { display: inline-block; padding: 3px 8px; border: 1px solid var(--accent); border-radius: 999px; color: var(--accent); font: 600 11px/1.2 var(--sans); letter-spacing: .3px; white-space: nowrap; vertical-align: middle; }
+.beta[hidden] { display: none; }
+.site-head .beta { margin-left: -6px; }
+.beta-note { max-width: 320px; margin: 0; text-align: center; }
 .about { font-size: 13px; color: var(--muted); padding: 4px 4px 0; }
 .about li { margin: 3px 0; }
 .about .link { margin-top: 8px; font-size: 13px; }

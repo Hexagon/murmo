@@ -414,10 +414,91 @@ function showHelp() {
       HELP.map(([title, n]) => h("section", {}, h("h3", { text: tr(title) }), h("ul", {}, Array.from({ length: n }, (_, i) => h("li", { text: tr(`${title}.${i + 1}`) }))))),
     ),
     versionLine(),
+    h("div", { class: "actions" },
+      h("button", { class: "btn", text: tr("terms.title"), onclick: () => { d.close(); showTerms(); } }),
+      h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() }),
+    ),
+  );
+  d.classList.add("wide");
+  d.scrollTop = 0;
+}
+
+// ── terms, privacy and the open beta ────────────────────────────────────────────────────────────────────────────
+
+/** The day the terms below last changed (Unix seconds), shown with them. */
+const TERMS_DATE = Date.UTC(2026, 10, 16) / 1000;
+
+/** The sections of the terms, as HELP. Who runs the server (MURMO_OPERATOR, MURMO_CONTACT) comes after privacy. */
+const TERMS = [
+  ["terms.beta", 3],
+  ["terms.warranty", 3],
+  ["terms.use", 4],
+  ["terms.privacy", 5],
+  ["terms.other", 3],
+];
+
+/** Whether this server calls itself an open beta (`MURMO_BETA`, on unless turned off). */
+function isBeta() {
+  return info?.beta !== false;
+}
+
+/** The "Open beta" mark, or null when the server is not in beta. */
+function betaMark() {
+  return isBeta() ? h("span", { class: "beta", title: tr("beta.note"), text: tr("beta.mark") }) : null;
+}
+
+/** Who runs this server and how to reach them, as the server says (`MURMO_OPERATOR`, `MURMO_CONTACT`). */
+function operatorSection() {
+  const o = info?.operator;
+  const name = typeof o?.name === "string" ? o.name.slice(0, 200) : "";
+  const contact = typeof o?.contact === "string" ? o.contact.slice(0, 200) : "";
+  // Only an https address becomes a link; anything else (an e-mail address) is shown as text.
+  const link = /^https:\/\/[^\s"<>]+$/.test(contact)
+    ? h("a", { href: contact, target: "_blank", rel: "noopener noreferrer", text: contact })
+    : h("strong", { text: contact });
+  return h(
+    "section",
+    {},
+    h("h3", { text: tr("terms.operator") }),
+    h("ul", {},
+      h("li", { text: name ? tr("terms.operatorName", { name }) : tr("terms.operatorNone") }),
+      contact ? h("li", {}, tr("terms.contact"), " ", link) : null,
+      h("li", { text: tr("terms.rights") }),
+    ),
+  );
+}
+
+function showTerms() {
+  const section = ([title, n]) => h("section", {}, h("h3", { text: tr(title) }), h("ul", {}, Array.from({ length: n }, (_, i) => h("li", { text: tr(`${title}.${i + 1}`) }))));
+  const date = new Date(TERMS_DATE * 1000).toLocaleDateString(i18n.locale(), { dateStyle: "long", timeZone: "UTC" });
+  const d = dialog(
+    h("h2", {}, tr("terms.title"), " ", betaMark()),
+    h("p", { class: "hint", text: tr("terms.updated", { date }) }),
+    h("p", { text: tr("terms.intro") }),
+    h(
+      "div",
+      { class: "help" },
+      TERMS.slice(0, 4).map(section),
+      operatorSection(),
+      TERMS.slice(4).map(section),
+    ),
+    versionLine(),
     h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
   );
   d.classList.add("wide");
   d.scrollTop = 0;
+}
+
+/** The static page's beta mark and its link to the terms (index.html), and `#villkor` opening the terms. */
+function wirePage() {
+  const mark = document.getElementById("beta-mark");
+  if (mark) mark.hidden = !isBeta();
+  const link = document.getElementById("terms-link");
+  link?.addEventListener("click", (e) => {
+    e.preventDefault();
+    showTerms();
+  });
+  if (location.hash === "#villkor") showTerms();
 }
 
 /**
@@ -442,6 +523,7 @@ async function boot() {
     return;
   }
   info = await api.info();
+  wirePage();
   const origins = info.origins ?? (info.origin ? [info.origin] : []);
   if (origins.length && !origins.includes(location.origin)) {
     // The server signs and checks everything for its configured origin (MURMO_ORIGIN): proofs to it and the
@@ -489,7 +571,9 @@ function showAuth(tab = "login", prefill = "") {
       h(
         "div",
         { class: "auth-foot" },
+        isBeta() ? h("p", { class: "hint beta-note" }, betaMark(), " ", tr("beta.note")) : null,
         h("button", { class: "link", type: "button", text: tr("about.more"), onclick: showHelp }),
+        h("button", { class: "link", type: "button", text: tr("terms.title"), onclick: showTerms }),
         themePicker(),
         languagePicker(() => showAuth(tab)),
       ),
@@ -612,6 +696,7 @@ function registerForm(body, err) {
       h("div", { class: "field" }, h("label", { text: tr("auth.repeat") }), pw2),
       h("p", { class: "hint", text: tr("auth.handleHint") }),
       (info?.homes ?? []).length ? h("p", { class: "hint", text: tr("auth.haveIdentity", { homes: allowedHomes() }) }) : null,
+      h("p", { class: "hint" }, tr("terms.accept"), " ", h("button", { class: "link", type: "button", text: tr("terms.read"), onclick: showTerms })),
       btn,
     ),
   );
@@ -1135,7 +1220,7 @@ function renderShell() {
       h(
         "div",
         { class: "side-top" },
-        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo"),
+        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo", betaMark()),
         h(
           "div",
           { class: "side-actions" },
@@ -3567,6 +3652,7 @@ function showAccountMenu() {
       h("button", { class: "btn", text: tr("acct.copy"), onclick: () => copyHandle()?.then(() => d.close()) }),
       h("button", { class: "btn", text: tr("acct.devices"), onclick: () => { d.close(); showDevices(); } }),
       h("button", { class: "btn", text: tr("help.title"), onclick: () => { d.close(); showHelp(); } }),
+      h("button", { class: "btn", text: tr("terms.title"), onclick: () => { d.close(); showTerms(); } }),
       h("label", { class: "check" }, notice, h("span", {}, tr("acct.notify"), noticeHint)),
       h(
         "label",
