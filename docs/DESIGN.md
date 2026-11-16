@@ -181,6 +181,23 @@ so the account, its device list and the trust contacts have pinned stay as they 
   new request from them with `accept` at once (§6.2), so conversations resume without a new acceptance.
 - A paper key belongs to an instance: after a reset with the recovery card it is gone with the old list.
 
+### 4.6 Nicknames
+
+A nickname is the user's own name for a device of the account, kept apart from the signed device list. Any device can
+give any present non-paper device (including itself) a nickname; an empty one clears it and the automatic label
+("Chrome på Linux", from the browser's user agent) is shown again. A nickname is trimmed, at most 64 characters and
+free of control characters.
+
+- **Stored encrypted** in the local store, in the secret `names` as `{ [device id]: { name, time } }` (`time` in
+  milliseconds; an empty `name` is a tombstone that clears it).
+- **Own-only `names` message:** a change is sent to the account's other devices as
+  `{ set: { [device id]: { name, time } } }` with `conv` = the own account. Only an own device is taken; the same
+  message from a contact is ignored.
+- **Last writer wins** by `time`; a tie keeps the entry already there. At most 32 entries are kept.
+- **A newly linked device** receives the whole map after the history hand-over (§4.3, §7), like the GIF collection.
+- The server never sees a nickname: it is not in the signed device list and is never sent to it. The label in the list
+  (which the server does store, §4.1) stays the automatic one.
+
 ## 5. Encryption
 
 ### 5.1 Envelope
@@ -905,6 +922,7 @@ What clients from before emoji, reactions, the shared GIF collection and code fo
 | a `file` message with `ask` (over 50 MiB) | shown as a file not received yet, with only *Hämta från mina enheter*: the older device cannot take it. Once updated, it can |
 | `` `inline code` `` and ```` ``` ```` blocks in a text (§6.10) | the text with its backticks, as written; nothing is lost |
 | `gifs` to an own older device | dropped; that device has no collection until it is updated, and then gets only GIFs saved after that. The bytes are pulled with `file-req` (§9.2), so no chunks are pushed to it; a `file-req` for `gif:…` sent to an older device finds no file message and is ignored |
+| `names` to an own older device | dropped; it shows the automatic labels until it is updated, and then only gets the nicknames set after that |
 
 | a file chunk as a binary frame (§10.2) | not sent to it: an older page does not ask for binary frames in `auth`, so the server lists it in `relay-missed` (`text`), and the sender sends it text frames and offers the file again. A binary chunk queued while it was away stays queued until it expires; such pages last only until the next reload |
 | `relay-grant` | not sent by older devices, so a file they ask for comes on the live budgets as before; an older sender ignores the server's note and paces for the live budgets, which still leaves the transfer within the grant |

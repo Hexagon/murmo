@@ -511,6 +511,8 @@ export default {
   "dev.hint": "Los dispositivos nuevos se añaden iniciando sesión en ellos y aprobándolos aquí. Una contraseña no basta para añadir un dispositivo.",
   "dev.lone": "Este es tu único dispositivo. Si se borran los datos del navegador, nadie podrá aprobar uno nuevo: entonces hará falta la tarjeta de recuperación, la cuenta empezará de cero y el historial se perderá. Vincula otro dispositivo o crea una clave en papel.",
   "dev.this": "{label} (este)",
+  "dev.rename": "Renombrar",
+  "dev.renameHint": "Déjalo vacío para usar {label} de nuevo.",
   "dev.paperHint": "Puede aprobar un dispositivo nuevo junto con tu contraseña. Si la quitas, la clave antigua deja de funcionar.",
   "dev.removePaper": "¿Quitar la clave en papel? Ya no podrá aprobar un dispositivo nuevo.",
   "dev.haveKey": "Tienes una clave en papel. Una nueva sustituye a la antigua, que deja de funcionar.",

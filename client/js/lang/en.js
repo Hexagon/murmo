@@ -511,6 +511,8 @@ export default {
   "dev.hint": "New devices are added by logging in on them and approving here. A password is not enough to add a device.",
   "dev.lone": "This is your only device. If the browser's data is cleared, nobody can approve a new device: the recovery card is then needed, the account starts over and the history is lost. Link another device, or create a paper key.",
   "dev.this": "{label} (this one)",
+  "dev.rename": "Rename",
+  "dev.renameHint": "Leave empty to use {label} again.",
   "dev.paperHint": "Can approve a new device together with your password. If you remove it, the old key stops working.",
   "dev.removePaper": "Remove the paper key? It can then no longer approve a new device.",
   "dev.haveKey": "You have a paper key. A new one replaces the old one, which then stops working.",

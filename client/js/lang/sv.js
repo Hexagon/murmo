@@ -511,6 +511,8 @@ export default {
   "dev.hint": "Nya enheter läggs till genom att logga in på dem och godkänna här. Ett lösenord räcker inte för att lägga till en enhet.",
   "dev.lone": "Det här är din enda enhet. Om webbläsarens data rensas kan ingen godkänna en ny enhet: då behövs återställningskortet, kontot börjar om och historiken går förlorad. Länka en enhet till, eller skapa en pappersnyckel.",
   "dev.this": "{label} (den här)",
+  "dev.rename": "Byt namn",
+  "dev.renameHint": "Lämna tomt för att använda {label} igen.",
   "dev.paperHint": "Kan godkänna en ny enhet tillsammans med ditt lösenord. Tar du bort den slutar den gamla nyckeln att fungera.",
   "dev.removePaper": "Ta bort pappersnyckeln? Den kan då inte längre godkänna en ny enhet.",
   "dev.haveKey": "Du har en pappersnyckel. En ny ersätter den gamla, som då slutar fungera.",
