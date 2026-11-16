@@ -72,7 +72,8 @@ Kept in [DESIGN.md §13](DESIGN.md#13-ideas-not-decided) to be decided later: re
 social recovery of the paper key, QR verification, identity timeline, aliases, calm messaging, "what the server
 knows about me", duress password, sealed sender, one-time secrets, shared objects, voice, on-device translation,
 calls, a contact widget, alerts and bots (with a worked plan for an AI assistant as a contact), checking the served
-client, and what is left of the faster file relay (receiver batching, larger chunks, §13.8).
+client, what is left of the faster file relay (receiver batching, larger chunks, §13.8), and a view of all shared
+files (§13.9).
 
 ## Open questions
 
