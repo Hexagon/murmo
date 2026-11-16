@@ -456,7 +456,8 @@ try {
   await a.waitForFunction(() => document.querySelectorAll(".side-list .conv.hit").length === 1 && document.querySelector(".side-list .conv.hit mark")?.textContent === "Andra rad", { timeout: 5000 });
   await a.screenshot({ path: `${shots}/a-7b-search.png` });
   await a.evaluate(() => { const s = document.querySelector(".main .scroll"); s.scrollTop = s.scrollHeight; });
-  await a.click(".side-list .conv.hit");
+  // Clicked in the page: the result list may be drawn again (a message event) between finding the hit and the click.
+  await a.waitForFunction(() => { const hit = document.querySelector(".side-list .conv.hit"); hit?.click(); return !!hit; }, { timeout: 5000 });
   await a.waitForFunction(() => {
     const m = document.querySelector(".msg.found");
     if (!m || !m.textContent.includes("Andra raden.")) return false;
