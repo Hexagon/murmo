@@ -275,6 +275,7 @@ export class Messenger extends EventTarget {
       this.prekeys.set(s.id, { privateKey: await p.importPrivate("X25519", s.pkcs8), publicRaw: s.publicRaw, time: s.time, pkcs8: s.pkcs8 });
     }
     for (const c of await this.store.contacts()) this.contacts.set(c.account, c);
+    this.ownPinned = (await this.store.secret("ownPinned")) ?? null;
     this.pendingFiles = (await this.store.secret("pendingFiles")) ?? [];
     this.wantedFiles = (await this.store.secret("wantedFiles")) ?? [];
     this.freed = new Set((await this.store.secret("freedFiles")) ?? []);
@@ -397,11 +398,28 @@ export class Messenger extends EventTarget {
     }
     // What the other server takes from accounts elsewhere (its relay and file queue limits), for files to it.
     const limits = server && r.limits && typeof r.limits === "object" ? r.limits : null;
+    // The own list is checked before it is cached: one that is refused is never used, not even for a minute.
+    if (account === this.me.account) await this.checkOwnPinned(list);
     const entry = { state, list, prekeys, home: r.home, server, limits, at: Date.now() };
     // A forked list is returned (the safety code is computed from it) but never cached, so nothing is verified or
     // encrypted against it; a list cached before the fork showed stays until it expires.
     if (account === this.me.account || (await this.checkPinned(account, list))) this.lists.set(account, entry);
     return entry;
+  }
+
+  /**
+   * The account's own list is pinned like a contact's, in the encrypted store: it must extend the head this device
+   * saw before and must still hold this device. Otherwise the server serves an older (validly signed) list, say one
+   * that still has a removed device, which would then get a copy of every message and could push history and sync.
+   */
+  async checkOwnPinned(list) {
+    if (!list.present.some((d) => d.id === this.me.device)) throw new Error("own_list_without_device");
+    const pin = this.ownPinned;
+    if (pin && !(await p.extendsPinned(list, pin.head, pin.length))) throw new Error("own_list_fork");
+    if (!pin || pin.head !== list.head) {
+      this.ownPinned = { head: list.head, length: list.entries.length };
+      await this.store.setSecret("ownPinned", this.ownPinned);
+    }
   }
 
   /**
