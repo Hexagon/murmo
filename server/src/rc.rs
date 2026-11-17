@@ -98,6 +98,11 @@ pub async fn handle(
         peer: None,
         body: body.to_vec(),
     };
+    // A log change can start a new instance (reset, restore, move): devices of the old one are then disconnected.
+    let changed_account = (method == Method::POST)
+        .then(|| instance_change(rel))
+        .flatten()
+        .map(str::to_string);
     let app2 = app.clone();
     let res = tokio::task::spawn_blocking(move || {
         route(&app2.host, &req, now(), &mut |b| {
@@ -106,8 +111,24 @@ pub async fn handle(
     })
     .await;
     match res {
-        Ok(r) => respond(r),
+        Ok(r) => {
+            if let Some(account) = changed_account
+                && (200..300).contains(&r.status)
+            {
+                app.disconnect_stale(&account);
+            }
+            respond(r)
+        }
         Err(e) => ApiError::internal(e).into_response(),
+    }
+}
+
+/// The account of a request that may change its instance: `POST /<version>/id/{account}/instance` or `.../events`.
+fn instance_change(path: &str) -> Option<&str> {
+    let p = path.split('?').next().unwrap_or("");
+    match p.split('/').collect::<Vec<_>>()[..] {
+        ["", _, "id", account, "instance" | "events"] if !account.is_empty() => Some(account),
+        _ => None,
     }
 }
 
@@ -123,4 +144,18 @@ pub async fn pointer(State(app): State<Arc<App>>, headers: axum::http::HeaderMap
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok());
     respond(well_known(&app.host.config, app.origin_for_host(host)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::instance_change;
+
+    #[test]
+    fn instance_changes() {
+        assert_eq!(instance_change("/v0/id/abc/instance"), Some("abc"));
+        assert_eq!(instance_change("/v0/id/abc/events"), Some("abc"));
+        assert_eq!(instance_change("/v0/id/abc/vault"), None);
+        assert_eq!(instance_change("/v0/id//instance"), None);
+        assert_eq!(instance_change("/v0/id/register"), None);
+    }
 }

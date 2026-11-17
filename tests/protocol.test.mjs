@@ -5,7 +5,7 @@ import * as rc from "../client/vendor/rootcard/src/index.js";
 import * as p from "../client/js/protocol.js";
 import * as emoji from "../client/js/emoji.js";
 import * as giphy from "../client/js/giphy.js";
-import { validReaction } from "../client/js/core.js";
+import { Messenger, validReaction } from "../client/js/core.js";
 import { Socket } from "../client/js/net.js";
 import { partKey } from "../client/js/store.js";
 
@@ -55,6 +55,63 @@ test("a send split over several frames is marked partial when a later frame fail
   frames.length = 0;
   await assert.rejects(Socket.prototype.sendEnvelopes.call(failing(1), to), (e) => e.message === "rate_limited" && e.partial === true);
   assert.deepEqual(frames, [24, 6]);
+});
+
+test("prekeys must be fresh, and never older than one seen before", async () => {
+  const B = "B".repeat(52);
+  const you = await device("you");
+  const dev = { id: you.id, keyRaw: you.keyRaw };
+  const at = p.now();
+  const signed = (time) =>
+    p.signObject(p.LABELS.prekey, { v: 1, account: B, device: you.id, id: p.b64(p.random(8)), key: rc.formatKey("x25519", p.random(32)), time }, you.privateKey);
+  // Up to rotation + keep old is fine; older is refused as stale; much later than now, or no time, is refused.
+  const ok = await signed(at - p.PREKEY_MAX_AGE + 60);
+  assert.equal(await p.verifyPrekey(B, dev, ok, at), ok);
+  await assert.rejects(p.verifyPrekey(B, dev, await signed(at - p.PREKEY_MAX_AGE - 60), at), /stale_prekey/);
+  await assert.rejects(p.verifyPrekey(B, dev, await signed(at + 3 * 24 * 3600), at), /bad_prekey/);
+  await assert.rejects(p.verifyPrekey(B, dev, await signed("soon"), at), /bad_prekey/);
+  // The same prekey is refused once it has aged past the limit.
+  await assert.rejects(p.verifyPrekey(B, dev, ok, at + 120), /stale_prekey/);
+  // A server that serves an older prekey than one seen before does not get it used.
+  const older = await signed(at - 100);
+  const newer = await signed(at - 10);
+  assert.equal(p.newerPrekey(older, newer), newer);
+  assert.equal(p.newerPrekey(newer, older), newer);
+  assert.equal(p.newerPrekey(older, undefined), older);
+  assert.equal(p.newerPrekey(undefined, newer), newer);
+  assert.equal(p.newerPrekey(undefined, undefined), undefined);
+});
+
+test("a messenger keeps using the newest prekey it has seen for a device, and forgets removed devices", async () => {
+  const B = "B".repeat(52);
+  const you = await device("you");
+  const gone = await device("gone");
+  const dev = { id: you.id, keyRaw: you.keyRaw };
+  const signed = (d, time) =>
+    p.signObject(p.LABELS.prekey, { v: 1, account: B, device: d.id, id: p.b64(p.random(8)), key: rc.formatKey("x25519", p.random(32)), time }, d.privateKey);
+  // Only what freshPrekeys needs of a messenger, with a store that remembers what it was given.
+  const saved = [];
+  const m = Object.assign(Object.create(Messenger.prototype), {
+    seenPrekeys: new Map(),
+    store: { setSecret: async (k, v) => saved.push([k, v]) },
+  });
+  const t = p.now();
+  const newer = await signed(you, t - 10);
+  const older = await signed(you, t - 1000);
+  const other = await signed(gone, t - 10);
+  let got = await m.freshPrekeys(B, { present: [dev, { id: gone.id, keyRaw: gone.keyRaw }] }, new Map([[you.id, newer], [gone.id, other]]));
+  assert.equal(got.get(you.id), newer);
+  assert.equal(saved.at(-1)[0], "seenPrekeys");
+  // Later the server serves the older one again: the newer one is used.
+  got = await m.freshPrekeys(B, { present: [dev] }, new Map([[you.id, older]]));
+  assert.equal(got.get(you.id), newer);
+  assert.equal(m.seenPrekeys.has(`${B} ${gone.id}`), false);
+  // A remembered prekey that has grown too old is not used either.
+  const stale = await signed(you, t - p.PREKEY_MAX_AGE + 1);
+  m.seenPrekeys.set(`${B} ${you.id}`, stale);
+  await new Promise((r) => setTimeout(r, 2100)); // now it is older than PREKEY_MAX_AGE
+  got = await m.freshPrekeys(B, { present: [dev] }, new Map());
+  assert.equal(got.has(you.id), false);
 });
 
 test("envelope, signed message and verification", async () => {
