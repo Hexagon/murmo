@@ -50,9 +50,8 @@ Open, in order of priority:
       (`DESIGN.md` §6.10)
 - [x] Files view: every shared file in one place, by month and kind, with filters, a viewer with previous and next,
       detailed transfer progress, and removing files from one device to free room (`DESIGN.md` §9.4)
-- [ ] Signed, reproducible client release with published hashes; installable copy not served by the server
-- [ ] History from contacts after every device is lost: a contact sends its copy of a conversation on request,
-      shown as the contact's copy (`DESIGN.md` §7.1, option 3)
+- Moved to phase 2, in its order there: signed, reproducible client release (items 3 and 8); history from
+  contacts after every device is lost (item 7)
 
 ## Review 2026-11: improvement areas
 
@@ -170,14 +169,36 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [ ] PWA: offline screen, maskable icon, manifest description in English; spinner ignores `prefers-reduced-motion`
 - [ ] Per-account settings in plain `localStorage` (`app.js:299,307`), against T12
 
-## Phase 2: protocol
+## Phase 2: next, in order
 
-- [ ] Double Ratchet per device pair (per-message forward secrecy, post-compromise security), keeping the envelope
-      format versioned
-- [ ] Hybrid post-quantum prekeys (X25519 + ML-KEM-768)
-- [ ] Group conversations (sender keys first, MLS later)
-- [ ] Resumable file transfers (a receiver that has some parts asks for the rest), and saving large files part by
-      part in browsers without `showSaveFilePicker` (a service worker that streams the download)
+Ordered by benefit for the work, and so that what users notice is never held back by protocol work: a feature that is
+ready goes out, whatever its place below. Items 1–2 run alongside the rest. Effort: S days, M one to three weeks,
+L longer.
+
+1. [ ] **What the documents promise** (S, review P2): §14.5 and the route map in §11, T6 claiming unbuilt protections,
+       host key compromise as a threat. Users and operators decide on these texts; they must be true first
+2. [ ] **Accessibility and polish** (S each, review P3): direct benefit for every user, no protocol risk
+3. [ ] **Published release hashes** (S): every release a reproducible client archive and its SHA-256 list in the release
+       notes; the "Säkerhet och integritet" view links them next to the commit it already shows. The first, cheap half
+       of T6: anyone can check what a server serves
+4. [ ] **Hybrid post-quantum envelope** (M, `DESIGN.md` §15.2): ML-KEM-768 next to X25519 in signed prekeys,
+       envelope `v: 2`. Small change, nothing for the user to do, and it only protects traffic recorded after it ships,
+       so it comes early. Downgrade is prevented by the existing rule never to go back to an older prekey
+5. [ ] **Resumable file transfers** (M): a receiver that has some parts asks for the rest; saving large files part by
+       part in browsers without `showSaveFilePicker` (a service worker that streams the download)
+6. [ ] **Group conversations** (L): sender keys carried in the existing per-device envelopes, so groups do not wait for
+       the Double Ratchet and get its protection later without a format change; a sender key ratchets forward per
+       message and is replaced when a member or device leaves. MLS later (item 10)
+7. [ ] **History from contacts** after every device is lost (M): a contact sends its copy of a conversation on request,
+       shown as the contact's copy (`DESIGN.md` §7.1, option 3)
+8. [ ] **Installable client not served by the server** (L): a packaged app (or extension) that runs only releases
+       signed by a release key published in a rootcard log, and warns otherwise (`DESIGN.md` §13.7). Closes AR1, the
+       largest remaining risk, and users get an app. Before the ratchet, because the ratchet protects little against
+       a server while that server serves the code
+9. [ ] **Double Ratchet per device pair** (L, `DESIGN.md` §15.3): per-message forward secrecy and post-compromise
+       security, envelope `v: 3`, started with item 4's handshake, announced by `caps` in the signed prekey
+10. [ ] **Later** (`DESIGN.md` §15.1 step C): one-time prekeys; a post-quantum step in the ratchet; MLS for groups;
+        ML-DSA signatures, with rootcard
 
 ## Phase 3: beyond one server
 
