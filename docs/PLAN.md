@@ -148,8 +148,9 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       Lowered: 1 200 questions and 4 000 devices a minute per server, 120 a minute about one device
 - [x] A declined contact comes back with a replayed `request` (`core.js:916-925`); require a newer `time`
 - [x] Check that a remote lookup answers for the requested `Name#TAG` (`identity.js:149-152`); every lookup does
-- [ ] Log push failures and `fork` in `refresh_if_remote` (`push.rs:180-235`, `remote.rs:140-144`); scheduled pushes
-      are lost on restart
+- [x] Log push failures and `fork` in `refresh_if_remote` (`push.rs:180-235`, `remote.rs:140-144`); scheduled pushes
+      are lost on restart. Logged at most every 10 minutes per push service and hourly per fork; pushes due at a stop
+      are sent after the restart
 - [x] Poisoned mutexes disable the database and hub for good (`db.rs:180-184`, `app.rs:171`): recover with
       `into_inner` as `federation.rs` does (`Locked::locked` in `app.rs`, used for every server mutex)
 - [ ] Spec: §14.3 `req` lacks `kind`; "fetched again once" is unbounded; replay nonces are lost on restart

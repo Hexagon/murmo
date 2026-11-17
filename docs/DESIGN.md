@@ -969,7 +969,7 @@ on the live budgets.
 | relay frames (file chunks) | live transfer | not stored when the recipient device is connected |
 | queued file chunks (ciphertext) | files for devices that are away (sender's choice) | until acknowledged, at most 14 days (a disappearing picture's: its unread limit) |
 | relay grants (receiving device, sending device, bytes left), in memory | a faster transfer of a file the receiving device asked for (§10.2) | used up, taken back, 30 minutes, or a restart |
-| push endpoint per device | notifications (the user's choice) | until turned off, logged out, or reported gone |
+| push endpoint per device, with the id of the newest envelope it was woken for (so a push due at a restart is sent after it) | notifications (the user's choice) | until turned off, logged out, or reported gone |
 | VAPID key | signing push requests | while the server exists |
 | network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
 | the sending server of an envelope from another server (§14) | the recipient looks the sender up there | with the envelope |

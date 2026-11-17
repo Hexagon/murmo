@@ -116,6 +116,28 @@ impl<T> Locked<T> for Mutex<T> {
     }
 }
 
+/// Print `text` to the log, but under one `key` at most once every `every` seconds: for failures that can repeat
+/// quickly (a push service that is down) and should be seen without flooding the log.
+pub fn log_every(key: &str, every: i64, text: &str) {
+    static LAST: Mutex<Option<HashMap<String, i64>>> = Mutex::new(None);
+    let t = now();
+    {
+        let mut g = LAST.locked();
+        let m = g.get_or_insert_with(HashMap::new);
+        if m.get(key).is_some_and(|at| t - at < every) {
+            return;
+        }
+        if m.len() >= 1024 {
+            m.retain(|_, at| t - *at < every);
+            if m.len() >= 1024 {
+                m.clear();
+            }
+        }
+        m.insert(key.to_string(), t);
+    }
+    eprintln!("{text}");
+}
+
 /// Seconds since the epoch.
 pub fn now() -> i64 {
     SystemTime::now()

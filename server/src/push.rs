@@ -152,7 +152,8 @@ enum Outcome {
     Sent,
     /// The subscription is gone (404/410): forget it.
     Gone,
-    Failed,
+    /// Anything else: the push service's status, or why there was none.
+    Failed(String),
 }
 
 fn post(endpoint: &str, authorization: &str) -> Outcome {
@@ -172,7 +173,8 @@ fn post(endpoint: &str, authorization: &str) -> Outcome {
     match res.map(|r| r.status().as_u16()) {
         Ok(200..=299) => Outcome::Sent,
         Ok(404 | 410) => Outcome::Gone,
-        _ => Outcome::Failed,
+        Ok(status) => Outcome::Failed(format!("status {status}")),
+        Err(e) => Outcome::Failed(e.to_string()),
     }
 }
 
@@ -219,11 +221,38 @@ pub fn schedule(app: &Arc<App>, device: &str, id: i64) {
             }
             g.insert(device.clone(), now());
         }
-        let outcome = tokio::task::spawn_blocking(move || post(&endpoint, &auth)).await;
-        if matches!(outcome, Ok(Outcome::Gone)) {
-            let _ = app.db.set_push_sub(&device, None);
+        if let Err(e) = app.db.mark_pushed(&device) {
+            eprintln!("push: {e}");
+        }
+        match tokio::task::spawn_blocking(move || post(&endpoint, &auth)).await {
+            Ok(Outcome::Sent) => {}
+            Ok(Outcome::Gone) => {
+                let _ = app.db.set_push_sub(&device, None);
+            }
+            // Said once in a while per push service (not per device: the log names no one).
+            Ok(Outcome::Failed(why)) => crate::app::log_every(
+                &format!("push {origin}"),
+                600,
+                &format!("push to {origin} failed: {why}"),
+            ),
+            Err(e) => eprintln!("push: {e}"),
         }
     });
+}
+
+/// After a restart: wake the devices that had envelopes waiting for a push when the server stopped.
+pub fn resume(app: &Arc<App>) {
+    if !app.push.enabled() {
+        return;
+    }
+    match app.db.unpushed() {
+        Ok(due) => {
+            for (device, id) in due {
+                schedule(app, &device, id);
+            }
+        }
+        Err(e) => eprintln!("push: {e}"),
+    }
 }
 
 #[cfg(test)]

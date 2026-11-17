@@ -408,6 +408,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let seed = host_key(&cfg.key_file)?;
     let app = build(&cfg, db::Db::open(&cfg.db)?, seed)?;
+    // Pushes that were due when the server stopped.
+    push::resume(&app);
     let sweeper = app.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
