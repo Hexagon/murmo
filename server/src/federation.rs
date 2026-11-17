@@ -18,6 +18,7 @@
 use crate::api::check_account;
 use crate::app::{App, Push, now, random, text};
 use crate::db::ChunkData;
+use crate::devices::{MAX_DEVICES, MAX_ENTRIES};
 use crate::error::{ApiError, json};
 use crate::remote::origin_of;
 use crate::ws::{
@@ -55,6 +56,14 @@ const ROUTE_TTL: i64 = 7 * 24 * 3600;
 /// Chunk frames per minute from one server, and bytes.
 const RELAY_PER_SERVER: u32 = 60_000;
 const RELAY_BYTES_PER_SERVER: u32 = 2047 << 20;
+/// Most routes kept per local account (devices of its contacts on other servers); the least recently used go first.
+const MAX_ROUTES: usize = 512;
+/// Most device lists of other servers kept at once, and their size in all (as JSON text). An answer larger than a
+/// quarter of that is used but not kept.
+const MAX_LISTS: usize = 256;
+const MAX_LISTS_BYTES: usize = 16 << 20;
+/// Most other servers whose key and limits are kept at once; the least recently fetched go first.
+const MAX_PEERS: usize = 1024;
 /// Largest relay request (one chunk as text, and the fields around it).
 pub const MAX_RELAY_BODY: usize = 256 * 1024;
 
@@ -94,6 +103,9 @@ struct Peer {
     at: i64,
 }
 
+/// The routes of one local account: device → (origin, last used).
+type Routes = HashMap<String, (String, i64)>;
+
 /// This server's federation key and what it remembers about other servers.
 pub struct Federation {
     seed: Zeroizing<[u8; 32]>,
@@ -103,11 +115,12 @@ pub struct Federation {
     keys: Mutex<HashMap<String, Peer>>,
     /// Deliveries seen (`origin nonce` → time), against replays.
     nonces: Mutex<HashMap<String, i64>>,
-    /// Device lists with logs fetched from other servers (`origin account` → answer, time).
-    lists: Mutex<HashMap<String, (Value, i64)>>,
-    /// Where devices of other servers are, for each local account that writes to them (`account device` → origin,
-    /// last used): learned from its `send` and `remote-devices`, used for its file chunks and presence questions.
-    routes: Mutex<HashMap<String, (String, i64)>>,
+    /// Device lists with logs fetched from other servers (`origin account` → answer, its size, time).
+    lists: Mutex<HashMap<String, (Value, usize, i64)>>,
+    /// Where devices of other servers are, for each local account that writes to them (account → device → origin,
+    /// last used): learned from its `send` and `remote-devices`, used for its file chunks and presence questions. At
+    /// most [`MAX_ROUTES`] per account.
+    routes: Mutex<HashMap<String, Routes>>,
     /// Connections to other servers, kept open between requests.
     agent: ureq::Agent,
 }
@@ -150,12 +163,16 @@ impl Federation {
         }
     }
 
-    /// Remember that `device` (of a contact of `account`) is on `origin`.
+    /// Remember that `device` (of a contact of `account`) is on `origin`. An account that has named
+    /// [`MAX_ROUTES`] devices forgets the one it used least recently.
     pub fn learn(&self, account: &str, device: &str, origin: &str) {
-        self.routes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(format!("{account} {device}"), (origin.to_string(), now()));
+        let t = now();
+        let mut routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+        let mine = routes.entry(account.to_string()).or_default();
+        if !mine.contains_key(device) && mine.len() >= MAX_ROUTES {
+            evict_oldest(mine, |(_, at)| *at);
+        }
+        mine.insert(device.to_string(), (origin.to_string(), t));
     }
 
     /// The server a device is on, as `account` knows it; None for a device of this server (or one it never named).
@@ -163,8 +180,36 @@ impl Federation {
         self.routes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&format!("{account} {device}"))
+            .get(account)
+            .and_then(|m| m.get(device))
             .map(|(o, _)| o.clone())
+    }
+
+    /// Keep a device list fetched from another server for a while, within [`MAX_LISTS`] and [`MAX_LISTS_BYTES`].
+    fn keep_list(&self, key: String, v: &Value, t: i64) {
+        let size = text(v).len();
+        if size > MAX_LISTS_BYTES / 4 {
+            return;
+        }
+        let mut lists = self.lists.lock().unwrap_or_else(|e| e.into_inner());
+        lists.remove(&key);
+        lists.retain(|_, (_, _, at)| t - *at < LIST_CACHE);
+        while !lists.is_empty()
+            && (lists.len() >= MAX_LISTS
+                || lists.values().map(|(_, n, _)| n).sum::<usize>() + size > MAX_LISTS_BYTES)
+        {
+            evict_oldest(&mut lists, |(_, _, at)| *at);
+        }
+        lists.insert(key, (v.clone(), size, t));
+    }
+
+    /// Keep what this server knows of a peer, within [`MAX_PEERS`].
+    fn keep_peer(&self, origin: &str, p: Peer) {
+        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        if !keys.contains_key(origin) && keys.len() >= MAX_PEERS {
+            evict_oldest(&mut keys, |p| p.at);
+        }
+        keys.insert(origin.to_string(), p);
     }
 
     /// Forget peers' keys fetched long ago.
@@ -174,14 +219,23 @@ impl Federation {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, p| t - p.at < KEY_TTL);
-        self.routes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, (_, at)| t - *at < ROUTE_TTL);
+        let mut routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+        for mine in routes.values_mut() {
+            mine.retain(|_, (_, at)| t - *at < ROUTE_TTL);
+        }
+        routes.retain(|_, mine| !mine.is_empty());
+        drop(routes);
         self.lists
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, (_, at)| t - *at < LIST_CACHE);
+            .retain(|_, (_, _, at)| t - *at < LIST_CACHE);
+    }
+}
+
+/// Remove the entry of `m` that `at` says is the oldest.
+fn evict_oldest<V>(m: &mut HashMap<String, V>, at: impl Fn(&V) -> i64) {
+    if let Some(k) = m.iter().min_by_key(|(_, v)| at(v)).map(|(k, _)| k.clone()) {
+        m.remove(&k);
     }
 }
 
@@ -302,11 +356,7 @@ async fn peer(app: &Arc<App>, origin: &str, fresh: bool) -> Result<Peer, ApiErro
         l.into()
     });
     let p = Peer { key, limits, at: t };
-    app.fed
-        .keys
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(origin.to_string(), p.clone());
+    app.fed.keep_peer(origin, p.clone());
     Ok(p)
 }
 
@@ -631,6 +681,7 @@ pub fn learn_list(app: &App, me: &str, v: &Value) {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .take(MAX_DEVICES)
     {
         if let Some(d) = pk
             .as_object()
@@ -653,7 +704,7 @@ async fn devices_of(
     check_account(account)?;
     let key = format!("{server} {account}");
     if !fresh
-        && let Some((v, at)) = app
+        && let Some((v, _, at)) = app
             .fed
             .lists
             .lock()
@@ -676,6 +727,16 @@ async fn devices_of(
         .as_object()
         .cloned()
         .ok_or(ApiError::new(502, "server_error"))?;
+    // No list has more entries, nor more devices with prekeys, than a list on this server can have: a longer answer
+    // is not a Murmo server's.
+    let longer = |k: &str, max: usize| {
+        out.get(k)
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.len() > max)
+    };
+    if longer("entries", MAX_ENTRIES) || longer("prekeys", MAX_DEVICES) {
+        return Err(ApiError::new(502, "server_error"));
+    }
     let events = log
         .as_object()
         .and_then(|m| m.get("events"))
@@ -689,11 +750,7 @@ async fn devices_of(
         out.insert("limits", l);
     }
     let v: Value = out.into();
-    app.fed
-        .lists
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(key, (v.clone(), now()));
+    app.fed.keep_list(key, &v, now());
     Ok(v)
 }
 
@@ -1032,6 +1089,94 @@ mod tests {
         assert!(!public_origin("https://Murmo.example"));
         assert!(!public_origin("https://printer.local"));
         assert!(plain_origin("http://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn routes_are_capped_per_account() {
+        let f = Federation::new(&[7; 32]);
+        for i in 0..MAX_ROUTES {
+            f.learn("A", &format!("d{i}"), "https://b.example");
+        }
+        f.learn("B", "x", "https://c.example");
+        {
+            // d0 was used last, then the others in order: d1 is the least recently used.
+            let mut routes = f.routes.lock().expect("lock");
+            let mine = routes.get_mut("A").expect("routes of A");
+            for i in 0..MAX_ROUTES {
+                if let Some((_, at)) = mine.get_mut(&format!("d{i}")) {
+                    *at = if i == 0 {
+                        i64::MAX
+                    } else {
+                        i64::try_from(i).unwrap_or_default()
+                    };
+                }
+            }
+        }
+        let len = |a: &str| {
+            f.routes
+                .lock()
+                .expect("lock")
+                .get(a)
+                .map_or(0, HashMap::len)
+        };
+        f.learn("A", "new", "https://b.example");
+        assert_eq!(len("A"), MAX_ROUTES);
+        assert!(f.route("A", "new").is_some());
+        assert!(f.route("A", "d0").is_some());
+        assert!(f.route("A", "d1").is_none());
+        assert!(f.route("A", "d2").is_some());
+        // Other accounts are not affected, and a known device is updated in place.
+        assert_eq!(f.route("B", "x").as_deref(), Some("https://c.example"));
+        f.learn("A", "new", "https://d.example");
+        assert_eq!(len("A"), MAX_ROUTES);
+        assert_eq!(f.route("A", "new").as_deref(), Some("https://d.example"));
+    }
+
+    #[test]
+    fn device_lists_are_capped_in_number_and_size() {
+        let f = Federation::new(&[7; 32]);
+        let t = now();
+        for i in 0..MAX_LISTS + 10 {
+            f.keep_list(format!("s a{i}"), &Value::from("x"), t);
+        }
+        assert_eq!(f.lists.lock().expect("lock").len(), MAX_LISTS);
+        // Large answers push older ones out until they fit; one larger than a quarter of the cap is not kept.
+        let big = Value::from("x".repeat(MAX_LISTS_BYTES / 5));
+        for i in 0..8 {
+            f.keep_list(format!("s big{i}"), &big, t);
+        }
+        let bytes: usize = f
+            .lists
+            .lock()
+            .expect("lock")
+            .values()
+            .map(|(_, n, _)| n)
+            .sum();
+        assert!(bytes <= MAX_LISTS_BYTES);
+        assert!(f.lists.lock().expect("lock").contains_key("s big7"));
+        f.keep_list(
+            "s huge".into(),
+            &Value::from("x".repeat(MAX_LISTS_BYTES / 2)),
+            t,
+        );
+        assert!(!f.lists.lock().expect("lock").contains_key("s huge"));
+    }
+
+    #[test]
+    fn peers_are_capped() {
+        let f = Federation::new(&[7; 32]);
+        for i in 0..MAX_PEERS + 5 {
+            let p = Peer {
+                key: None,
+                limits: None,
+                at: i64::try_from(i).unwrap_or_default(),
+            };
+            f.keep_peer(&format!("https://s{i}.example"), p);
+        }
+        let keys = f.keys.lock().expect("lock");
+        assert_eq!(keys.len(), MAX_PEERS);
+        assert!(!keys.contains_key("https://s0.example"));
+        assert!(keys.contains_key(&format!("https://s{}.example", MAX_PEERS + 4)));
     }
 
     #[test]
