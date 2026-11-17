@@ -31,7 +31,7 @@ Set in the environment:
 | `MURMO_GIPHY_RATING` | `pg-13` | GIPHY content rating for searches (`g`, `pg`, `pg-13`, `r`) |
 | `MURMO_BETA` | `1` | mark the service as an open beta in the client (`0`: no mark) |
 | `MURMO_FEDERATION` | `open` | other Murmo servers this one exchanges messages with: `open` (any public https server with a domain name), `off`, or a comma-separated list of origins (DESIGN.md §14) |
-| `MURMO_FEDERATION_BLOCK` | empty | servers never to exchange messages with (comma-separated origins) |
+| `MURMO_FEDERATION_BLOCK` | empty | servers never to exchange messages with (comma-separated origins or host names; each also blocks its other ports and subdomains) |
 | `MURMO_DEMO` | `0` | mark this server as a demo (`1`): a "Demo" mark, a notice on the login screen and a section in the terms saying that identities, messages and files may be wiped at any time, with a link to running one's own server. murmo.org runs with it |
 
 Murmo was called mesg before. The old variable names (`MESG_…`) still work when the new ones are not set, and an
