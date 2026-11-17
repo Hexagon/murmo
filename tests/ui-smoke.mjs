@@ -437,6 +437,27 @@ try {
   }
   if (!(await b.evaluate(() => [...document.querySelectorAll(".msg")].some((m) => m.textContent.includes("Andra raden."))))) throw new Error("the oldest messages never came");
   await b.screenshot({ path: `${shots}/b-7d-older.png` });
+  // A lost connection: after a moment a banner says so above everything, and a text held for "Ångra" carries a
+  // pending mark instead of looking sent. Taken back here, so nothing is sent; the banner goes when it is back.
+  // (Chrome logs the failed reconnects while offline; those are not counted as problems.)
+  const quiet = problems.length;
+  await a.setOfflineMode(true);
+  // Chrome's offline mode does not always close an open WebSocket; a page coming back to the foreground pings the
+  // server, and without a pong in 4 s the connection is taken for dead.
+  await a.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await a.waitForSelector(".net-banner:not([hidden])", { timeout: 30000 });
+  const banner = await a.$eval(".net-banner", (e) => ({ role: e.getAttribute("role"), text: e.textContent, top: e.getBoundingClientRect().top }));
+  if (banner.role !== "status" || !banner.text.includes("Ingen anslutning till servern") || banner.top > 80) throw new Error(`no connection banner: ${JSON.stringify(banner)}`);
+  await a.type(".composer textarea", "Utan anslutning");
+  await a.keyboard.press("Enter");
+  await a.waitForFunction(() => document.querySelector(".msg.out.held .held-note")?.textContent.includes("Väntar på anslutningen"), { timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-6j-offline.png` });
+  await a.click(".msg.out.held .undo-btn");
+  await a.waitForFunction(() => !document.querySelector(".msg.out.held") && document.querySelector(".composer textarea").value === "Utan anslutning", { timeout: 5000 });
+  await a.$eval(".composer textarea", (t) => { t.value = ""; });
+  await a.setOfflineMode(false);
+  await a.waitForFunction(() => document.querySelector(".net-banner").hidden && document.querySelector(".me .dot.on"), { timeout: 30000 });
+  problems.splice(quiet, problems.length - quiet, ...problems.slice(quiet).filter((x) => !/ERR_INTERNET_DISCONNECTED|WebSocket|Failed to load resource|Failed to fetch/.test(x)));
   // Search: the field in the sidebar finds a contact by handle and an old message by its text (any case), with the
   // match marked; the hit opens the conversation with that message in view and marked. Escape brings the list back.
   // The field is hidden until the search button (or Ctrl+K) opens it, and Esc on an empty field hides it again.

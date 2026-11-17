@@ -303,6 +303,8 @@ export default {
   "side.copyHint": "Zum Kopieren klicken",
   "side.online": "Verbunden",
   "side.connecting": "Verbinde…",
+  "net.offline": "Keine Verbindung zum Server. Verbinde neu…",
+  "net.retry": "Jetzt versuchen",
   "side.account": "Konto und Einstellungen",
   "side.back": "Zurück zu den Unterhaltungen",
 
@@ -473,6 +475,8 @@ export default {
 
   // ── messages ──
   "msg.sending": " · Wird gesendet… {pct}",
+  "msg.sendingText": " · Wird gesendet…",
+  "msg.waitingNet": " · Wartet auf die Verbindung…",
   "msg.deleteTombstone": "Platzhalter löschen?",
   "msg.deleteQuestion": "Nachricht löschen?",
   "msg.forAllHint": "„Für alle löschen“ ersetzt die Nachricht auf den Geräten von {name} und deinen durch „Du hast diese Nachricht gelöscht“, sobald sie es empfangen. Hat {name} sie schon gesehen, gespeichert oder nutzt eine ältere Murmo-Version, kann sie bleiben – was schon angezeigt wurde, lässt sich nicht zurückholen.",

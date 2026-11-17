@@ -110,7 +110,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 
 ### P1: usability and accessibility
 
-- [ ] **Connection loss is nearly invisible.** Only small "Connecting…" text in the sidebar, hidden inside a
+- [x] **Connection loss is nearly invisible.** Only small "Connecting…" text in the sidebar, hidden inside a
       conversation on mobile (`app.js:1453`); held messages look sent (`app.js:2552`). Topbar banner and a pending mark
 - [ ] **Destructive actions without confirmation.** "Delete the conversation" removes history on all devices
       (`app.js:3618`, `core.js:557,1039`); block and device removal (`app.js:3800`) too

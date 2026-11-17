@@ -303,6 +303,8 @@ export default {
   "side.copyHint": "Click to copy",
   "side.online": "Connected",
   "side.connecting": "Connecting…",
+  "net.offline": "No connection to the server. Reconnecting…",
+  "net.retry": "Try now",
   "side.account": "Account and settings",
   "side.back": "Back to the conversations",
 
@@ -473,6 +475,8 @@ export default {
 
   // ── messages ──
   "msg.sending": " · Sending… {pct}",
+  "msg.sendingText": " · Sending…",
+  "msg.waitingNet": " · Waiting for the connection…",
   "msg.deleteTombstone": "Delete the placeholder?",
   "msg.deleteQuestion": "Delete the message?",
   "msg.forAllHint": "“Delete for everyone” replaces the message with “You deleted this message” on {name}'s devices and yours as they receive it. If {name} has already seen it, saved it or uses an older version of Murmo, it may remain – what has already been shown cannot be taken back.",

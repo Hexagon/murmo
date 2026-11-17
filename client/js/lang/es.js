@@ -303,6 +303,8 @@ export default {
   "side.copyHint": "Haz clic para copiar",
   "side.online": "Conectado",
   "side.connecting": "Conectando…",
+  "net.offline": "Sin conexión con el servidor. Reconectando…",
+  "net.retry": "Intentar ahora",
   "side.account": "Cuenta y ajustes",
   "side.back": "Volver a las conversaciones",
 
@@ -473,6 +475,8 @@ export default {
 
   // ── messages ──
   "msg.sending": " · Enviando… {pct}",
+  "msg.sendingText": " · Enviando…",
+  "msg.waitingNet": " · Esperando la conexión…",
   "msg.deleteTombstone": "¿Eliminar el marcador?",
   "msg.deleteQuestion": "¿Eliminar el mensaje?",
   "msg.forAllHint": "«Eliminar para todos» sustituye el mensaje por «Eliminaste este mensaje» en los dispositivos de {name} y en los tuyos cuando lo reciban. Si {name} ya lo ha visto, guardado o usa una versión antigua de Murmo, puede quedar: lo que ya se ha mostrado no se puede retirar.",

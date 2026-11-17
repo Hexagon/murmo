@@ -545,6 +545,12 @@ dialog.viewer .close svg { width: 22px; height: 22px; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px 8px 14px;
   font-size: 14px; box-shadow: var(--shadow);
 }
+/* under the top bar, over the thread; centred on the main column beside the sidebar */
+.net-banner { position: fixed; top: calc(62px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); z-index: 9; max-width: calc(100% - 32px); display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: 14px; box-shadow: var(--shadow); }
+.net-banner[hidden] { display: none; }
+@media (min-width: 761px) { .net-banner { left: calc(50% + 150px); max-width: calc(100% - 332px); } }
+.net-banner .dot { flex: none; background: var(--danger); }
+.net-banner .link { color: inherit; text-decoration: underline; white-space: nowrap; }
 .toasts { pointer-events: none; position: fixed; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 10; }
 .toast { background: var(--text); color: var(--bg); padding: 9px 14px; border-radius: 10px; font-size: 14px; box-shadow: var(--shadow); }
 
