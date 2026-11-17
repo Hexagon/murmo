@@ -807,6 +807,12 @@ WebSocket frames (JSON):
 
 `to[].ttl` (seconds) is optional and shortens how long the server keeps that envelope (used for disappearing messages); the server learns that the envelope is short-lived, never its content.
 
+A `send` is taken whole or not at all: every recipient is checked (fields, envelope, `ttl`) before anything is queued,
+and a bad one fails the frame with nothing sent. What can fail for one device only (unknown, a full mailbox, a server
+that does not take it) is listed in `sent.failed`. A client splits more than 24 recipients over several frames; when
+a later one fails after an earlier one was taken, it keeps the message (stored as `unsent` before sending) instead of
+sending it again under a new id.
+
 Limits (v0): envelope ≤ 64 KiB, ≤ 24 recipients per send, ≤ 2 000 queued envelopes per device, mailbox TTL 14 days,
 60 sends per minute per device, 20 lookups per minute and 5 link requests per hour per network address.
 
@@ -1251,10 +1257,11 @@ back up. It is published in `/api/v1/info` as `federation.key`. The receiving se
   fetch (a bad signature, an unreachable or keyless sender) more than 10 times a minute is refused (`rate_limited`)
   before anything is fetched;
 - limits envelopes per sending server (6 000 a minute), per receiving device (600 a minute) and requests per address;
+- checks every envelope before it queues any, so that a bad one refuses the delivery with nothing queued;
 - queues each envelope for a device it knows, with the same limits as its own (`MAX_QUEUE`, `MAILBOX_TTL`, `ttl`), and
   remembers the sending server with it (`mailbox.origin`). The device gets `{ t: "msg", id, env, server }`, and is
   woken by push when `notify` is set;
-- answers `{ failed }`: unknown devices and full mailboxes. The sending server adds them to `failed` in `sent`, which
+- answers `{ failed }`: unknown devices, devices over their limit and full mailboxes. The sending server adds them to `failed` in `sent`, which
   it sends when every server has answered (at most 10 seconds each).
 
 **No relaying.** A server sends deliveries only for envelopes from authenticated devices of its own accounts, and

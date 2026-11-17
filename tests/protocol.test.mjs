@@ -39,6 +39,24 @@ test("device list: genesis by account key, additions only by devices", async () 
   await assert.rejects(p.verifyDevices(account, other.key, [e0]));
 });
 
+test("a send split over several frames is marked partial when a later frame fails", async () => {
+  const to = Array.from({ length: 30 }, (_, i) => ({ device: `d${i}`, env: "AAAA" }));
+  const frames = [];
+  const failing = (n) => ({
+    call: async (f) => {
+      frames.push(f.to.length);
+      if (frames.length > n) throw new Error("rate_limited");
+      return { t: "sent", failed: [] };
+    },
+  });
+  // The first frame fails: nothing went out.
+  await assert.rejects(Socket.prototype.sendEnvelopes.call(failing(0), to), (e) => e.message === "rate_limited" && !e.partial);
+  // The second fails after the first was taken: partial.
+  frames.length = 0;
+  await assert.rejects(Socket.prototype.sendEnvelopes.call(failing(1), to), (e) => e.message === "rate_limited" && e.partial === true);
+  assert.deepEqual(frames, [24, 6]);
+});
+
 test("prekeys must be fresh, and never older than one seen before", async () => {
   const B = "B".repeat(52);
   const you = await device("you");

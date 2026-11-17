@@ -671,9 +671,8 @@ export class Messenger extends EventTarget {
    * Encrypt one message to a list of `{ account, device, prekey }` targets and send it. `ttl` (seconds) asks the server
    * to keep the envelopes no longer than that while they wait (disappearing messages).
    */
-  async deliver(targets, kind, conv, body, id = p.b64(p.random(16)), { ttl } = {}) {
+  async deliver(targets, kind, conv, body, id = p.b64(p.random(16)), { ttl, time = p.now() } = {}) {
     const heads = await this.heads(conv);
-    const time = p.now();
     const to = [];
     for (const t of targets) {
       if (!t.prekey) continue;
@@ -694,7 +693,12 @@ export class Messenger extends EventTarget {
         // The connection broke on the way (a page that was in the background): once more on the new connection.
         // Recipients ignore a message id they already have.
         if (!OFFLINE.includes(e?.message) || !(await this.ws.whenReady())) throw e;
-        await this.ws.sendEnvelopes(to);
+        try {
+          await this.ws.sendEnvelopes(to);
+        } catch (again) {
+          if (e.partial && again instanceof Error) again.partial = true;
+          throw again;
+        }
       }
     }
     return { id, time };
@@ -718,9 +722,36 @@ export class Messenger extends EventTarget {
   }
 
   /** A message to the other party and to our own other devices; `id` may be chosen beforehand. */
-  async send(conv, kind, body, { id, ttl } = {}) {
+  async send(conv, kind, body, { id, ttl, time } = {}) {
     const targets = [...(await this.peerTargets(conv)), ...(await this.ownTargets())];
-    return this.deliver(targets, kind, conv, body, id, { ttl });
+    return this.deliver(targets, kind, conv, body, id, { ttl, time });
+  }
+
+  /**
+   * Store an outgoing message as `unsent`, then send it with `run(time)`, then clear the mark. If sending fails before
+   * any device got it, the record goes again and the error is thrown (the text goes back to the composer). If it fails
+   * after some devices got it (`e.partial`), the record stays, marked `unsent`, and the error is thrown with it: the
+   * message is not lost from this device and not sent again under a new id.
+   */
+  async sendRecorded(m, run) {
+    m.time = p.now();
+    await this.record({ ...m, unsent: true });
+    try {
+      await run(m.time);
+    } catch (e) {
+      if (!e?.partial) {
+        await this.store.deleteMessage(m.id);
+        this.emit("messages", { conv: m.conv });
+      }
+      throw e;
+    }
+    const cur = await this.store.message(m.id);
+    if (cur?.unsent) {
+      delete cur.unsent;
+      await this.store.putMessage(cur);
+      this.emit("messages", { conv: m.conv });
+    }
+    return { id: m.id, time: m.time };
   }
 
   /** A message only to our own other devices. */
@@ -732,9 +763,8 @@ export class Messenger extends EventTarget {
   async sendText(conv, text, id = p.b64(p.random(16))) {
     this.requireAccepted(conv);
     const t = String(text).slice(0, TEXT_MAX);
-    const { time } = await this.send(conv, "text", { text: t }, { id });
-    await this.record({ id, conv, dir: "out", time, kind: "text", text: t, device: this.me.device, delivered: 0 });
-    return { id, time };
+    const m = { id, conv, dir: "out", kind: "text", text: t, device: this.me.device, delivered: 0 };
+    return this.sendRecorded(m, (time) => this.send(conv, "text", { text: t }, { id, time }));
   }
 
   async record(m) {
@@ -805,9 +835,8 @@ export class Messenger extends EventTarget {
     if (!EPHEMERAL_TTLS.includes(ttl)) throw new ApiError(400, "bad_ttl");
     const t = String(text).slice(0, TEXT_MAX);
     const wait = this.ephemeralWait(conv);
-    const { time } = await this.send(conv, "ephemeral", { text: t, ttl, wait }, { id, ttl: wait });
-    await this.record({ id, conv, dir: "out", time, kind: "ephemeral", text: t, ttl, wait, device: this.me.device, delivered: 0 });
-    return { id, time };
+    const m = { id, conv, dir: "out", kind: "ephemeral", text: t, ttl, wait, device: this.me.device, delivered: 0 };
+    return this.sendRecorded(m, (time) => this.send(conv, "ephemeral", { text: t, ttl, wait }, { id, ttl: wait, time }));
   }
 
   /** A received disappearing message is on the screen: its countdown starts on this device. */

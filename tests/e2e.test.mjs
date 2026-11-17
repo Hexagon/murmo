@@ -182,6 +182,37 @@ test("message request, acceptance and text", async () => {
   assert.equal(await alice.safetyCode(bob.me.account), await bob.safetyCode(alice.me.account));
 });
 
+test("a text is stored before it is sent; a send that failed part way keeps it, one that failed at once does not", async () => {
+  const real = alice.ws.sendEnvelopes;
+  try {
+    // Nothing went out: the record goes again, and the error reaches the caller (the text returns to the composer).
+    alice.ws.sendEnvelopes = async () => {
+      throw new Error("rate_limited");
+    };
+    await assert.rejects(alice.sendText(bob.me.account, "gick inte iväg", "unsent-none"), (e) => !e.partial);
+    assert.equal(await alice.store.message("unsent-none"), undefined);
+    // Some devices got it before the rest failed: it stays, marked unsent, and is not sent again under a new id.
+    let seen;
+    alice.ws.sendEnvelopes = async () => {
+      seen = await alice.store.message("unsent-part");
+      throw Object.assign(new Error("rate_limited"), { partial: true });
+    };
+    await assert.rejects(alice.sendText(bob.me.account, "halvvägs", "unsent-part"), (e) => e.partial === true);
+    assert.equal(seen?.unsent, true, "stored before it was sent");
+    const kept = await alice.store.message("unsent-part");
+    assert.equal(kept.text, "halvvägs");
+    assert.equal(kept.unsent, true);
+  } finally {
+    alice.ws.sendEnvelopes = real;
+  }
+  // A send that goes through leaves no mark.
+  await alice.sendText(bob.me.account, "gick fram", "sent-ok");
+  const ok = await alice.store.message("sent-ok");
+  assert.equal(ok.text, "gick fram");
+  assert.equal(ok.unsent, undefined);
+  await until(async () => (await bob.messages(alice.me.account)).some((m) => m.text === "gick fram"));
+});
+
 test("a password alone cannot add a device", async () => {
   const login = await id.login(api, api.base, aliceHandle, PW);
   const state = login.state;

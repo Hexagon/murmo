@@ -88,7 +88,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [ ] **Mailbox flooding.** `MAX_QUEUE` (2000 per device, `ws.rs:25`) is shared by all senders; a local device fills an
       offline victim in about 2 min, a remote server in about 3.5 min (600/min per device), for 14 days. Per-sender and
       per-origin shares, a smaller share for non-contacts
-- [ ] **Partial sends.** A bad envelope or rate limit for recipient N fails the whole frame after 1..N-1 were queued
+- [x] **Partial sends.** A bad envelope or rate limit for recipient N fails the whole frame after 1..N-1 were queued
       (`ws.rs:434-494`, `federation.rs:492-497`); a resend duplicates. Validate all first or report per device; record
       the outgoing message as pending before sending
 - [x] **Block list is exact-string.** `MURMO_FEDERATION_BLOCK` compares origins verbatim (`federation.rs:214`) and
