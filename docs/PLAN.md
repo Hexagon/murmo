@@ -61,7 +61,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 
 ### P0: integrity and lost messages (before the next release)
 
-- [ ] **Pin the account's own device list.** `checkPinned` runs only for other accounts (`core.js:402`); a server can
+- [x] **Pin the account's own device list.** `checkPinned` runs only for other accounts (`core.js:402`); a server can
       serve an older, validly signed own list that still holds a removed (stolen) device, which then gets a copy of every
       message and can push `history`/`sync`/`names`. Keep `{head, length}` for the own list in the encrypted store,
       refuse lists that do not extend it or that lack this device (T3, G1, G3)

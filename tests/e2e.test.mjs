@@ -1054,6 +1054,41 @@ test("a paper key brings back an account whose only device is lost", async () =>
   assert.equal(db2count("mailbox"), 0);
 });
 
+test("the own device list is pinned: an older list that still holds a removed device is refused", async () => {
+  const erikHandle = await register("Erik", PW);
+  const erik1 = await device(erikHandle, PW, "erik1");
+  const account = erik1.me.account;
+  const erik2 = await device(erikHandle, PW, "erik2", async () => {
+    const req = await waitFor(erik1, "link");
+    await erik1.approveLink(req.request);
+  });
+  const withBoth = await api.devices(account); // validly signed, holds both devices
+  assert.equal((await erik1.ownList(true)).present.length, 2);
+  // The second device is stolen and removed; the pin moves on with the list.
+  await erik1.removeDevice(erik2.me.device);
+  erik2.stop();
+  assert.equal((await erik1.ownList(true)).present.length, 1);
+  const pinned = await erik1.store.secret("ownPinned");
+  assert.equal(pinned.length, (await api.devices(account)).entries.length);
+
+  // A server that serves the older list again: refused and never cached, so nothing is encrypted to the stolen device.
+  const real = erik1.api;
+  erik1.api = Object.assign(Object.create(real), { devices: async (a) => (a === account ? withBoth : real.devices(a)) });
+  erik1.lists.clear();
+  await assert.rejects(erik1.ownList(true), /own_list_fork/);
+  assert.ok(!erik1.lists.has(account));
+  await assert.rejects(erik1.ownTargets(), /own_list_fork/);
+  // A pin survives a restart: it lives in the encrypted store.
+  assert.deepEqual(await erik1.store.secret("ownPinned"), pinned);
+
+  // A list that no longer holds this device is refused too.
+  erik1.api = real;
+  const now = await erik1.ownList(true);
+  const without = { ...now, present: now.present.filter((d) => d.id !== erik1.me.device) };
+  await assert.rejects(erik1.checkOwnPinned(without), /own_list_without_device/);
+  assert.equal((await erik1.ownList(true)).present.length, 1);
+});
+
 test("homes that are not allowed are refused", async () => {
   await assert.rejects(api.connect("0".repeat(52), "https://evil.example/id"), (e) => e.status === 403 || e.status === 404);
 });

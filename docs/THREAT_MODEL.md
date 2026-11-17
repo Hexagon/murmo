@@ -40,7 +40,7 @@ service.
 |---|---|---|---|---|
 | T1 | Read messages on the server | X3 | E2E per device; server stores ciphertext only, deleted on delivery | Metadata at send time (T9) |
 | T2 | Server substitutes a device key (MITM) | X3 | Device lists start from the account key named by the recovery-signed rootcard log; additions need an existing device signature; clients pin heads; safety codes | A user who never compares safety codes trusts the first list they saw (TOFU) |
-| T3 | Server hides a newly added or removed device | X3 | Heads gossiped inside every message; a stale view is corrected by the next message | Until a message arrives, the sender may still encrypt to a removed device |
+| T3 | Server hides a newly added or removed device | X3 | Heads gossiped inside every message; a stale view is corrected by the next message; each device pins its own account's list too and refuses an older one (one that still holds a removed device) | Until a message arrives, the sender may still encrypt to a removed device |
 | T4 | Password thief adds a device | X4 | Link needs approval on an existing device (§4.3); entry 0 only when no list exists for the instance | Accounts that never created a device; a careless user approving a request they did not start (the code comparison is the defence) |
 | T5 | Script in the page reads keys or plaintext | X6, X3 | Strict CSP, no third-party code, no inline script, plain-text rendering only, non-extractable keys | Code in the origin can use keys and read plaintext while it runs (accepted: web delivery, AR1) |
 | T6 | Server serves a modified client | X3 | Reproducible static client; published hashes; option to run the client from a local copy | Accepted for the hosted client (AR1) |
