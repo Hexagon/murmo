@@ -44,6 +44,18 @@ CREATE TABLE IF NOT EXISTS mailbox (
   origin  TEXT
 );
 CREATE INDEX IF NOT EXISTS mailbox_device ON mailbox (device, id);
+CREATE TABLE IF NOT EXISTS fed_outbox (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  server   TEXT NOT NULL,
+  device   TEXT NOT NULL,
+  env      TEXT NOT NULL,
+  notify   INTEGER NOT NULL,
+  expires  INTEGER NOT NULL,
+  attempts INTEGER NOT NULL,
+  next_try INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS fed_outbox_due ON fed_outbox (next_try);
+CREATE INDEX IF NOT EXISTS fed_outbox_server ON fed_outbox (server, id);
 CREATE TABLE IF NOT EXISTS writes (
   pair  BLOB PRIMARY KEY, -- keyed hash of: writer account > recipient account (or @server)
   until INTEGER NOT NULL
@@ -585,9 +597,108 @@ impl Db {
         let m = c
             .execute("DELETE FROM relay_queue WHERE expires < ?1", params![now])
             .map_err(store_err)?;
+        c.execute("DELETE FROM fed_outbox WHERE expires < ?1", params![now])
+            .map_err(store_err)?;
         c.execute("DELETE FROM writes WHERE until < ?1", params![now])
             .map_err(store_err)?;
         Ok(n + m)
+    }
+
+    // ── envelopes waiting for another server (federation) ───────────────────────────────────────────────────────
+
+    /// Keep envelopes for devices on `server`, which could not be reached, to try again from `next_try`. Returns the
+    /// devices whose envelope was kept; the others did not fit (at most `max` waiting for one server).
+    pub fn outbox_put(
+        &self,
+        server: &str,
+        items: &[OutboxItem],
+        next_try: i64,
+        max: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut c = self.conn()?;
+        let tx = c.transaction().map_err(store_err)?;
+        let n: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM fed_outbox WHERE server = ?1",
+                params![server],
+                |r| r.get(0),
+            )
+            .map_err(store_err)?;
+        let room = usize::try_from(max.saturating_sub(n)).unwrap_or(0);
+        let mut kept = Vec::new();
+        for it in items.iter().take(room) {
+            tx.execute(
+                "INSERT INTO fed_outbox (server, device, env, notify, expires, attempts, next_try) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![server, it.device, it.env, it.notify, it.expires, it.attempts, next_try],
+            )
+            .map_err(store_err)?;
+            kept.push(it.device.clone());
+        }
+        tx.commit().map_err(store_err)?;
+        Ok(kept)
+    }
+
+    /// Envelopes waiting for `server` are due now (it has been heard from); the number of them.
+    pub fn outbox_wake(&self, server: &str, now: i64) -> Result<usize, StoreError> {
+        self.conn()?
+            .execute(
+                "UPDATE fed_outbox SET next_try = ?2 WHERE server = ?1 AND next_try > ?2",
+                params![server, now],
+            )
+            .map_err(store_err)
+    }
+
+    /// Up to `limit` envelopes for one server whose time to try again has come, oldest first, with the server:
+    /// taken out of the outbox (whoever tries puts back what still cannot be delivered).
+    pub fn outbox_due(
+        &self,
+        now: i64,
+        limit: i64,
+    ) -> Result<Option<(String, Vec<OutboxItem>)>, StoreError> {
+        let mut c = self.conn()?;
+        let tx = c.transaction().map_err(store_err)?;
+        let server: Option<String> = tx
+            .query_row(
+                "SELECT server FROM fed_outbox WHERE next_try <= ?1 AND expires >= ?1 ORDER BY next_try, id LIMIT 1",
+                params![now],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(store_err)?;
+        let Some(server) = server else {
+            return Ok(None);
+        };
+        let items = {
+            let mut st = tx
+                .prepare(
+                    "SELECT id, device, env, notify, expires, attempts FROM fed_outbox WHERE server = ?1 AND next_try <= ?2 AND expires >= ?2 ORDER BY id LIMIT ?3",
+                )
+                .map_err(store_err)?;
+            let rows = st
+                .query_map(params![server, now, limit], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        OutboxItem {
+                            device: r.get(1)?,
+                            env: r.get(2)?,
+                            notify: r.get(3)?,
+                            expires: r.get(4)?,
+                            attempts: r.get(5)?,
+                        },
+                    ))
+                })
+                .map_err(store_err)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(store_err)?
+        };
+        for (id, _) in &items {
+            tx.execute("DELETE FROM fed_outbox WHERE id = ?1", params![id])
+                .map_err(store_err)?;
+        }
+        tx.commit().map_err(store_err)?;
+        Ok(Some((
+            server,
+            items.into_iter().map(|(_, it)| it).collect(),
+        )))
     }
 
     // ── queued file chunks (ciphertext for devices that were not connected) ─────────────────────────────────────
@@ -961,6 +1072,18 @@ impl IdentityStore for Identities {
 }
 
 // ── file queue budgets ──────────────────────────────────────────────────────────────────────────────────────────
+
+/// An envelope waiting for another server that could not be reached (federation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxItem {
+    pub device: String,
+    pub env: String,
+    pub notify: bool,
+    /// When it is given up (the mailbox lifetime, or the envelope's shorter `ttl`, from when it was sent).
+    pub expires: i64,
+    /// How often it was tried.
+    pub attempts: i64,
+}
 
 /// A sender's share of one device's mailbox: who it is, as a keyed hash (of its account, or of its server for
 /// envelopes from another server), and how many of its envelopes may wait there at once.

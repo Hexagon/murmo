@@ -252,6 +252,7 @@ export class Messenger extends EventTarget {
       devices: (server, account, fresh = false) => this.ws.remote({ t: "remote-devices", server, account, fresh }),
     };
     this.prekeys = new Map(); // id → { privateKey, publicRaw, time }
+    this.outbox = []; // [{ id, conv, kind, body, ttl, time }] written while there was no connection, oldest first
     this.seenPrekeys = new Map(); // `${account} ${device}` → newest verified prekey of another device (never go back)
     this.files = new Map(); // f → transfer state, see fileState()
     this.freed = new Set(); // files removed from this device to free room, not to be taken again unasked (§13.9)
@@ -279,6 +280,7 @@ export class Messenger extends EventTarget {
     for (const c of await this.store.contacts()) this.contacts.set(c.account, c);
     this.ownPinned = (await this.store.secret("ownPinned")) ?? null;
     this.pendingFiles = (await this.store.secret("pendingFiles")) ?? [];
+    this.outbox = (await this.store.secret("outbox")) ?? [];
     this.wantedFiles = (await this.store.secret("wantedFiles")) ?? [];
     this.freed = new Set((await this.store.secret("freedFiles")) ?? []);
     for (const t of (await this.store.secret("timed")) ?? []) this.timed.set(t.id, { conv: t.conv, at: t.at });
@@ -519,6 +521,7 @@ export class Messenger extends EventTarget {
 
   async onOnline() {
     await this.rotatePrekey();
+    await this.flushOutbox();
     await this.flushReceipts();
     await this.flushFiles();
     await this.fetchMissingGifs();
@@ -686,22 +689,23 @@ export class Messenger extends EventTarget {
       if (ttl) item.ttl = ttl;
       to.push(item);
     }
+    let r = { failed: [], queued: [] };
     if (to.length) {
       try {
-        await this.ws.sendEnvelopes(to);
+        r = await this.ws.sendEnvelopes(to);
       } catch (e) {
         // The connection broke on the way (a page that was in the background): once more on the new connection.
         // Recipients ignore a message id they already have.
         if (!OFFLINE.includes(e?.message) || !(await this.ws.whenReady())) throw e;
         try {
-          await this.ws.sendEnvelopes(to);
+          r = await this.ws.sendEnvelopes(to);
         } catch (again) {
           if (e.partial && again instanceof Error) again.partial = true;
           throw again;
         }
       }
     }
-    return { id, time };
+    return { id, time, failed: r?.failed ?? [], queued: r?.queued ?? [] };
   }
 
   async ownTargets() {
@@ -723,35 +727,114 @@ export class Messenger extends EventTarget {
 
   /** A message to the other party and to our own other devices; `id` may be chosen beforehand. */
   async send(conv, kind, body, { id, ttl, time } = {}) {
-    const targets = [...(await this.peerTargets(conv)), ...(await this.ownTargets())];
-    return this.deliver(targets, kind, conv, body, id, { ttl, time });
+    const peers = await this.peerTargets(conv);
+    const targets = [...peers, ...(await this.ownTargets())];
+    const r = await this.deliver(targets, kind, conv, body, id, { ttl, time });
+    // The other party's devices it did not reach (own devices get history again anyway).
+    return { ...r, peerFailed: r.failed.filter((d) => peers.some((t) => t.device === d)) };
   }
 
+  // ── the outbox (DESIGN.md §10.3) ─────────────────────────────────────────────────────────────────────────────
+  //
+  // A text written while there is no connection is stored at once, marked `outbox`, and sent under the same id and
+  // time as soon as the connection is back; the outbox (an encrypted secret) survives a reload. A message the server
+  // could not deliver to any device of the other party, or to some of them, is marked with those devices (`failed`)
+  // and can be sent to them again; recipients ignore an id they already have.
+
   /**
-   * Store an outgoing message as `unsent`, then send it with `run(time)`, then clear the mark. If sending fails before
-   * any device got it, the record goes again and the error is thrown (the text goes back to the composer). If it fails
-   * after some devices got it (`e.partial`), the record stays, marked `unsent`, and the error is thrown with it: the
-   * message is not lost from this device and not sent again under a new id.
+   * Send an outgoing text or disappearing text. It is stored first, marked `unsent`, so that it is never lost from this
+   * device. Without a connection it goes into the outbox instead. If sending fails before any device got it, the record
+   * goes again and the error is thrown (the text goes back to the composer); if it fails after some devices got it
+   * (`e.partial`), the record stays, marked `unsent`, and is not sent again under a new id.
    */
-  async sendRecorded(m, run) {
-    m.time = p.now();
+  async sendOrKeep(m, body, ttl) {
     await this.record({ ...m, unsent: true });
+    let r;
     try {
-      await run(m.time);
+      r = await this.send(m.conv, m.kind, body, { id: m.id, ttl, time: m.time });
     } catch (e) {
-      if (!e?.partial) {
+      if (OFFLINE.includes(e?.message)) {
+        this.outbox = [...this.outbox.filter((x) => x.id !== m.id), { id: m.id, conv: m.conv, kind: m.kind, body, ttl, time: m.time }];
+        await this.store.setSecret("outbox", this.outbox);
+        await this.patchMessage(m.id, (x) => {
+          delete x.unsent;
+          x.outbox = true;
+        });
+        return { id: m.id, time: m.time, outbox: true };
+      }
+      if (e?.partial) {
+        // Marked as not delivered too, so that it can be sent again under its id ("Send again").
+        await this.patchMessage(m.id, (x) => {
+          x.failed = ["*"];
+        });
+      } else {
         await this.store.deleteMessage(m.id);
         this.emit("messages", { conv: m.conv });
       }
       throw e;
     }
-    const cur = await this.store.message(m.id);
-    if (cur?.unsent) {
-      delete cur.unsent;
-      await this.store.putMessage(cur);
-      this.emit("messages", { conv: m.conv });
+    await this.patchMessage(m.id, (x) => {
+      delete x.unsent;
+      if (r.peerFailed.length) x.failed = r.peerFailed;
+    });
+    return { id: m.id, time: m.time, failed: r.peerFailed };
+  }
+
+  /** Change a stored message in place (a receipt may have changed it since it was recorded). */
+  async patchMessage(id, change) {
+    const x = await this.store.message(id);
+    if (!x) return;
+    change(x);
+    await this.store.putMessage(x);
+    this.emit("messages", { conv: x.conv });
+  }
+
+  /** Send what waits in the outbox, oldest first; stops at the first that finds no connection. */
+  async flushOutbox() {
+    if (this.flushingOutbox || !this.outbox.length) return;
+    this.flushingOutbox = true;
+    try {
+      for (const o of [...this.outbox]) {
+        let failed = [];
+        try {
+          failed = (await this.send(o.conv, o.kind, o.body, { id: o.id, ttl: o.ttl, time: o.time })).peerFailed;
+        } catch (e) {
+          if (OFFLINE.includes(e?.message)) return;
+          failed = ["*"]; // it cannot go at all now (the contact was blocked, say): not delivered
+        }
+        this.outbox = this.outbox.filter((x) => x.id !== o.id);
+        await this.store.setSecret("outbox", this.outbox);
+        await this.markSent(o.id, failed);
+      }
+    } finally {
+      this.flushingOutbox = false;
     }
-    return { id: m.id, time: m.time };
+  }
+
+  /** Take the outbox mark off a stored message, and mark the devices it did not reach. */
+  async markSent(id, failed) {
+    const m = await this.store.message(id);
+    if (!m) return;
+    delete m.outbox;
+    delete m.unsent;
+    if (failed.length) m.failed = failed;
+    else delete m.failed;
+    await this.store.putMessage(m);
+    this.emit("messages", { conv: m.conv });
+  }
+
+  /** Send a message marked as not delivered once more, under its id. Returns whether it reached everyone now. */
+  async resend(id) {
+    const m = await this.store.message(id);
+    if (!m || m.dir !== "out" || !(m.failed?.length || m.outbox)) return true;
+    if (m.outbox) {
+      await this.flushOutbox();
+      return !(await this.store.message(id))?.outbox;
+    }
+    const body = m.kind === "ephemeral" ? { text: m.text, ttl: m.ttl, wait: m.wait } : { text: m.text };
+    const r = await this.send(m.conv, m.kind, body, { id, ttl: m.kind === "ephemeral" ? m.wait : undefined, time: m.time });
+    await this.markSent(id, r.peerFailed);
+    return r.peerFailed.length === 0;
   }
 
   /** A message only to our own other devices. */
@@ -763,8 +846,8 @@ export class Messenger extends EventTarget {
   async sendText(conv, text, id = p.b64(p.random(16))) {
     this.requireAccepted(conv);
     const t = String(text).slice(0, TEXT_MAX);
-    const m = { id, conv, dir: "out", kind: "text", text: t, device: this.me.device, delivered: 0 };
-    return this.sendRecorded(m, (time) => this.send(conv, "text", { text: t }, { id, time }));
+    const m = { id, conv, dir: "out", time: p.now(), kind: "text", text: t, device: this.me.device, delivered: 0 };
+    return this.sendOrKeep(m, { text: t });
   }
 
   async record(m) {
@@ -835,8 +918,8 @@ export class Messenger extends EventTarget {
     if (!EPHEMERAL_TTLS.includes(ttl)) throw new ApiError(400, "bad_ttl");
     const t = String(text).slice(0, TEXT_MAX);
     const wait = this.ephemeralWait(conv);
-    const m = { id, conv, dir: "out", kind: "ephemeral", text: t, ttl, wait, device: this.me.device, delivered: 0 };
-    return this.sendRecorded(m, (time) => this.send(conv, "ephemeral", { text: t, ttl, wait }, { id, ttl: wait, time }));
+    const m = { id, conv, dir: "out", time: p.now(), kind: "ephemeral", text: t, ttl, wait, device: this.me.device, delivered: 0 };
+    return this.sendOrKeep(m, { text: t, ttl, wait }, wait);
   }
 
   /** A received disappearing message is on the screen: its countdown starts on this device. */

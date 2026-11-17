@@ -584,7 +584,7 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
                     .push(Outgoing {
                         device: device.to_string(),
                         env: env.to_string(),
-                        ttl: o.get("ttl").map(|_| ttl),
+                        expires,
                         notify: o.get("notify").and_then(Value::as_bool) == Some(true),
                     });
             }
@@ -621,18 +621,25 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
                 .with("failed", Value::Array(failed)),
         )));
     }
-    // Envelopes for other servers go there first; `sent` follows when they have answered.
+    // Envelopes for other servers go there first, to all of them at once; `sent` follows when they have answered.
+    // `queued`: devices on servers that could not be reached now, whose envelopes this server keeps trying.
     let (app, device, id) = (app.clone(), me.device.clone(), id.to_string());
     tokio::spawn(async move {
-        for (server, msgs) in remote {
-            for d in crate::federation::deliver(&app, &server, msgs).await {
-                failed.push(d.into());
-            }
+        let answers = futures_util::future::join_all(remote.into_iter().map(|(server, msgs)| {
+            let app = app.clone();
+            async move { crate::federation::deliver(&app, &server, msgs).await }
+        }))
+        .await;
+        let mut queued: Vec<Value> = Vec::new();
+        for a in answers {
+            failed.extend(a.failed.into_iter().map(Value::from));
+            queued.extend(a.queued.into_iter().map(Value::from));
         }
         let sent = Map::new()
             .with("t", "sent")
             .with("id", id)
-            .with("failed", Value::Array(failed));
+            .with("failed", Value::Array(failed))
+            .with("queued", Value::Array(queued));
         app.hub.to_device(&device, Push::Text(text(&sent.into())));
     });
     Ok(None)

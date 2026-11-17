@@ -788,7 +788,7 @@ WebSocket frames (JSON):
 | client → server | `{ t: "auth", account, device, sig }` with `sig` over `frame("mesg/ws-auth/v1", canonical({account, device, nonce, origin}))` |
 | client → server | `auth` may carry `caps: ["bin"]`: the connection takes binary relay frames (§10.2) |
 | server → client | `{ t: "ready", relay: { bytes, peer, granted, store, frames, slow_frames, grant, binary, window } }` (the relay budgets below and in §10.2) then queued `{ t: "msg", id, env }` frames |
-| client → server | `{ t: "send", id, to: [{ device, env }] }` → `{ t: "sent", id }` |
+| client → server | `{ t: "send", id, to: [{ device, env, server?, ttl?, notify? }] }` → `{ t: "sent", id, failed, queued? }` (§10.3) |
 | client → server | `{ t: "ack", ids: [...] }` (deletes). Sent only for final results: a message handled, or one that can never be (undecryptable, not for this device, a bad signature or an unknown sender device). An envelope whose sender's device list could not be fetched, or whose handling failed locally (a full store), is left in the mailbox and read again on the next connection (at most until it expires) |
 | client → server | `{ t: "prekey", prekey }` |
 | client → server | `{ t: "presence", devices, ref }` → `{ t: "presence", online, ref }` |
@@ -930,6 +930,18 @@ on the live budgets.
 - Measured end to end (two Node clients against a release build with the default budgets, one machine): a 120 MiB
   `ask` file took 125 s as text on the live budget, and 6.2 s as binary frames on a grant.
 
+### 10.3 Delivery: the outbox and messages that did not arrive
+
+- A text (or disappearing text) written while there is no connection is stored at once with an `outbox` mark,
+  shown as "Waiting for a connection", and kept in an encrypted outbox on the device that survives a reload. It is sent
+  under the same id and time as soon as the connection is back, oldest first.
+- `sent.failed` is no longer ignored: a message that did not reach some device of the other party (unknown, a full
+  mailbox or that sender's share of it, another server that refused it) is marked "Not delivered" with a "Send again"
+  button, which sends it once more to everyone under its id (recipients ignore an id they already have). The mark goes
+  when a receipt says it arrived.
+- `sent.queued`: devices on another server that could not be reached; their server keeps trying (§14.3), so the
+  message counts as sent.
+
 ## 11. Data the server stores
 
 | Data | Why | Retention |
@@ -947,6 +959,7 @@ on the live budgets.
 | VAPID key | signing push requests | while the server exists |
 | network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
 | the sending server of an envelope from another server (§14) | the recipient looks the sender up there | with the envelope |
+| envelopes for another server that could not be reached (device there, ciphertext, when to try again) | delivery once it is back (§14.3) | until delivered or refused, at most 14 days (or the envelope's `ttl`) |
 | other servers' federation keys, nonces of their deliveries, device lists fetched from them, in memory | federation (§14) | an hour, 10 minutes, 20 seconds; at most 1 024 servers, and 256 lists of 16 MiB in all (the least recently fetched go first) |
 
 No access logs with addresses are written by default (`MURMO_LOG=info` logs no addresses or account ids).
@@ -1272,7 +1285,13 @@ back up. It is published in `/api/v1/info` as `federation.key`. The receiving se
   remembers the sending server with it (`mailbox.origin`). The device gets `{ t: "msg", id, env, server }`, and is
   woken by push when `notify` is set;
 - answers `{ failed }`: unknown devices, devices over their limit and full mailboxes. The sending server adds them to `failed` in `sent`, which
-  it sends when every server has answered (at most 10 seconds each).
+  it sends when every server has answered (it asks them all at once, at most 10 seconds each).
+
+A server that cannot be reached (no answer, a server error, its rate limit, a time it does not take) refuses nothing:
+the sending server keeps the envelopes (`fed_outbox`, at most 20 000 per server) and tries again after a minute,
+doubling up to an hour, until they expire as they would have in a mailbox (14 days, or their `ttl`). It lists those
+devices in `queued` in `sent`. As soon as the other server makes a signed request of its own, it is taken to be up and
+gets what waits for it at once. What it then refuses is dropped; the sender was told `queued` and is not told again.
 
 **No relaying.** A server sends deliveries only for envelopes from authenticated devices of its own accounts, and
 queues received envelopes only for devices that have a prekey on it, which only its own accounts' devices upload; it

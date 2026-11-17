@@ -182,6 +182,51 @@ test("message request, acceptance and text", async () => {
   assert.equal(await alice.safetyCode(bob.me.account), await bob.safetyCode(alice.me.account));
 });
 
+test("a text written without a connection waits in the outbox and goes when it is back", async () => {
+  const real = alice.ws.sendEnvelopes;
+  try {
+    alice.ws.sendEnvelopes = async () => {
+      throw new Error("offline");
+    };
+    const r = await alice.sendText(bob.me.account, "skrivet utan nät", "outbox-1");
+    assert.equal(r.outbox, true);
+    const kept = await alice.store.message("outbox-1");
+    assert.equal(kept.outbox, true);
+    assert.deepEqual((await alice.store.secret("outbox")).map((o) => o.id), ["outbox-1"]);
+    // Still no connection: it stays.
+    await alice.flushOutbox();
+    assert.equal((await alice.store.message("outbox-1")).outbox, true);
+  } finally {
+    alice.ws.sendEnvelopes = real;
+  }
+  await alice.flushOutbox();
+  const sent = await alice.store.message("outbox-1");
+  assert.equal(sent.outbox, undefined);
+  assert.equal(sent.failed, undefined);
+  assert.deepEqual(await alice.store.secret("outbox"), []);
+  // It keeps the time it was written at, and Bob gets it once.
+  await until(async () => (await bob.messages(alice.me.account)).some((m) => m.id === "outbox-1" && m.time === sent.time));
+});
+
+test("a text the server could not deliver is marked, and can be sent again", async () => {
+  const real = alice.ws.sendEnvelopes;
+  try {
+    // The server answers that Bob's device did not get it (a full mailbox, say).
+    alice.ws.sendEnvelopes = async (to) => {
+      await real.call(alice.ws, to.filter((x) => x.device !== bob.me.device));
+      return { failed: [bob.me.device], queued: [] };
+    };
+    const r = await alice.sendText(bob.me.account, "kom inte fram", "failed-1");
+    assert.deepEqual(r.failed, [bob.me.device]);
+    assert.deepEqual((await alice.store.message("failed-1")).failed, [bob.me.device]);
+  } finally {
+    alice.ws.sendEnvelopes = real;
+  }
+  assert.equal(await alice.resend("failed-1"), true);
+  assert.equal((await alice.store.message("failed-1")).failed, undefined);
+  await until(async () => (await bob.messages(alice.me.account)).some((m) => m.id === "failed-1"));
+});
+
 test("a text is stored before it is sent; a send that failed part way keeps it, one that failed at once does not", async () => {
   const real = alice.ws.sendEnvelopes;
   try {
@@ -1232,7 +1277,7 @@ test("the server keeps no delivered messages and no files", async () => {
   assert.equal(left, 0);
   const queued = db2count("relay_queue");
   assert.equal(queued, 0);
-  assert.deepEqual(tables, ["changes", "device_lists", "device_seen", "identities", "mailbox", "prekeys", "push_subs", "rate_limits", "relay_queue", "remote_ids", "settings", "sqlite_sequence", "writes"]);
+  assert.deepEqual(tables, ["changes", "device_lists", "device_seen", "fed_outbox", "identities", "mailbox", "prekeys", "push_subs", "rate_limits", "relay_queue", "remote_ids", "settings", "sqlite_sequence", "writes"]);
 });
 
 test("disappearing messages: a shorter countdown on the recipient and the sender's devices", async () => {

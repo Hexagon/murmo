@@ -426,6 +426,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Envelopes for servers that could not be reached are tried again (federation).
+    let retrier = app.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            tick.tick().await;
+            federation::flush_outbox(&retrier).await;
+        }
+    });
+
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     eprintln!("murmo-server for {} on {}", cfg.origin, cfg.bind);
     if !cfg.old_origins.is_empty() {
