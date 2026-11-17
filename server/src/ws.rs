@@ -60,6 +60,35 @@ pub const BIN_DELIVER: u8 = 0x02;
 pub const MAX_PRESENCE: usize = 32;
 /// Largest frame accepted from a client.
 pub const MAX_FRAME: usize = 3 * 1024 * 1024;
+/// How often the server pings a connected device.
+pub const PING_EVERY: Duration = Duration::from_secs(30);
+/// Pings in a row that may go unanswered before the connection is taken for dead and closed.
+pub const MISSED_PONGS: u32 = 2;
+
+/// Whether the other end of a connection is still there: every ping must be followed by something from it (a pong, or
+/// any other frame) before too many pings have gone by. A half-open socket (a phone that lost its network without
+/// closing) would otherwise stay registered: presence would say it is connected, and pushes and live chunks would go
+/// to it instead of the mailbox and the file queue.
+#[derive(Default)]
+struct Liveness {
+    unanswered: u32,
+}
+
+impl Liveness {
+    /// Something came from the device.
+    fn heard(&mut self) {
+        self.unanswered = 0;
+    }
+
+    /// Time for a ping: false when the last `MISSED_PONGS` went unanswered and the connection should be closed.
+    fn ping(&mut self) -> bool {
+        if self.unanswered >= MISSED_PONGS {
+            return false;
+        }
+        self.unanswered += 1;
+        true
+    }
+}
 
 /// Upgrade to a WebSocket. A browser's `Origin` must be this server's origin.
 pub async fn upgrade(
@@ -252,7 +281,10 @@ async fn session(
             .send(frame(Map::new().with("t", "link").with("request", r.value)))
             .await?;
     }
-    let mut ping = tokio::time::interval(Duration::from_secs(30));
+    let mut ping = tokio::time::interval(PING_EVERY);
+    // The first tick is at once; the device has just authenticated, so it starts from there.
+    ping.tick().await;
+    let mut alive = Liveness::default();
     // File chunks queued while this device was away follow, a few at a time between other frames.
     let mut relay_after = 0i64;
     let mut relay_more = true;
@@ -267,21 +299,33 @@ async fn session(
                     return Ok(());
                 }
             },
-            incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Text(t))) => {
-                    if let Some(r) = text_frame(app, me, t.as_bytes()).resolve().await {
-                        socket.send(r).await?;
-                    }
+            incoming = socket.recv() => {
+                if let Some(Ok(_)) = &incoming {
+                    alive.heard();
                 }
-                Some(Ok(Message::Binary(b))) => {
-                    if let Some(r) = binary_frame(app, me, &b).resolve().await {
-                        socket.send(r).await?;
+                match incoming {
+                    Some(Ok(Message::Text(t))) => {
+                        if let Some(r) = text_frame(app, me, t.as_bytes()).resolve().await {
+                            socket.send(r).await?;
+                        }
                     }
+                    Some(Ok(Message::Binary(b))) => {
+                        if let Some(r) = binary_frame(app, me, &b).resolve().await {
+                            socket.send(r).await?;
+                        }
+                    }
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    _ => return Ok(()),
                 }
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                _ => return Ok(()),
-            },
-            _ = ping.tick() => socket.send(Message::Ping(Vec::new().into())).await?,
+            }
+            _ = ping.tick() => {
+                if !alive.ping() {
+                    // Nothing came back: a half-open connection. Closing it unregisters the device.
+                    let _ = socket.send(Message::Close(None)).await;
+                    return Ok(());
+                }
+                socket.send(Message::Ping(Vec::new().into())).await?;
+            }
             _ = std::future::ready(()), if relay_more => {
                 let batch = app
                     .db
@@ -1385,6 +1429,24 @@ mod tests {
             && m.get("retry")
                 .and_then(Value::as_int)
                 .is_some_and(|s| (1..=60).contains(&s))
+    }
+
+    #[test]
+    fn unanswered_pings_close_the_connection() {
+        let mut alive = Liveness::default();
+        // Answered pings keep it open for as long as it lasts.
+        for _ in 0..10 {
+            assert!(alive.ping());
+            alive.heard();
+        }
+        // MISSED_PONGS pings in a row without an answer are allowed; the next tick closes it.
+        for _ in 0..MISSED_PONGS {
+            assert!(alive.ping());
+        }
+        assert!(!alive.ping());
+        // Anything from the device counts as an answer.
+        alive.heard();
+        assert!(alive.ping());
     }
 
     #[test]
