@@ -6,11 +6,11 @@
 //! fetch arbitrary addresses.
 
 use crate::app::{App, now};
+use crate::egress;
 use crate::error::ApiError;
 use rootcard::json::{Value, parse_limited};
 use rootcard::log::{LogOrder, VerifyOptions, compare_logs, verify_log};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Largest log answer accepted from a home.
 const MAX_LOG: usize = 4 * 1024 * 1024;
@@ -24,34 +24,38 @@ pub fn origin_of(base: &str) -> Option<String> {
 
 /// Whether the server may contact this home. `base` must be a rootcard base URL ([HST-22]).
 pub fn allowed(app: &App, base: &str) -> bool {
+    allowed_by(&app.cfg.remote_homes, app.cfg.any_home, base)
+}
+
+/// [`allowed`] for a list of homes and whether any (public) home is.
+fn allowed_by(remote_homes: &[String], any_home: bool, base: &str) -> bool {
     if rootcard::check_base_url(base).is_err() {
         return false;
     }
     let Some(origin) = origin_of(base) else {
         return false;
     };
-    if app.cfg.any_home {
-        // Any public https host; never an IP literal (no requests to internal addresses by number).
-        let host = origin.trim_start_matches("https://");
-        return origin.starts_with("https://")
-            && host.contains('.')
-            && !host.starts_with('[')
-            && host
-                .split(':')
-                .next()
-                .is_some_and(|h| h.parse::<std::net::Ipv4Addr>().is_err());
+    if remote_homes.contains(&origin) {
+        return true;
     }
-    app.cfg.remote_homes.contains(&origin)
+    // Any public https host: a public host name (never an IP literal in any spelling, nor a local name), and only
+    // public addresses when it is connected to (`egress`).
+    any_home
+        && origin
+            .strip_prefix("https://")
+            .and_then(|h| h.split(':').next())
+            .is_some_and(egress::public_host)
+}
+
+/// Whether the home is reached only at public addresses: one that is allowed because any home is, not one the
+/// operator listed.
+fn public_only(app: &App, base: &str) -> bool {
+    origin_of(base).is_none_or(|o| !app.cfg.remote_homes.contains(&o))
 }
 
 /// Fetch an identity's log from its home (blocking; call from a blocking task).
-fn fetch_log(base: &str, account: &str) -> Result<Vec<Value>, ApiError> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
-        .max_redirects(0)
-        .http_status_as_error(false)
-        .build()
-        .into();
+fn fetch_log(base: &str, account: &str, public_only: bool) -> Result<Vec<Value>, ApiError> {
+    let agent = egress::agent(public_only);
     let url = format!("{base}/{}/id/{account}/log", rootcard::API_VERSION);
     let mut res = agent
         .get(&url)
@@ -99,8 +103,8 @@ pub async fn refresh(
     if !allowed(app, &base) {
         return Err(ApiError::new(403, "home_not_allowed"));
     }
-    let (b, a) = (base.clone(), account.to_string());
-    let events = tokio::task::spawn_blocking(move || fetch_log(&b, &a))
+    let (b, a, public) = (base.clone(), account.to_string(), public_only(app, &base));
+    let events = tokio::task::spawn_blocking(move || fetch_log(&b, &a, public))
         .await
         .map_err(ApiError::internal)??;
     let options = VerifyOptions::new(app.cfg.realms.clone()).at(now());
@@ -148,7 +152,29 @@ pub async fn refresh_if_remote(app: &Arc<App>, account: &str, max_age: i64) {
 
 #[cfg(test)]
 mod tests {
-    use super::origin_of;
+    use super::{allowed_by, origin_of};
+
+    #[test]
+    fn any_home_is_a_public_host_name() {
+        let listed = vec!["http://127.0.0.1:8081".to_string()];
+        assert!(allowed_by(&listed, false, "http://127.0.0.1:8081")); // the operator's own choice
+        assert!(!allowed_by(&listed, false, "https://rootcard.org"));
+        assert!(allowed_by(&listed, true, "https://rootcard.org"));
+        assert!(allowed_by(&listed, true, "https://id.example.com:8443"));
+        for bad in [
+            "http://rootcard.example",
+            "https://127.1",
+            "https://10.1",
+            "https://0x7f.0.0.1",
+            "https://localhost.",
+            "https://localhost",
+            "https://[::1]",
+            "https://169.254.169.254",
+            "https://metadata.internal",
+        ] {
+            assert!(!allowed_by(&listed, true, bad), "{bad}");
+        }
+    }
 
     #[test]
     fn origins() {

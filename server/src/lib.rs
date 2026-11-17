@@ -32,6 +32,7 @@ pub mod api;
 pub mod app;
 pub mod db;
 pub mod devices;
+pub mod egress;
 pub mod error;
 pub mod federation;
 pub mod push;
