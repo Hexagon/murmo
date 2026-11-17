@@ -48,6 +48,8 @@ export default {
   "err.no_message": "Meddelandet finns inte längre.",
   "err.too_late": "Meddelandet kan inte längre ändras eller tas bort för alla (det går i 24 timmar). Du kan ta bort det för dig.",
   "err.unknown": "Något gick fel ({code}).",
+  "err.background": "Något gick fel i bakgrunden: {error}",
+  "err.storageFullBg": "Lagringen på den här enheten är full: nya meddelanden och filer kan inte sparas här. Frigör utrymme under Filer eller ta bort gamla konversationer.",
   "err.ephemeral_files": "Med timer på kan bara bilder skickas (PNG, JPEG, GIF, WebP). Stäng av timern för att skicka andra filer.",
   "err.ephemeral_gifs": "GIF:ar från din samling kan inte skickas med timer på. Stäng av timern först.",
   "err.bad_ttl": "Ogiltig tid för ett försvinnande meddelande.",

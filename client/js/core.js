@@ -44,6 +44,11 @@ const MAX_CHUNK_TEXT = Math.ceil((p.CHUNK + 16) / 3) * 4; // base64url of one en
 const BLOB_BATCH = 256; // parts folded into a Blob at a time (12 MiB)
 const IMAGE_HEAD = 256 * 1024; // where the dimensions of an image must be found
 const OFFLINE = ["offline", "disconnected", "timeout"];
+
+/** Whether an error means this device's storage (IndexedDB) is full. */
+export function isStorageFull(err) {
+  return err?.name === "QuotaExceededError" || err?.code === "storage_full";
+}
 /** Receipts are collected for this long and sent together (a mailbox read after a while away is one receipt). */
 const RECEIPT_WAIT = 400;
 const RECEIPT_MAX = 200;
@@ -305,8 +310,8 @@ export class Messenger extends EventTarget {
     this.ws.addEventListener("relay", (e) => {
       const f = e.detail;
       // file-req streams a whole file: not in the queue, or arriving chunks would wait for it
-      if (this.isChunk(f)) this.serial(() => this.onRelay(f)).catch(() => {});
-      else this.onRelay(f).catch(() => {});
+      if (this.isChunk(f)) this.serial(() => this.onRelay(f)).catch((x) => this.failStorage(x));
+      else this.onRelay(f).catch((x) => this.failStorage(x));
     });
     this.ws.addEventListener("relay-missed", (e) => {
       const set = this.missed.get(e.detail.ref);
@@ -317,8 +322,8 @@ export class Messenger extends EventTarget {
     clearInterval(this.pruneTimer);
     this.retryTimer = setInterval(() => {
       this.flushFiles().catch(() => {});
-      this.askWanted().catch(() => {});
-      this.fetchMissingGifs().catch(() => {}); // a device that has them may have connected since
+      this.askWanted().catch((x) => this.failStorage(x));
+      this.fetchMissingGifs().catch((x) => this.failStorage(x)); // a device that has them may have connected since
     }, FILE_RETRY_EVERY);
     this.pruneTimer = setInterval(() => this.prune().catch(() => {}), PRUNE_EVERY);
     this.prune().catch(() => {});
@@ -356,8 +361,14 @@ export class Messenger extends EventTarget {
     return this.ws.pushSubscription(endpoint);
   }
 
+  /** A failure in the background (no caller to tell): `{ message, name, code }` for the interface to show. */
   fail(err) {
-    this.emit("error", { message: err?.message ?? String(err) });
+    this.emit("error", { message: err?.message ?? String(err), name: err?.name ?? null, code: err?.code ?? null });
+  }
+
+  /** For background work whose failures are expected and retried: only a full disk is told (it does not go away). */
+  failStorage(err) {
+    if (isStorageFull(err)) this.fail(err);
   }
 
   // ── device lists ──────────────────────────────────────────────────────────────────────────────────────────────

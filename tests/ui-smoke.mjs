@@ -532,6 +532,29 @@ try {
   await a.keyboard.press("Escape");
   await a.keyboard.press("Escape");
   await a.waitForFunction(() => document.querySelector(".side-search").offsetParent === null, { timeout: 5000 });
+  // A full disk on Alice's device: Bob's next message cannot be stored there. That is not only logged: a lasting alert
+  // says so, with the files view to free space. (The engine's own console warning is expected here.)
+  const loud = problems.length;
+  await a.evaluate(() => {
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (...args) {
+      if (this.name === "messages") throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+      return put.apply(this, args);
+    };
+    window.__restorePut = () => { IDBObjectStore.prototype.put = put; };
+  });
+  await b.keyboard.press("Escape"); // Bob's safety code dialog is still open
+  await b.waitForFunction(() => !document.querySelector("dialog[open]"), { timeout: 5000 });
+  await b.type(".composer textarea", "Får inte plats");
+  await b.keyboard.press("Enter");
+  await a.waitForSelector(".storage-alert[role=alert]", { timeout: 30000 });
+  const alert = await a.$eval(".storage-alert", (e) => e.textContent);
+  if (!alert.includes("Lagringen på den här enheten är full")) throw new Error(`storage alert says: ${alert}`);
+  await a.screenshot({ path: `${shots}/a-7d-storage-full.png` });
+  await a.evaluate(() => window.__restorePut());
+  await a.click('.storage-alert [aria-label="Stäng"]');
+  await a.waitForFunction(() => !document.querySelector(".storage-alert"), { timeout: 5000 });
+  problems.splice(loud, problems.length - loud, ...problems.slice(loud).filter((x) => !/quota/i.test(x)));
   // The files view (DESIGN.md §13.9): every file of the conversations, pictures as tiles, other files as rows; the
   // viewer steps through the pictures; a file removed from this device stays as a message with "Hämta igen".
   // The sidebar header fits its 300 px column with the beta mark and all four buttons (the bell is shown here): no

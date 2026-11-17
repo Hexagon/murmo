@@ -48,6 +48,8 @@ export default {
   "err.no_message": "El mensaje ya no existe.",
   "err.too_late": "El mensaje ya no se puede editar ni eliminar para todos (se puede durante 24 horas). Puedes eliminarlo para ti.",
   "err.unknown": "Algo salió mal ({code}).",
+  "err.background": "Algo salió mal en segundo plano: {error}",
+  "err.storageFullBg": "El almacenamiento de este dispositivo está lleno: aquí no se pueden guardar mensajes ni archivos nuevos. Libera espacio en Archivos o elimina conversaciones antiguas.",
   "err.ephemeral_files": "Con el temporizador activado solo se pueden enviar imágenes (PNG, JPEG, GIF, WebP). Desactiva el temporizador para enviar otros archivos.",
   "err.ephemeral_gifs": "Los GIF de tu colección no se pueden enviar con el temporizador activado. Desactívalo primero.",
   "err.bad_ttl": "Tiempo no válido para un mensaje temporal.",
