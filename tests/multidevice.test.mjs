@@ -15,6 +15,8 @@ import { join } from "node:path";
 import { Api } from "../client/js/api.js";
 import * as id from "../client/js/identity.js";
 import { Messenger, Store, setupDevice } from "../client/js/core.js";
+import * as rc from "../client/vendor/rootcard/src/index.js";
+import { register as rcRegister, newInstance } from "../client/vendor/rootcard/src/vault-index.js";
 
 const PORT = 25000 + Math.floor(Math.random() * 1000);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
@@ -222,4 +224,28 @@ test("the same device opened in a second tab takes over; the first stops instead
   // Messages now reach the tab that has the connection, and the other device as before.
   await b1.sendText(a1.me.account, "till den nya fliken");
   for (const d of [tab, a2]) await until(async () => (await d.messages(b1.me.account)).some((m) => m.text === "till den nya fliken"));
+});
+
+test("a new instance (reset with the recovery card) disconnects the devices of the old one", async () => {
+  // Registered here with a recovery key the test keeps, which the app never does (the card is all the user gets).
+  const { host, realm } = await id.hostInfo(api, api.base);
+  const recoveryKey = await rc.newRecoveryKey(realm, "Rita", rc.systemRandom);
+  const home = { key: host.key, url: api.base };
+  const now = () => Math.floor(Date.now() / 1000);
+  const reg = await rcRegister(new Uint8Array(recoveryKey), realm, "Rita", PW, "Password", home, now(), rc.KDF_DEFAULT, rc.systemRandom);
+  const { handle } = await api.rc("POST", "/id/register", { log: reg.log, vault: reg.vault, public: reg.public });
+  const r1 = await device(handle, "r1");
+  assert.equal(r1.status, "online");
+  // A fresh instance with the recovery key: the old device list, and the device on it, are no longer valid.
+  const state = await id.fetchState(api, api.base, realms, reg.account);
+  const keys = await rc.deriveRecoveryKeys(recoveryKey, realm, "Rita");
+  const slot = { label: "Password", password: `${PW} again`, username: "Rita", kdf: rc.KDF_DEFAULT };
+  const inst = await newInstance(state, keys, null, null, { fresh: slot }, home, now(), rc.systemRandom);
+  const offline = waitFor(r1, "status", (st) => st !== "online");
+  await api.rc("POST", `/id/${reg.account}/instance`, { instance: inst.event, vault: inst.vault, public: inst.public });
+  // The server closes its connection at once, and it cannot authenticate again.
+  await offline;
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.notEqual(r1.status, "online");
+  assert.equal(r1.ws.ready, false);
 });

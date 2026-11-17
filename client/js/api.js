@@ -10,10 +10,24 @@ export class ApiError extends Error {
   }
 }
 
+/** How long a request may take, answer included, before it fails as `timeout` (ms). */
+export const REQUEST_TIMEOUT = 30_000;
+
+/** An `ApiError` (status 0) for a request that got no answer: `timeout` when it ran out of time, otherwise `offline`. */
+export function networkError(e) {
+  if (e instanceof ApiError) return e;
+  const timeout = e?.name === "TimeoutError" || e?.name === "AbortError";
+  return new ApiError(0, timeout ? "timeout" : "offline");
+}
+
 export class Api {
-  /** `origin` is the server's origin, such as `https://murmo.example` (no trailing slash). */
-  constructor(origin) {
+  /**
+   * `origin` is the server's origin, such as `https://murmo.example` (no trailing slash). `timeout` bounds every
+   * request (ms), so that a server that never answers cannot stall whatever waits for it.
+   */
+  constructor(origin, { timeout = REQUEST_TIMEOUT } = {}) {
     this.origin = origin;
+    this.timeout = timeout;
     this.base = `${origin}/id`; // the rootcard base URL ([HST-22]): never ends in /v0
     this.rcApi = `${this.base}/${rc.API_VERSION}`;
   }
@@ -22,15 +36,25 @@ export class Api {
     const headers = {};
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (token) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: body === undefined ? undefined : rc.canonicalString(body),
-      credentials: "omit",
-      cache: "no-store",
-      redirect: "error",
-    });
-    const text = await res.text();
+    // The signal also bounds reading the answer. A failure of the network itself (no connection, refused, reset, a
+    // redirect) becomes `offline`, and running out of time `timeout`: errors the user can be shown and that callers
+    // treat as worth retrying later.
+    const signal = AbortSignal.timeout(this.timeout);
+    let res, text;
+    try {
+      res = await fetch(url, {
+        method,
+        headers,
+        body: body === undefined ? undefined : rc.canonicalString(body),
+        credentials: "omit",
+        cache: "no-store",
+        redirect: "error",
+        signal,
+      });
+      text = await res.text();
+    } catch (e) {
+      throw networkError(e);
+    }
     let value = null;
     if (text) {
       try {

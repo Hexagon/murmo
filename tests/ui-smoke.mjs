@@ -431,6 +431,21 @@ try {
   await a.select("dialog #retention", String(7 * 86400));
   await a.waitForFunction(() => document.querySelector(".topbar .title")?.textContent.includes("raderas efter 1 vecka"), { timeout: 5000 });
   await a.screenshot({ path: `${shots}/a-7-retention.png` });
+  // Deleting the conversation and blocking ask first; Cancel (which has the focus) and Esc leave everything as it was.
+  const confirmShown = async (title) => {
+    await a.waitForFunction((t) => document.querySelector("dialog.confirm h2")?.textContent === t, { timeout: 5000 }, title);
+    if (await a.evaluate(() => document.activeElement?.textContent) !== "Avbryt") throw new Error("Cancel is not focused in the confirmation");
+  };
+  await clickText(a, "Ta bort konversationen", "dialog button");
+  await confirmShown(`Ta bort konversationen med ${bobHandle}?`);
+  await a.screenshot({ path: `${shots}/a-7a-confirm-delete.png` });
+  await a.keyboard.press("Escape");
+  await a.waitForFunction(() => !document.querySelector("dialog.confirm") && document.querySelector("dialog #retention"), { timeout: 5000 });
+  await clickText(a, "Blockera", "dialog button");
+  await confirmShown(`Blockera ${bobHandle}?`);
+  await clickText(a, "Avbryt", "dialog.confirm button");
+  await a.waitForFunction(() => !document.querySelector("dialog.confirm"), { timeout: 5000 });
+  if ((await a.$$(".side-list .conv")).length !== 1 || !(await a.$(".composer textarea"))) throw new Error("a cancelled confirmation changed the conversation");
   await a.keyboard.press("Escape");
   // A long history: the newest messages are drawn first, older ones as the reader scrolls up, and what is on the
   // screen stays in place while they come.
@@ -460,6 +475,27 @@ try {
   }
   if (!(await b.evaluate(() => [...document.querySelectorAll(".msg")].some((m) => m.textContent.includes("Andra raden."))))) throw new Error("the oldest messages never came");
   await b.screenshot({ path: `${shots}/b-7d-older.png` });
+  // A lost connection: after a moment a banner says so above everything, and a text held for "Ångra" carries a
+  // pending mark instead of looking sent. Taken back here, so nothing is sent; the banner goes when it is back.
+  // (Chrome logs the failed reconnects while offline; those are not counted as problems.)
+  const quiet = problems.length;
+  await a.setOfflineMode(true);
+  // Chrome's offline mode does not always close an open WebSocket; a page coming back to the foreground pings the
+  // server, and without a pong in 4 s the connection is taken for dead.
+  await a.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await a.waitForSelector(".net-banner:not([hidden])", { timeout: 30000 });
+  const banner = await a.$eval(".net-banner", (e) => ({ role: e.getAttribute("role"), text: e.textContent, top: e.getBoundingClientRect().top }));
+  if (banner.role !== "status" || !banner.text.includes("Ingen anslutning till servern") || banner.top > 80) throw new Error(`no connection banner: ${JSON.stringify(banner)}`);
+  await a.type(".composer textarea", "Utan anslutning");
+  await a.keyboard.press("Enter");
+  await a.waitForFunction(() => document.querySelector(".msg.out.held .held-note")?.textContent.includes("Väntar på anslutningen"), { timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-6j-offline.png` });
+  await a.click(".msg.out.held .undo-btn");
+  await a.waitForFunction(() => !document.querySelector(".msg.out.held") && document.querySelector(".composer textarea").value === "Utan anslutning", { timeout: 5000 });
+  await a.$eval(".composer textarea", (t) => { t.value = ""; });
+  await a.setOfflineMode(false);
+  await a.waitForFunction(() => document.querySelector(".net-banner").hidden && document.querySelector(".me .dot.on"), { timeout: 30000 });
+  problems.splice(quiet, problems.length - quiet, ...problems.slice(quiet).filter((x) => !/ERR_INTERNET_DISCONNECTED|WebSocket|Failed to load resource|Failed to fetch/.test(x)));
   // Search: the field in the sidebar finds a contact by handle and an old message by its text (any case), with the
   // match marked; the hit opens the conversation with that message in view and marked. Escape brings the list back.
   // The field is hidden until the search button (or Ctrl+K) opens it, and Esc on an empty field hides it again.
@@ -498,6 +534,16 @@ try {
   await a.waitForFunction(() => document.querySelector(".side-search").offsetParent === null, { timeout: 5000 });
   // The files view (DESIGN.md §13.9): every file of the conversations, pictures as tiles, other files as rows; the
   // viewer steps through the pictures; a file removed from this device stays as a message with "Hämta igen".
+  // The sidebar header fits its 300 px column with the beta mark and all four buttons (the bell is shown here): no
+  // button reaches past the sidebar, under the main column's top bar, and the name does not run under a button.
+  const head = await a.evaluate(() => {
+    const side = document.querySelector(".sidebar").getBoundingClientRect();
+    const top = document.querySelector(".side-top");
+    const btns = [...top.querySelectorAll(".icon-btn")].filter((e) => e.offsetWidth > 0).map((e) => e.getBoundingClientRect());
+    const name = top.querySelector(".logo-name").getBoundingClientRect();
+    return { n: btns.length, inside: btns.every((r) => r.left >= side.left && r.right <= side.right), over: top.scrollWidth - top.clientWidth, clear: btns[0].left - name.right };
+  });
+  if (head.n !== 4 || !head.inside || head.over > 0 || head.clear < 0) throw new Error(`sidebar header overflows: ${JSON.stringify(head)}`);
   await a.click(".side-top .files-btn");
   await a.waitForSelector(".fv-tile img[src]", { timeout: 20000 });
   await a.waitForFunction(() => [...document.querySelectorAll(".fv-row .fn")].some((e) => e.textContent === "icon.svg"), { timeout: 5000 });
@@ -580,6 +626,18 @@ try {
   await a.click("dialog .check input");
   await clickText(a, "Aktivera pappersnyckeln");
   await a.waitForFunction(() => !document.querySelector("dialog"), { timeout: 10000 });
+  // Taking a device off the list (here the paper key) asks first; cancelled, the key stays.
+  await a.click('[aria-label="Konto och inställningar"]');
+  await clickText(a, "Enheter");
+  await a.waitForFunction(() => [...document.querySelectorAll("dialog button")].some((x) => x.textContent === "Ta bort"), { timeout: 10000 });
+  await clickText(a, "Ta bort", "dialog button");
+  await confirmShown("Ta bort pappersnyckeln?");
+  await clickText(a, "Avbryt", "dialog.confirm button");
+  await a.waitForFunction(() => !document.querySelector("dialog.confirm"), { timeout: 5000 });
+  await sleep(500);
+  if (!(await a.evaluate(() => [...document.querySelectorAll("dialog button")].some((x) => x.textContent === "Ta bort")))) throw new Error("a cancelled confirmation took the paper key away");
+  await a.keyboard.press("Escape");
+  await a.waitForFunction(() => !document.querySelector("dialog"), { timeout: 5000 });
   const a2 = await page("alice2");
   await a2.type("form input[autocomplete=username]", aliceHandle);
   await a2.type("form input[type=password]", "correct horse battery staple");
