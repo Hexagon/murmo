@@ -188,12 +188,15 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 
 /* ── the app's layout: sidebar, main column, top bar ──────────────────────────────────────────────────────────── */
 
-.shell { display: grid; grid-template-columns: 280px 1fr; height: 100%; }
+.shell { display: grid; grid-template-columns: 300px 1fr; height: 100%; }
 .sidebar { background: var(--sidebar); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
-.side-top { padding: 12px 12px 6px; display: flex; align-items: center; justify-content: space-between; }
-.side-top .logo { font-family: var(--serif); font-size: 22px; display: flex; gap: 8px; align-items: center; padding-left: 6px; }
+.side-top { padding: 12px 12px 6px; display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+/* The buttons keep their size; where the logo, its marks and up to four buttons do not fit (300 px on a desktop), the
+   marks wrap under the name instead of pushing the buttons over the main column. */
+.side-top .logo { font-family: var(--serif); font-size: 22px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; padding-left: 4px; min-width: 0; }
+.side-top .logo-name { display: flex; gap: 8px; align-items: center; white-space: nowrap; }
 .side-top .logo img { width: 22px; height: 22px; }
-.side-actions { display: flex; gap: 6px; align-items: center; }
+.side-actions { display: flex; gap: 6px; align-items: center; flex: none; }
 .icon-btn.bell-off { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
 .icon-btn[hidden] { display: none; }
 .side-list { overflow-y: auto; padding: 0 8px 12px; flex: 1; }
@@ -542,6 +545,12 @@ dialog.viewer .close svg { width: 22px; height: 22px; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px 8px 14px;
   font-size: 14px; box-shadow: var(--shadow);
 }
+/* under the top bar, over the thread; centred on the main column beside the sidebar */
+.net-banner { position: fixed; top: calc(62px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); z-index: 9; max-width: calc(100% - 32px); display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-size: 14px; box-shadow: var(--shadow); }
+.net-banner[hidden] { display: none; }
+@media (min-width: 761px) { .net-banner { left: calc(50% + 150px); max-width: calc(100% - 332px); } }
+.net-banner .dot { flex: none; background: var(--danger); }
+.net-banner .link { color: inherit; text-decoration: underline; white-space: nowrap; }
 .toasts { pointer-events: none; position: fixed; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 10; }
 .toast { background: var(--text); color: var(--bg); padding: 9px 14px; border-radius: 10px; font-size: 14px; box-shadow: var(--shadow); }
 .storage-alert { position: fixed; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); z-index: 11; width: min(560px, calc(100% - 32px)); display: flex; align-items: center; gap: 10px; padding: 10px 10px 10px 14px; border-radius: 12px; background: var(--panel); color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); box-shadow: var(--shadow); font-size: 14px; }

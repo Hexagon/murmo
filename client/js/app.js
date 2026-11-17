@@ -242,12 +242,52 @@ function toast(text) {
   setTimeout(() => t.remove(), 4500);
 }
 
+/**
+ * Ask before something that cannot be taken back (deleting a conversation, blocking, removing a device). Resolves
+ * `true` only when `ok` was chosen; Cancel, Esc and the backdrop leave everything as it was. Cancel has the focus.
+ */
+function confirmDialog(title, text, ok) {
+  return new Promise((resolve) => {
+    let yes = false;
+    const d = dialog(
+      h("h2", { text: title }),
+      h("p", { class: "hint", text }),
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { class: "btn", text: tr("common.cancel"), onclick: () => d.close() }),
+        h("button", { class: "btn danger confirm-ok", text: ok, onclick: () => { yes = true; d.close(); } }),
+      ),
+    );
+    d.classList.add("confirm");
+    d.addEventListener("close", () => resolve(yes));
+  });
+}
+
 function dialog(...children) {
   const d = h("dialog", {}, ...children);
   d.addEventListener("close", () => d.remove());
   document.body.append(d);
   d.showModal();
   return d;
+}
+
+let fieldIds = 0;
+/**
+ * A form field: the label above the control is tied to it, so screen readers and voice control know the control by
+ * its name and a click on the label focuses it (`for` and an id; a group of buttons gets `aria-labelledby`).
+ */
+function field(label, control, ...rest) {
+  const lab = h("label", { text: label });
+  if (control.labels) {
+    control.id ||= `field-${++fieldIds}`;
+    lab.htmlFor = control.id;
+  } else {
+    lab.id = `field-${++fieldIds}`;
+    if (!control.getAttribute("role")) control.setAttribute("role", "group");
+    control.setAttribute("aria-labelledby", lab.id);
+  }
+  return h("div", { class: "field" }, lab, control, ...rest);
 }
 
 /** Choices for how long a conversation's messages are kept (seconds; 0: until the conversation is deleted). */
@@ -471,7 +511,7 @@ function showHelp() {
 // ── terms, privacy and the open beta ────────────────────────────────────────────────────────────────────────────
 
 /** The day the terms below last changed (Unix seconds), shown with them. */
-const TERMS_DATE = Date.UTC(2026, 10, 16) / 1000;
+const TERMS_DATE = Date.UTC(2026, 10, 17) / 1000;
 
 /** The sections of the terms, as HELP; the demo section only on a demo server (`MURMO_DEMO`). */
 const termSections = () => [
@@ -642,7 +682,8 @@ async function loginForm(body, err, prefill) {
   const known = await accounts.all();
   const remote = h("input", { class: "input", placeholder: "rootcard.org", spellcheck: "false", autocomplete: "off" });
   let where = "local";
-  const remoteField = h("div", { class: "field hidden" }, h("label", { text: tr("auth.remoteLabel") }), remote, h("div", { class: "hint", text: tr("auth.remoteHint", { homes: allowedHomes() || tr("auth.noOtherHome") }) }));
+  const remoteField = field(tr("auth.remoteLabel"), remote, h("div", { class: "hint", text: tr("auth.remoteHint", { homes: allowedHomes() || tr("auth.noOtherHome") }) }));
+  remoteField.classList.add("hidden");
   const seg = h("div", { class: "seg" });
   const setWhere = (w) => {
     where = w;
@@ -695,10 +736,10 @@ async function loginForm(body, err, prefill) {
       },
     },
     chips,
-    h("div", { class: "field" }, h("label", { text: tr("auth.where") }), seg),
+    field(tr("auth.where"), seg),
     remoteField,
-    h("div", { class: "field" }, h("label", { text: tr("common.handle") }), handle),
-    h("div", { class: "field" }, h("label", { text: tr("common.password") }), pw),
+    field(tr("common.handle"), handle),
+    field(tr("common.password"), pw),
     h(
       "label",
       { class: "check" },
@@ -740,9 +781,9 @@ function registerForm(body, err) {
           }
         },
       },
-      h("div", { class: "field" }, h("label", { text: tr("auth.username") }), user),
-      h("div", { class: "field" }, h("label", { text: tr("auth.passwordMin") }), pw),
-      h("div", { class: "field" }, h("label", { text: tr("auth.repeat") }), pw2),
+      field(tr("auth.username"), user),
+      field(tr("auth.passwordMin"), pw),
+      field(tr("auth.repeat"), pw2),
       h("p", { class: "hint", text: tr("auth.handleHint") }),
       (info?.homes ?? []).length ? h("p", { class: "hint", text: tr("auth.haveIdentity", { homes: allowedHomes() }) }) : null,
       h("p", { class: "hint" }, tr("terms.accept"), " ", h("button", { class: "link", type: "button", text: tr("terms.read"), onclick: showTerms })),
@@ -974,7 +1015,7 @@ function paperKeyForm(setup, done) {
       },
     },
     h("p", {}, h("strong", { text: tr("paper.have") }), tr("paper.haveText")),
-    h("div", { class: "field" }, h("label", { text: tr("paper.label") }), input),
+    field(tr("paper.label"), input),
     go,
     err,
     h("p", { class: "hint", text: tr("paper.none") }),
@@ -1066,6 +1107,8 @@ async function enter({ store, account, handle, home }) {
   messenger.addEventListener("file", (e) => transfers.delete(`in:${e.detail.f}`));
   messenger.addEventListener("status", (e) => {
     renderSidebar();
+    updateNet();
+    if (current && heldMsgs.size) renderThread(); // a held text's mark says whether it can go now
     if (e.detail !== "online") return;
     syncPush().catch((x) => console.warn("push", x?.message ?? x));
     checkVersion(); // the server may have been restarted with a new client
@@ -1289,6 +1332,11 @@ function renderShell() {
   ui.filesBtn = h("button", { class: "icon-btn files-btn", "aria-label": tr("files.title"), title: tr("files.title"), "aria-pressed": "false", onclick: () => openFiles() }, icon("folder"));
   ui.foot = h("div", { class: "side-foot" });
   ui.main = h("main", { class: "main" });
+  ui.net = h("div", { class: "net-banner", role: "status", hidden: true },
+    h("span", { class: "dot" }),
+    h("span", { text: tr("net.offline") }),
+    h("button", { type: "button", class: "link", text: tr("net.retry"), onclick: () => messenger?.wake() }),
+  );
   ui.bell = h("button", { class: "icon-btn bell-off", hidden: true, onclick: async () => toast(await setNotifications(true).catch((x) => say(x))) }, icon("bellOff"));
   ui.shell = h(
     "div",
@@ -1299,7 +1347,7 @@ function renderShell() {
       h(
         "div",
         { class: "side-top" },
-        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo", betaMark()),
+        h("div", { class: "logo" }, h("span", { class: "logo-name" }, h("img", { src: "icon.svg", alt: "" }), "Murmo"), betaMark()),
         h(
           "div",
           { class: "side-actions" },
@@ -1314,9 +1362,11 @@ function renderShell() {
       ui.foot,
     ),
     ui.main,
+    ui.net,
   );
   inApp(true);
   root.replaceChildren(ui.shell);
+  updateNet();
   renderSidebar();
   openConversation(current);
 }
@@ -1473,6 +1523,26 @@ async function renderSearch() {
   );
 }
 
+// A lost connection is said above everything (on a phone the sidebar's "Connecting…" is hidden inside a
+// conversation), after a grace period so a quick reconnect does not flash it.
+const NET_GRACE = 2500;
+let netTimer = 0;
+function updateNet() {
+  if (!ui.net) return;
+  const down = messenger?.status === "offline";
+  if (!down) {
+    clearTimeout(netTimer);
+    netTimer = 0;
+    ui.net.hidden = true;
+    return;
+  }
+  if (!ui.net.hidden || netTimer) return;
+  netTimer = setTimeout(() => {
+    netTimer = 0;
+    if (messenger?.status === "offline") ui.net.hidden = false;
+  }, NET_GRACE);
+}
+
 function renderFoot() {
   const [name] = splitHandle(messenger.handle);
   put(ui.foot,
@@ -1600,7 +1670,7 @@ function requestBox(c) {
       { class: "actions" },
       h("button", { class: "btn primary", text: tr("conv.accept"), onclick: () => messenger.accept(c.account).then(() => openConversation(c.account), (x) => toast(say(x))) }),
       h("button", { class: "btn", text: tr("conv.decline"), onclick: () => messenger.setState(c.account, "declined").then(() => openConversation(null)) }),
-      h("button", { class: "btn danger", text: tr("conv.block"), onclick: () => messenger.setState(c.account, "blocked").then(() => openConversation(null)) }),
+      h("button", { class: "btn danger", text: tr("conv.block"), onclick: () => confirmBlock(c).then((yes) => yes && openConversation(null)) }),
     ),
   );
 }
@@ -1733,7 +1803,8 @@ function composer(c) {
       if (t) await messenger.sendEphemeral(c.account, text, t, id);
       else await messenger.sendText(c.account, text, id);
     } catch (x) {
-      if (!ta.value.trim()) {
+      // Some devices got it already: it stays in the thread (marked unsent) instead of coming back to be sent again.
+      if (!x?.partial && !ta.value.trim()) {
         ta.value = text;
         grow();
       }
@@ -2431,9 +2502,9 @@ function fuseView(m) {
 function messageSig(m) {
   const f = m.file;
   return JSON.stringify([
-    m.kind, m.text, m.time, m.dir, m.delivered, m.reactions ?? null, m.edited ?? 0, m.held ? (m.firing ? 2 : 1) : 0, m.ttl ?? null, m.expires ?? null,
+    m.kind, m.text, m.time, m.dir, m.delivered, m.reactions ?? null, m.edited ?? 0, m.held ? (m.firing ? 2 : 1) + (messenger.status === "online" ? 0 : 2) : 0, m.ttl ?? null, m.expires ?? null,
     f ? [f.f, f.have, f.missed ?? null, f.peers ?? null, f.mime === "image/gif" && gifHashes.has(f.sha256)] : null,
-    messenger.contacts.get(m.conv)?.state, sending.has(m.id),
+    messenger.contacts.get(m.conv)?.state, sending.has(m.id), !!m.outbox, m.failed?.length ?? 0,
   ]);
 }
 
@@ -2581,7 +2652,9 @@ function message(m) {
   if (m.kind === "ephemeral") meta.append(fuseView(m));
   if (m.edited) meta.append(h("span", { class: "edited", text: tr("msg.edited"), title: tr("msg.editedAt", { when: i18n.dateTime(m.edited) }) }));
   if (m.held) {
-    // Waiting for "Ångra": looks like a sent message; not on the server yet, so no delivery mark.
+    // Waiting for "Ångra": not on the server yet, so no delivery mark. While it is being sent, or when there is no
+    // connection to send it on, a pending mark says so (it must not look sent).
+    if (m.firing || messenger.status !== "online") meta.append(h("span", { class: "pending held-note", text: tr(messenger.status === "online" ? "msg.sendingText" : "msg.waitingNet") }));
     if (!m.firing) meta.append(undoButton(m));
     return h("div", { class: `msg out held${m.kind === "ephemeral" ? " ephemeral" : ""}` }, body, meta);
   }
@@ -2596,6 +2669,23 @@ function message(m) {
         onclick: async () => {
           try {
             toast(tr((await messenger.flushFiles()) ? "msg.sentToast" : "msg.peerAway"));
+          } catch (x) {
+            toast(say(x));
+          }
+        },
+      }),
+    );
+  }
+  else if (m.dir === "out" && m.outbox) meta.append(h("span", { class: "pending", text: tr("msg.waitingToSend") }));
+  else if (m.dir === "out" && m.failed?.length && !m.delivered) {
+    meta.append(
+      h("span", { class: "pending", text: tr("msg.notDelivered") }),
+      h("button", {
+        class: "link",
+        text: tr("msg.sendAgain"),
+        onclick: async () => {
+          try {
+            toast(tr((await messenger.resend(m.id)) ? "msg.sentToast" : "msg.stillNotDelivered"));
           } catch (x) {
             toast(say(x));
           }
@@ -3645,11 +3735,36 @@ function showContactMenu(c) {
       c.state === "accepted" ? h("button", { class: "btn", text: tr("contact.showSafety"), onclick: () => { d.close(); showSafety(c); } }) : null,
       h("button", { class: "btn", text: tr("files.ofConversation"), onclick: () => { d.close(); openFiles(c.account, c.account); } }),
       retentionPicker(c),
-      c.state !== "blocked" ? h("button", { class: "btn danger", text: tr("conv.block"), onclick: () => messenger.setState(c.account, "blocked").then(() => { d.close(); openConversation(null); }) }) : null,
-      h("button", { class: "btn danger", text: tr("contact.delete"), onclick: () => messenger.setState(c.account, "declined").then(() => { d.close(); openConversation(null); }) }),
+      c.state !== "blocked" ? h("button", { class: "btn danger", text: tr("conv.block"), onclick: () => confirmBlock(c).then((yes) => { if (yes) { d.close(); openConversation(null); } }) }) : null,
+      h("button", {
+        class: "btn danger",
+        text: tr("contact.delete"),
+        onclick: async () => {
+          if (!(await confirmDialog(tr("contact.deleteQuestion", { handle: c.handle }), tr("contact.deleteHint", { name: personName(c.account) }), tr("contact.deleteOk")))) return;
+          try {
+            await messenger.setState(c.account, "declined");
+            d.close();
+            openConversation(null);
+          } catch (x) {
+            toast(say(x));
+          }
+        },
+      }),
     ),
     h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
   );
+}
+
+/** Block `c` after asking; resolves whether it was blocked. */
+async function confirmBlock(c) {
+  if (!(await confirmDialog(tr("contact.blockQuestion", { handle: c.handle }), tr("contact.blockHint", { name: personName(c.account) }), tr("conv.block")))) return false;
+  try {
+    await messenger.setState(c.account, "blocked");
+    return true;
+  } catch (x) {
+    toast(say(x));
+    return false;
+  }
 }
 
 /** How long the messages of a conversation are kept on this account's devices. */
@@ -3754,8 +3869,10 @@ function showAccountMenu() {
         undo,
         h("span", {}, tr("acct.undo"), h("span", { class: "hint", style: "display:block", text: tn("acct.undoHint", UNDO_SEND / 1000) })),
       ),
-      h("div", { class: "field", style: "margin:6px 0 0" }, h("label", { text: tr("theme.label") }), themePicker()),
-      h("div", { class: "field", style: "margin:6px 0 0" }, h("label", { text: tr("common.language") }), languagePicker(() => { d.close(); renderShell(); showAccountMenu(); })),
+      [field(tr("theme.label"), themePicker()), field(tr("common.language"), languagePicker(() => { d.close(); renderShell(); showAccountMenu(); }))].map((f) => {
+        f.style.margin = "6px 0 0";
+        return f;
+      }),
       h("button", { class: "btn danger", text: tr("acct.logout"), onclick: () => { d.close(); logout(false); } }),
     ),
     h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
@@ -3833,7 +3950,10 @@ async function showDevices() {
                 text: tr("common.remove"),
                 onclick: async () => {
                   try {
-                    if (p.isPaper(dev) && !confirm(tr("dev.removePaper"))) return;
+                    const sure = p.isPaper(dev)
+                      ? await confirmDialog(tr("dev.removePaperQuestion"), tr("dev.removePaper"), tr("common.remove"))
+                      : await confirmDialog(tr("dev.removeQuestion", { name: displayName(dev, names) }), tr("dev.removeHint"), tr("common.remove"));
+                    if (!sure) return;
                     await messenger.removeDevice(dev.id);
                     await render();
                   } catch (x) {
@@ -3886,7 +4006,7 @@ function showPaperKey(onDone = () => {}) {
       },
     },
     h("p", { text: tr("pk.intro") }),
-    h("div", { class: "field" }, h("label", { text: tr("pk.yourPassword") }), pw),
+    field(tr("pk.yourPassword"), pw),
     h("div", { class: "actions" }, h("button", { class: "btn", type: "button", text: tr("common.cancel"), onclick: () => d.close() }), go),
     err,
   );
