@@ -85,7 +85,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       server once for 10 s and reports everything as failed (`federation.rs:437-452`), servers one after another.
       Client outbox with retry and a "not delivered" mark; server-side federation outbox with backoff; deliver to
       servers in parallel
-- [ ] **Mailbox flooding.** `MAX_QUEUE` (2000 per device, `ws.rs:25`) is shared by all senders; a local device fills an
+- [x] **Mailbox flooding.** `MAX_QUEUE` (2000 per device, `ws.rs:25`) is shared by all senders; a local device fills an
       offline victim in about 2 min, a remote server in about 3.5 min (600/min per device), for 14 days. Per-sender and
       per-origin shares, a smaller share for non-contacts
 - [ ] **Partial sends.** A bad envelope or rate limit for recipient N fails the whole frame after 1..N-1 were queued
