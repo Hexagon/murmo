@@ -1232,7 +1232,7 @@ test("the server keeps no delivered messages and no files", async () => {
   assert.equal(left, 0);
   const queued = db2count("relay_queue");
   assert.equal(queued, 0);
-  assert.deepEqual(tables, ["changes", "device_lists", "device_seen", "identities", "mailbox", "prekeys", "push_subs", "rate_limits", "relay_queue", "remote_ids", "settings", "sqlite_sequence"]);
+  assert.deepEqual(tables, ["changes", "device_lists", "device_seen", "identities", "mailbox", "prekeys", "push_subs", "rate_limits", "relay_queue", "remote_ids", "settings", "sqlite_sequence", "writes"]);
 });
 
 test("disappearing messages: a shorter countdown on the recipient and the sender's devices", async () => {

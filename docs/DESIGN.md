@@ -816,6 +816,15 @@ sending it again under a new id.
 Limits (v0): envelope ≤ 64 KiB, ≤ 24 recipients per send, ≤ 2 000 queued envelopes per device, mailbox TTL 14 days,
 60 sends per minute per device, 20 lookups per minute and 5 link requests per hour per network address.
 
+The 2 000 places of a device's mailbox are not first come, first served: each sender has a **share** of them, so that
+one sender cannot fill the mailbox of a device that is away and push out everyone else's messages for 14 days. An
+account of this server may have 500 envelopes waiting in a device of an account that wrote to it in the last 90 days
+(a contact) and 50 in any other (a message request, or a stranger); another server, whose accounts this server cannot
+tell apart, has 1 000 for all its accounts together when the device's account wrote to someone there, and 200
+otherwise. The account's own devices have no share but the whole mailbox. Envelopes over a share are listed in
+`sent.failed` (or the delivering server's `failed`), like a full mailbox. For this the server keeps each queued
+envelope's sender, and that an account wrote to another, only as keyed hashes (§11).
+
 Relay (live file chunks and the file queue): bytes per minute (of chunk text, or of a binary frame's payload), with a
 budget per route; each chunk is counted once for each recipient device it goes to, by where it goes:
 - **live**, to a connected device that did not ask for it: 384 MiB per sending device and 96 MiB per sending account
@@ -928,7 +937,8 @@ on the live budgets.
 | rootcard log, vault (encrypted), profile, sessions | rootcard home | while the account exists |
 | logs of identities from other homes | verifying their devices | while the account is used here |
 | device lists, current prekeys | others must encrypt to your devices | while the account exists |
-| envelopes | delivery | until acknowledged, at most 14 days |
+| envelopes, each with its sender as a keyed hash (the account, or the server it came from) | delivery; each sender's share of a mailbox (§10) | until acknowledged, at most 14 days |
+| that an account wrote to another (or to someone on another server), as a keyed hash of the pair | a larger share of the writer's mailbox for those it wrote to (§10) | 90 days after the last such envelope |
 | link requests | linking | memory only, 10 minutes |
 | relay frames (file chunks) | live transfer | not stored when the recipient device is connected |
 | queued file chunks (ciphertext) | files for devices that are away (sender's choice) | until acknowledged, at most 14 days (a disappearing picture's: its unread limit) |

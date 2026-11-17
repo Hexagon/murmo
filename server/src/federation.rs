@@ -24,7 +24,7 @@ use crate::error::{ApiError, json};
 use crate::remote::origin_of;
 use crate::ws::{
     MAILBOX_TTL, MAX_PRESENCE, MAX_QUEUE, MAX_RECIPIENTS, MAX_RELAY, MAX_RELAY_BIN,
-    RELAY_PEER_BYTES, check_envelope, deliver_frame, is_b64url, space_for,
+    RELAY_PEER_BYTES, Sender, check_envelope, deliver_frame, is_b64url, share_for, space_for,
 };
 use axum::body::Bytes;
 use axum::extract::State;
@@ -662,10 +662,15 @@ pub async fn post_deliver(
         }
         let mut failed: Vec<Value> = Vec::new();
         for (o, device, env, ttl) in items {
-            if device.len() > 64 || !app.db.device_known(device).map_err(ApiError::internal)? {
+            let owner = if device.len() > 64 {
+                None
+            } else {
+                app.db.device_owner(device).map_err(ApiError::internal)?
+            };
+            let Some(owner) = owner else {
                 failed.push(device.into());
                 continue;
-            }
+            };
             if app
                 .limits
                 .check(format!("federation-device:{device}"), 600, 60)
@@ -675,9 +680,11 @@ pub async fn post_deliver(
                 continue;
             }
             let expires = t + ttl.clamp(1, MAILBOX_TTL);
+            // All accounts of the sending server share one part of the mailbox (this server cannot tell them apart).
+            let share = share_for(&app, &owner, Sender::Server(from), t)?;
             match app
                 .db
-                .enqueue(device, env, expires, MAX_QUEUE, Some(from))
+                .enqueue(device, env, expires, MAX_QUEUE, Some(from), share.as_ref())
                 .map_err(ApiError::internal)?
             {
                 Some(mid) => {

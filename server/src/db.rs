@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS mailbox (
   origin  TEXT
 );
 CREATE INDEX IF NOT EXISTS mailbox_device ON mailbox (device, id);
+CREATE TABLE IF NOT EXISTS writes (
+  pair  BLOB PRIMARY KEY, -- keyed hash of: writer account > recipient account (or @server)
+  until INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS remote_ids (
   account     TEXT PRIMARY KEY,
   home        TEXT NOT NULL,
@@ -173,6 +177,19 @@ impl Db {
         if !has_origin {
             conn.execute_batch("ALTER TABLE mailbox ADD COLUMN origin TEXT")?;
         }
+        // Who sent each envelope, as a keyed hash, for the senders' shares of a mailbox; databases from before have
+        // no column (their envelopes count for nobody's share).
+        let has_sender: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mailbox') WHERE name = 'sender'",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has_sender {
+            conn.execute_batch("ALTER TABLE mailbox ADD COLUMN sender BLOB")?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS mailbox_sender ON mailbox (device, sender)",
+        )?;
         // Chunks from accounts on other servers count against the sending server and account together.
         let has_relay_origin: bool = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('relay_queue') WHERE name = 'origin'",
@@ -411,6 +428,42 @@ impl Db {
     }
 
     /// Whether a device can receive envelopes (it has a prekey).
+    /// The account a device on this server belongs to; `None` for a device it does not know.
+    pub fn device_owner(&self, device: &str) -> Result<Option<String>, StoreError> {
+        self.conn()?
+            .query_row(
+                "SELECT account FROM prekeys WHERE device = ?1",
+                params![device],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(store_err)
+    }
+
+    /// Remember until `until` that an account wrote to another (the pair as a keyed hash, see [`Share`]).
+    pub fn note_write(&self, pair: &[u8], until: i64) -> Result<(), StoreError> {
+        self.conn()?
+            .execute(
+                "INSERT INTO writes (pair, until) VALUES (?1, ?2) ON CONFLICT(pair) DO UPDATE SET until = MAX(until, excluded.until)",
+                params![pair, until],
+            )
+            .map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Whether an account wrote to another (the pair as a keyed hash) and that has not expired at `now`.
+    pub fn wrote(&self, pair: &[u8], now: i64) -> Result<bool, StoreError> {
+        let n: i64 = self
+            .conn()?
+            .query_row(
+                "SELECT COUNT(*) FROM writes WHERE pair = ?1 AND until >= ?2",
+                params![pair, now],
+                |r| r.get(0),
+            )
+            .map_err(store_err)?;
+        Ok(n > 0)
+    }
+
     pub fn device_known(&self, device: &str) -> Result<bool, StoreError> {
         let n: i64 = self
             .conn()?
@@ -427,6 +480,9 @@ impl Db {
 
     /// Queue an envelope; `None` if the device's queue is full. `origin` is the server it came from when that is not
     /// this one (federation).
+    ///
+    /// With `share`, the envelope also counts against its sender's share of the device's mailbox: `None` too when the
+    /// sender already has `share.max` envelopes queued there.
     pub fn enqueue(
         &self,
         device: &str,
@@ -434,6 +490,7 @@ impl Db {
         expires: i64,
         max_queue: i64,
         origin: Option<&str>,
+        share: Option<&Share>,
     ) -> Result<Option<i64>, StoreError> {
         let mut c = self.conn()?;
         let tx = c.transaction().map_err(store_err)?;
@@ -447,9 +504,21 @@ impl Db {
         if n >= max_queue {
             return Ok(None);
         }
+        if let Some(sh) = share {
+            let mine: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM mailbox WHERE device = ?1 AND sender = ?2",
+                    params![device, &sh.sender[..]],
+                    |r| r.get(0),
+                )
+                .map_err(store_err)?;
+            if mine >= sh.max {
+                return Ok(None);
+            }
+        }
         tx.execute(
-            "INSERT INTO mailbox (device, env, expires, origin) VALUES (?1, ?2, ?3, ?4)",
-            params![device, env, expires, origin],
+            "INSERT INTO mailbox (device, env, expires, origin, sender) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![device, env, expires, origin, share.map(|sh| &sh.sender[..])],
         )
         .map_err(store_err)?;
         let id = tx.last_insert_rowid();
@@ -515,6 +584,8 @@ impl Db {
             .map_err(store_err)?;
         let m = c
             .execute("DELETE FROM relay_queue WHERE expires < ?1", params![now])
+            .map_err(store_err)?;
+        c.execute("DELETE FROM writes WHERE until < ?1", params![now])
             .map_err(store_err)?;
         Ok(n + m)
     }
@@ -891,6 +962,14 @@ impl IdentityStore for Identities {
 
 // ── file queue budgets ──────────────────────────────────────────────────────────────────────────────────────────
 
+/// A sender's share of one device's mailbox: who it is, as a keyed hash (of its account, or of its server for
+/// envelopes from another server), and how many of its envelopes may wait there at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Share {
+    pub sender: [u8; 16],
+    pub max: i64,
+}
+
 /// Byte limits of the file queue.
 #[derive(Debug, Clone, Copy)]
 pub struct QueueLimits {
@@ -1175,8 +1254,10 @@ mod tests {
     #[test]
     fn queued_hides_expired_envelopes() {
         let db = db();
-        db.enqueue("b1", "old", 100, 10, None).expect("enqueue");
-        db.enqueue("b1", "new", 200, 10, None).expect("enqueue");
+        db.enqueue("b1", "old", 100, 10, None, None)
+            .expect("enqueue");
+        db.enqueue("b1", "new", 200, 10, None, None)
+            .expect("enqueue");
         // Before the purge sweep runs, the expired envelope is still stored but not handed out.
         let queued = db.queued("b1", 0, 10, 150).expect("queued");
         assert_eq!(

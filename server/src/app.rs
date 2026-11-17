@@ -402,6 +402,12 @@ impl Limiter {
         })
     }
 
+    /// A keyed hash of `key` that stays the same across restarts (the secret is kept in the database): for what
+    /// the server must recognise again without keeping it in the clear, such as who sent a queued envelope.
+    pub fn tag(&self, key: &str) -> [u8; 16] {
+        self.hash(&format!("tag:{key}"))
+    }
+
     fn hash(&self, key: &str) -> [u8; 16] {
         let h = rootcard::crypto::hkdf(key.as_bytes(), &self.secret, b"murmo rate limit v1");
         let mut out = [0u8; 16];

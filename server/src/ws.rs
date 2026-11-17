@@ -23,6 +23,72 @@ pub const MAX_ENVELOPE: usize = 96 * 1024;
 pub const MAX_RECIPIENTS: usize = 24;
 /// Most queued envelopes per device.
 pub const MAX_QUEUE: i64 = 2000;
+/// Most envelopes one account of this server may have waiting in a device of another account that wrote to it
+/// within [`WRITES_TTL`] (a contact), and in one of an account that did not (anybody else, such as a message request).
+/// The account's own devices have no share but the whole mailbox.
+pub const SHARE_CONTACT: i64 = 500;
+pub const SHARE_STRANGER: i64 = 50;
+/// The same for all accounts of another server together (federation), which this server cannot tell apart: contact
+/// when the device's account wrote to someone on that server.
+pub const SHARE_SERVER: i64 = 1000;
+pub const SHARE_SERVER_STRANGER: i64 = 200;
+/// How long it counts that an account wrote to another (seconds, 90 days).
+pub const WRITES_TTL: i64 = 90 * 24 * 3600;
+
+/// The share of `device`'s mailbox for envelopes from `sender`: an account of this server (`account:<id>`) or another
+/// server (`server:<origin>`). `None` for the device's own account, which may use the whole mailbox. Whether the
+/// sender is a contact is whether the device's account wrote to it (see [`note_writes`]).
+pub fn share_for(
+    app: &App,
+    owner: &str,
+    sender: Sender<'_>,
+    now: i64,
+) -> Result<Option<crate::db::Share>, ApiError> {
+    let (key, wrote_to, contact, stranger) = match sender {
+        Sender::Account(a) if a == owner => return Ok(None),
+        Sender::Account(a) => (
+            format!("account:{a}"),
+            a.to_string(),
+            SHARE_CONTACT,
+            SHARE_STRANGER,
+        ),
+        Sender::Server(o) => (
+            format!("server:{o}"),
+            format!("@{o}"),
+            SHARE_SERVER,
+            SHARE_SERVER_STRANGER,
+        ),
+    };
+    let pair = app.limits.tag(&format!("writes:{owner}>{wrote_to}"));
+    let known = app.db.wrote(&pair, now).map_err(ApiError::internal)?;
+    Ok(Some(crate::db::Share {
+        sender: app.limits.tag(&key),
+        max: if known { contact } else { stranger },
+    }))
+}
+
+/// Who sent an envelope, for its share of a mailbox.
+#[derive(Clone, Copy)]
+pub enum Sender<'a> {
+    /// An account of this server.
+    Account(&'a str),
+    /// Another server (federation), by its origin.
+    Server(&'a str),
+}
+
+/// Remember that `account` wrote to each of `to` (accounts of this server, or `@<origin>` for another server): from
+/// then on they count it as a contact for [`WRITES_TTL`]. Kept as keyed hashes only.
+fn note_writes<'a>(app: &App, account: &str, to: impl IntoIterator<Item = &'a str>, now: i64) {
+    let mut seen: Vec<&str> = Vec::new();
+    for t in to {
+        if seen.contains(&t) || t == account {
+            continue;
+        }
+        seen.push(t);
+        let pair = app.limits.tag(&format!("writes:{account}>{t}"));
+        let _ = app.db.note_write(&pair, now + WRITES_TTL);
+    }
+}
 /// Mailbox lifetime in seconds (14 days).
 pub const MAILBOX_TTL: i64 = 14 * 24 * 3600;
 /// Largest relay payload (base64url text): one file chunk.
@@ -500,6 +566,7 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
     }
     let mut failed: Vec<Value> = Vec::new();
     let mut remote: HashMap<String, Vec<Outgoing>> = HashMap::new();
+    let mut wrote: Vec<String> = Vec::new();
     for (o, device, env, ttl) in targets {
         let expires = now + ttl.clamp(1, MAILBOX_TTL);
         // A device on another Murmo server (federation): handed to that server below.
@@ -510,6 +577,7 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
                 failed.push(device.into());
             } else {
                 app.fed.learn(&me.account, device, server);
+                wrote.push(format!("@{server}"));
                 remote
                     .entry(server.to_string())
                     .or_default()
@@ -522,13 +590,15 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
             }
             continue;
         }
-        if !app.db.device_known(device).map_err(ApiError::internal)? {
+        let Some(owner) = app.db.device_owner(device).map_err(ApiError::internal)? else {
             failed.push(device.into());
             continue;
-        }
+        };
+        let share = share_for(app, &owner, Sender::Account(&me.account), now)?;
+        wrote.push(owner);
         match app
             .db
-            .enqueue(device, env, expires, MAX_QUEUE, None)
+            .enqueue(device, env, expires, MAX_QUEUE, None, share.as_ref())
             .map_err(ApiError::internal)?
         {
             Some(mid) => {
@@ -542,6 +612,7 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
             None => failed.push(device.into()),
         }
     }
+    note_writes(app, &me.account, wrote.iter().map(String::as_str), now);
     if remote.is_empty() {
         return Ok(Some(frame(
             Map::new()
@@ -1825,6 +1896,121 @@ mod tests {
             .put_prekey("B", "b1", &Value::from("p"))
             .expect("prekey");
         (app, me("A", "a1"))
+    }
+
+    /// One frame from `me` with `n` envelopes for `device`; how many of them were refused.
+    fn send_many(app: &Arc<App>, me: &Authed, device: &str, n: usize) -> usize {
+        let item: Value = Map::new().with("device", device).with("env", "e").into();
+        let f = Map::new()
+            .with("t", "send")
+            .with("id", "s")
+            .with("to", Value::Array(vec![item; n]));
+        let r = object(handle(app, me, &f));
+        assert_eq!(r.get("t").and_then(Value::as_str), Some("sent"), "{r:?}");
+        r.get("failed")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    }
+
+    fn fill(app: &Arc<App>, me: &Authed, device: &str, mut n: usize) -> usize {
+        let mut refused = 0;
+        while n > 0 {
+            let k = n.min(MAX_RECIPIENTS);
+            refused += send_many(app, me, device, k);
+            n -= k;
+        }
+        refused
+    }
+
+    fn known(app: &Arc<App>, account: &str, device: &str) {
+        app.db
+            .put_prekey(account, device, &Value::from("p"))
+            .expect("prekey");
+    }
+
+    #[test]
+    fn a_stranger_gets_a_small_share_of_a_mailbox() {
+        let app = app();
+        known(&app, "A", "a1");
+        known(&app, "B", "b1");
+        let share = usize::try_from(SHARE_STRANGER).unwrap_or_default();
+        // A has never been written to by B: only its small share of b1's mailbox, the rest is refused per device.
+        assert_eq!(fill(&app, &me("A", "a1"), "b1", share), 0);
+        assert_eq!(fill(&app, &me("A", "a2"), "b1", 3), 3);
+        // Another sender has its own share.
+        assert_eq!(fill(&app, &me("C", "c1"), "b1", 3), 0);
+    }
+
+    #[test]
+    fn a_contact_gets_a_larger_share_and_own_devices_the_whole_mailbox() {
+        let app = app();
+        known(&app, "A", "a1");
+        known(&app, "A", "a2");
+        known(&app, "B", "b1");
+        // B wrote to A (accepted its request, say): from then on A is a contact of B's devices.
+        assert_eq!(send_many(&app, &me("B", "b1"), "a1", 1), 0);
+        let stranger = usize::try_from(SHARE_STRANGER).unwrap_or_default();
+        let contact = usize::try_from(SHARE_CONTACT).unwrap_or_default();
+        assert_eq!(fill(&app, &me("A", "a1"), "b1", stranger + 10), 0);
+        assert_eq!(fill(&app, &me("A", "a1"), "b1", contact - stranger - 10), 0);
+        assert_eq!(
+            fill(&app, &me("A", "a2"), "b1", 1),
+            1,
+            "the contact share is used up"
+        );
+        // A's own other device takes more than any share.
+        assert_eq!(fill(&app, &me("A", "a1"), "a2", contact + 10), 0);
+    }
+
+    #[test]
+    fn another_server_shares_one_part_of_a_mailbox() {
+        let app = app();
+        known(&app, "B", "b1");
+        let t = now();
+        let share = share_for(&app, "B", Sender::Server("https://x.example"), t)
+            .expect("share")
+            .expect("not own");
+        assert_eq!(share.max, SHARE_SERVER_STRANGER);
+        // Once B wrote to someone there, the server counts as a contact.
+        note_writes(&app, "B", ["@https://x.example"], t);
+        let contact = share_for(&app, "B", Sender::Server("https://x.example"), t)
+            .expect("share")
+            .expect("not own");
+        assert_eq!(contact.max, SHARE_SERVER);
+        assert_eq!(contact.sender, share.sender);
+        // Another server is still a stranger; the account's own name is no server's.
+        let other = share_for(&app, "B", Sender::Server("https://y.example"), t)
+            .expect("share")
+            .expect("not own");
+        assert_eq!(other.max, SHARE_SERVER_STRANGER);
+        assert_ne!(other.sender, share.sender);
+        assert!(
+            share_for(&app, "B", Sender::Account("B"), t)
+                .expect("share")
+                .is_none()
+        );
+        // What one server queued counts against its share only.
+        for i in 0..SHARE_SERVER_STRANGER {
+            assert!(
+                app.db
+                    .enqueue("b1", "e", t + 60, MAX_QUEUE, None, Some(&other))
+                    .expect("enqueue")
+                    .is_some(),
+                "envelope {i}"
+            );
+        }
+        assert!(
+            app.db
+                .enqueue("b1", "e", t + 60, MAX_QUEUE, None, Some(&other))
+                .expect("enqueue")
+                .is_none()
+        );
+        assert!(
+            app.db
+                .enqueue("b1", "e", t + 60, MAX_QUEUE, None, Some(&share))
+                .expect("enqueue")
+                .is_some()
+        );
     }
 
     fn mailbox_len(app: &Arc<App>) -> i64 {
