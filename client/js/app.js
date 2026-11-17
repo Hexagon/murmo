@@ -1675,7 +1675,7 @@ function openConversation(account, form = false) {
   ui.older = null;
   threadFrom = null;
   threadView = { stored: [], start: 0 };
-  ui.scroll.addEventListener("scroll", () => { if (ui.scroll.scrollTop < OLDER_MARGIN) loadOlder(); }, { passive: true });
+  holdThread();
   const head = topbar(
     h("div", { class: "title" }, name, h("span", { class: "tag", text: tag }), homeLabel(c.home) ? h("span", { class: "home", text: ` · ${homeLabel(c.home)}` }) : null, c.retention ? h("span", { class: "home", title: tr("conv.retentionTitle"), text: tr("conv.retention", { time: retentionLabel(c.retention) }) }) : null),
     c.state === "accepted" ? h("button", { class: "btn ghost small", onclick: () => showSafety(c) }, icon("shield"), h("span", { class: "wide", text: tr("conv.safety") })) : null,
@@ -2348,7 +2348,9 @@ async function gifSearch(box, config, { alive, track }) {
 
 // ── the thread: the newest messages first, older ones as the user scrolls up ─────────────────────────────────────
 
-/** How many messages are drawn when a conversation opens, and how many more each time the user nears the top. */
+/** How many messages are drawn when a conversation opens (few: the newest come at once, older ones as asked for). */
+const FIRST_PAGE = 20;
+/** How many more are drawn each time the user nears the top. */
 const PAGE = 50;
 /** How close to the top (px) the user scrolls before the next older page is drawn. */
 const OLDER_MARGIN = 600;
@@ -2360,11 +2362,68 @@ function byOrder(a, b) {
 
 /**
  * The open conversation's drawing window: `from` is the oldest message drawn (its time, at and id), or null for the
- * last PAGE; `start` is its place in `stored`, the messages read at the last render.
+ * last FIRST_PAGE; `start` is its place in `stored`, the messages read at the last render.
  */
 let threadFrom = null;
 let threadView = { stored: [], start: 0 };
 let loadingOlder = false;
+
+/**
+ * Whether the open thread is held at its bottom (the newest message in view), and otherwise the message the user is
+ * reading (`scrollAnchor`): when the thread grows or shrinks — a picture's size read, a picture loaded, the window
+ * resized — it stays at the bottom, or the message stays where it was. Without this a conversation opened at the
+ * bottom was left a bit above it once the pictures above had come.
+ */
+let pinned = true;
+let pinnedTop = 0;
+let readAnchor = null;
+let anchorFrame = 0;
+let threadSizes = null;
+
+function holdThread() {
+  const scroll = ui.scroll;
+  const thread = ui.thread;
+  pinned = true;
+  pinnedTop = 0;
+  readAnchor = null;
+  scroll.addEventListener("scroll", () => {
+    if (scroll !== ui.scroll) return;
+    // Let go of the bottom only when the thread was moved up: a scroll event can come after the thread has grown
+    // (a picture's size read since), and is then further from the bottom without the user having moved.
+    const up = scroll.scrollTop < pinnedTop - 1;
+    if (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80) pinned = true;
+    else if (up) pinned = false;
+    pinnedTop = scroll.scrollTop;
+    if (!anchorFrame) {
+      anchorFrame = requestAnimationFrame(() => {
+        anchorFrame = 0;
+        if (scroll === ui.scroll && ui.thread) readAnchor = pinned ? null : scrollAnchor();
+      });
+    }
+    // Older messages as the user scrolls up toward them (not when the app keeps the thread at its bottom).
+    if (up && scroll.scrollTop < OLDER_MARGIN) loadOlder();
+  }, { passive: true });
+  threadSizes?.disconnect();
+  threadSizes = null;
+  if (typeof ResizeObserver === "undefined") return;
+  threadSizes = new ResizeObserver(() => {
+    if (scroll !== ui.scroll) return threadSizes?.disconnect();
+    if (pinned) pinnedTop = scroll.scrollTop = scroll.scrollHeight;
+    else if (readAnchor?.n.isConnected) {
+      const moved = readAnchor.n.getBoundingClientRect().top - readAnchor.y;
+      if (Math.abs(moved) >= 1) scroll.scrollTop += moved;
+    }
+  });
+  threadSizes.observe(thread);
+  threadSizes.observe(scroll);
+}
+
+/** The thread was scrolled by the app: whether it is now at the bottom, and what is read. */
+function heldAt() {
+  pinned = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 80;
+  pinnedTop = ui.scroll.scrollTop;
+  readAnchor = pinned ? null : scrollAnchor();
+}
 
 /** The first message of the thread that is on the screen, and where: to keep it in place when older ones come above. */
 function scrollAnchor() {
@@ -2386,7 +2445,9 @@ async function loadOlder() {
   try {
     const from = Math.max(0, start - PAGE);
     const pics = stored.slice(from, start).map((m) => m.file).filter((f) => f?.have && p.inlineImage(f.mime, f.size) && !imgSizes.has(f.f));
-    await Promise.all(pics.map((f) => messenger.imageSize(f.f).then((s) => { if (p.imageFits(s)) imgSizes.set(f.f, { width: s.width, height: s.height }); }, () => {})));
+    // Behind the pictures on the screen (the queue), but the newest of them first.
+    const time = new Map(stored.slice(from, start).filter((m) => m.file).map((m) => [m.file.f, m.time]));
+    await Promise.all(pics.map((f) => picJob("size", time.get(f.f), () => messenger.imageSize(f.f), null, true).then((s) => { if (p.imageFits(s)) imgSizes.set(f.f, { width: s.width, height: s.height }); }, () => {})));
     if (conv !== current) return;
     const m = stored[from];
     threadFrom = { time: m.time, at: m.at, id: m.id };
@@ -2405,12 +2466,12 @@ async function renderThread() {
   const conv = current;
   const stored = await messenger.messages(conv);
   if (seq !== renderSeq || conv !== current) return;
-  const nearBottom = ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 80;
+  const nearBottom = pinned || ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < 80;
   // Only the newest messages are drawn at first; the window reaches back to `threadFrom` once the user has scrolled
-  // up. At the bottom again, a window grown long goes back to the last PAGE (a smaller page to keep up to date).
+  // up. At the bottom again, a window grown long goes back to the last FIRST_PAGE (a smaller page to keep up to date).
   // (Only when well more than a screen: a page that does not fill one would be asked for again at once.)
   if (nearBottom && seq > 1 && !jumpTo && threadFrom && stored.length - threadView.start > 2 * PAGE && ui.scroll.scrollHeight > 3 * ui.scroll.clientHeight) threadFrom = null;
-  let start = Math.max(0, stored.length - PAGE);
+  let start = Math.max(0, stored.length - FIRST_PAGE);
   if (threadFrom) {
     const i = stored.findIndex((m) => byOrder(m, threadFrom) >= 0);
     if (i >= 0) start = Math.min(start, i);
@@ -2478,10 +2539,11 @@ async function renderThread() {
       setTimeout(() => node.classList.remove("found"), 2500);
     }
   }
+  heldAt();
   watchUnseen();
   tickFuses();
   // Too few messages to fill the screen, so no scrolling up to ask for more: the next page now.
-  if (start > 0 && seq === renderSeq && !loadingOlder && ui.scroll.scrollTop < OLDER_MARGIN) loadOlder();
+  if (start > 0 && seq === renderSeq && !loadingOlder && ui.scroll.scrollHeight <= ui.scroll.clientHeight + 1) loadOlder();
 }
 
 // ── disappearing messages: when they are seen, and their countdown ──────────────────────────────────────────────
@@ -2957,24 +3019,33 @@ function nearScreen(el) {
 }
 
 /**
- * Reading the thread's pictures from storage, a few at a time and the newest first: the bottom of the thread, where
- * a conversation opens, comes before the pictures above it. `job.fill` (putting a picture together once it nears the
- * screen) goes before `job.size` (reading a header), so a picture on the screen is not kept waiting behind the
- * headers of older ones. Jobs of a conversation that was left are dropped (their promise never settles).
+ * Reading the thread's pictures from storage, a few at a time, in this order: the pictures on the screen (their header,
+ * then the picture), then those near it, then the headers of the others; the newest first within each. Where a picture
+ * is is looked at when its turn comes, not when it was asked for: a picture scrolled to goes ahead of those scrolled
+ * past. Jobs of a conversation that was left are dropped: their promise never settles, or settles with undefined
+ * (`settle`) for a caller that waits on it.
  */
 const picJobs = [];
 let picRunning = 0;
 const PIC_PARALLEL = 2;
 
-function picJob(kind, time, fn) {
+function picJob(kind, time, fn, el = null, settle = false) {
   const conv = current;
   return new Promise((resolve, reject) => {
-    picJobs.push({ rank: kind === "fill" ? 1 : 0, time, conv, run: () => fn().then(resolve, reject) });
+    picJobs.push({ fill: kind === "fill", time: time ?? 0, el, conv, drop: settle ? () => resolve(undefined) : null, run: () => fn().then(resolve, reject) });
     queueMicrotask(pumpPictures); // after the whole thread is drawn, so the order is decided over all its pictures
   });
 }
 
 function pumpPictures() {
+  if (picRunning >= PIC_PARALLEL || !picJobs.length) return;
+  const view = ui.scroll?.isConnected ? ui.scroll.getBoundingClientRect() : null;
+  const rank = (job) => {
+    const r = view && job.el?.isConnected ? job.el.getBoundingClientRect() : null;
+    const seen = r && r.bottom > view.top && r.top < view.bottom && r.height > 0;
+    return seen ? (job.fill ? 3 : 2) : job.fill ? 1 : 0;
+  };
+  for (const job of picJobs) job.rank = rank(job);
   while (picRunning < PIC_PARALLEL && picJobs.length) {
     let best = 0;
     for (let i = 1; i < picJobs.length; i++) {
@@ -2983,7 +3054,10 @@ function pumpPictures() {
       if (a.rank > b.rank || (a.rank === b.rank && a.time > b.time)) best = i;
     }
     const [job] = picJobs.splice(best, 1);
-    if (job.conv !== current) continue;
+    if (job.conv !== current) {
+      job.drop?.();
+      continue;
+    }
     picRunning++;
     job.run().finally(() => {
       picRunning--;
@@ -3009,10 +3083,8 @@ function fileView(m) {
     imgNodes.set(f.f, img);
     const conv = current;
     const show = (url) => {
-      img.addEventListener("load", () => {
-        img.classList.add("loaded");
-        if (ui.scroll && ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < img.height + 160) ui.scroll.scrollTop = ui.scroll.scrollHeight;
-      }, { once: true });
+      // (The thread stays at its bottom, or on what is read, by itself: holdThread.)
+      img.addEventListener("load", () => img.classList.add("loaded"), { once: true });
       img.alt = f.name;
       img.src = url;
       const gif = f.mime === "image/gif" && m.kind === "file" ? () => messenger.fileBlob(f.f, "image/gif") : null;
@@ -3028,7 +3100,9 @@ function fileView(m) {
       show(kept.url);
       return img;
     }
-    picJob("size", m.time, () => messenger.imageSize(f.f)).then(async (size) => {
+    // A size already read (and checked) this session is not read again.
+    const sized = known ? Promise.resolve(known) : picJob("size", m.time, () => messenger.imageSize(f.f), img);
+    sized.then(async (size) => {
       if (!p.imageFits(size)) {
         const why = size ? tr("msg.tooBig", { w: i18n.num(size.width), h: i18n.num(size.height) }) : tr("msg.cannotShow");
         const card = fileCard(m, why);
@@ -3040,7 +3114,7 @@ function fileView(m) {
       placeImage(img, size);
       // Put together from its stored parts only when it nears the screen: a long thread does not read all its pictures.
       await nearScreen(img);
-      const b = await picJob("fill", m.time, () => messenger.fileBlob(f.f, f.mime));
+      const b = await picJob("fill", m.time, () => messenger.fileBlob(f.f, f.mime), img);
       if (!b) throw new Error("no_file");
       let url = objectUrls.get(f.f);
       if (!url) {

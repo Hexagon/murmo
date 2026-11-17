@@ -475,6 +475,37 @@ try {
   }
   if (!(await b.evaluate(() => [...document.querySelectorAll(".msg")].some((m) => m.textContent.includes("Andra raden."))))) throw new Error("the oldest messages never came");
   await b.screenshot({ path: `${shots}/b-7d-older.png` });
+  // Pictures not seen before: a conversation opened at its bottom stays there while they come (their sizes are read
+  // after the thread is drawn), and the newest pictures are loaded first.
+  await b.$eval(".main .files-open", (x) => x.click()); // the thread is left while they come
+  await b.waitForFunction(() => !document.querySelector(".thread"), { timeout: 5000 });
+  for (let i = 0; i < 5; i++) {
+    const pic = await a.screenshot({ type: "png", clip: { x: 0, y: 0, width: 200 + 40 * i, height: 300 + 20 * i } });
+    fs.writeFileSync(`${shots}/tall-${i}.png`, pic);
+    const [chooser] = await Promise.all([a.waitForFileChooser(), a.click(".composer .icon-btn")]);
+    await chooser.accept([`${shots}/tall-${i}.png`]);
+    await a.waitForFunction((n) => [...document.querySelectorAll(".uploads .upload")].some((e) => e.textContent.includes(n)), { timeout: 20000 }, `tall-${i}.png`);
+  }
+  await a.waitForFunction(() => [...document.querySelectorAll(".msg.out img.inline.loaded")].filter((x) => x.alt.startsWith("tall-")).length === 5 && !document.querySelector(".uploads .upload:not(.ok)"), { timeout: 60000 });
+  await sleep(1500); // stored on Bob's side
+  await b.evaluate(() => {
+    window.__loadOrder = [];
+    new MutationObserver(() => {
+      const all = [...document.querySelectorAll(".thread img.inline")];
+      for (const img of all) if (img.classList.contains("loaded") && !window.__loadOrder.includes(img.alt)) window.__loadOrder.push(img.alt);
+    }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ["class"] });
+  });
+  await b.$eval(".side-list .conv", (x) => x.click());
+  // (Those far above the screen are not loaded until scrolled to.)
+  await b.waitForFunction(() => document.querySelectorAll(".thread img.inline.loaded").length >= 3, { timeout: 30000 });
+  await sleep(500);
+  const pics = await b.evaluate(() => {
+    const s = document.querySelector(".main .scroll");
+    return { order: window.__loadOrder, left: s.scrollHeight - s.scrollTop - s.clientHeight };
+  });
+  // (Two are read at a time: the newest two may finish in either order.)
+  if (pics.order.slice(0, 2).sort().join() !== "tall-3.png,tall-4.png") throw new Error(`the newest picture was not loaded first: ${pics.order.join(", ")}`);
+  if (!(pics.left < 2)) throw new Error(`the thread was left ${pics.left}px above its bottom once its pictures came`);
   // A lost connection: after a moment a banner says so above everything, and a text held for "Ångra" carries a
   // pending mark instead of looking sent. Taken back here, so nothing is sent; the banner goes when it is back.
   // (Chrome logs the failed reconnects while offline; those are not counted as problems.)

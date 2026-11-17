@@ -583,10 +583,13 @@ conversation: images up to 25 MiB, videos up to 100 MiB (`MAX_INLINE`). Larger f
 where the browser has `showSaveFilePicker` they are written to the chosen file part by part; elsewhere they are
 handed to the browser as a `Blob` (Chromium keeps large ones on disk, other browsers may hold them in memory).
 
-**Showing a long conversation.** A conversation opens with its newest 50 messages; the next 50 older ones are drawn
-when the user scrolls near the top (or taps *Show older messages*), with what is on the screen kept in place, and a
-search hit further back widens the window to it. A picture is put together from its parts only when it comes near
-the screen; its size is read from the header first, so it has its place before it loads. The records of a
+**Showing a long conversation.** A conversation opens with its newest 20 messages; the next 50 older ones are drawn
+when the user scrolls up near the top (or taps *Show older messages*, or the messages do not fill the screen), with
+what is on the screen kept in place, and a search hit further back widens the window to it. A picture is put together
+from its parts only when it comes near the screen; its size is read from the header first, so it has its place before
+it loads. Pictures are read two at a time: those on the screen first, then those near it, then the headers of the
+others, the newest first within each; where a picture is is looked at when its turn comes. A thread at its bottom stays
+there while pictures above it take their size, and one scrolled up keeps the message being read in place. The records of a
 conversation are still all read and decrypted (the order is inside the encryption, so IndexedDB cannot give the newest
 first without storing times in the clear), but side by side, and a record whose ciphertext is unchanged is not
 decrypted again while the store is open.
