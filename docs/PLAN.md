@@ -91,7 +91,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [ ] **Partial sends.** A bad envelope or rate limit for recipient N fails the whole frame after 1..N-1 were queued
       (`ws.rs:434-494`, `federation.rs:492-497`); a resend duplicates. Validate all first or report per device; record
       the outgoing message as pending before sending
-- [ ] **Block list is exact-string.** `MURMO_FEDERATION_BLOCK` compares origins verbatim (`federation.rs:214`) and
+- [x] **Block list is exact-string.** `MURMO_FEDERATION_BLOCK` compares origins verbatim (`federation.rs:214`) and
       `:443`, other ports and subdomains are distinct origins (each with its own `PER_SERVER` budget). Normalise origins
       and block by host and subdomains
 - [ ] **Remote relays claim any account.** `sender.account` in `/federation/relay` is trusted (`federation.rs:836-931`)

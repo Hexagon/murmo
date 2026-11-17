@@ -1263,7 +1263,11 @@ disappearing messages and history between own devices (which are always on one s
 
 `MURMO_FEDERATION` is `open` (the default: any https origin with a public host name, never an IP literal in any
 spelling, `localhost` or a local name such as `.local`/`.internal`, and connected to only at public addresses, checked
-when it is resolved as for `*` homes in §3.1), `off`, or a list of origins (reached as configured); `MURMO_FEDERATION_BLOCK` lists origins never to talk to. The
+when it is resolved as for `*` homes in §3.1), `off`, or a list of origins (reached as configured);
+`MURMO_FEDERATION_BLOCK` lists servers never to talk to, as origins or host names: an entry blocks its host on any
+scheme and port and all its subdomains (`evil.example` also blocks `https://evil.example:8443` and
+`https://a.evil.example`); only an entry with an explicit non-default port blocks just that port. Budgets for other
+servers are kept per host, so that other ports of one host share them. The
 policy decides both what the server fetches for its clients and what it accepts. A server with `off` publishes no
 federation key, and other servers then refuse it as `federation_refused` rather than reporting an unknown account.
 

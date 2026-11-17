@@ -269,9 +269,74 @@ fn public_origin(o: &str) -> bool {
     plain_origin(o) && egress::public_host(name)
 }
 
+/// The host name and port of an origin: no scheme, lower case, without a trailing dot; the port only when it is not the
+/// scheme's default (443 for https, 80 for http).
+fn host_port(origin: &str) -> (String, Option<u16>) {
+    let (scheme, rest) = origin.split_once("://").unwrap_or(("https", origin));
+    let rest = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+    let (host, port) = if let Some(v6) = rest.strip_prefix('[') {
+        // An IPv6 literal keeps its brackets.
+        let (h, after) = v6.split_once(']').unwrap_or((v6, ""));
+        (format!("[{h}]"), after.strip_prefix(':'))
+    } else {
+        match rest.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), Some(p)),
+            None => (rest.to_string(), None),
+        }
+    };
+    let default = if scheme.eq_ignore_ascii_case("http") {
+        80
+    } else {
+        443
+    };
+    let port = port
+        .and_then(|p| p.parse::<u16>().ok())
+        .filter(|p| *p != default);
+    (host.trim_end_matches('.').to_ascii_lowercase(), port)
+}
+
+/// The host name of an origin, without scheme and port.
+pub fn host_of(origin: &str) -> String {
+    host_port(origin).0
+}
+
+/// An entry of `MURMO_FEDERATION_BLOCK` (an origin or a bare host name) as what it blocks: `host`, which blocks the
+/// host on any scheme and port and all its subdomains, or `host:port` when it names a port other than the default,
+/// which blocks only that port of that host (several servers on one address, as in tests).
+pub fn block_entry(s: &str) -> Option<String> {
+    let (host, port) = host_port(s.trim());
+    match port {
+        _ if host.is_empty() => None,
+        Some(p) => Some(format!("{host}:{p}")),
+        None => Some(host),
+    }
+}
+
+/// Whether `origin` is blocked: its host is on the block list or is a subdomain of a host on it, whatever the scheme
+/// and port (`evil.example` blocks `https://evil.example:8443` and `https://a.evil.example`), or the list names this
+/// very host and port.
+pub fn blocked(block: &[String], origin: &str) -> bool {
+    let (host, port) = host_port(origin);
+    let with_port = port.map(|p| format!("{host}:{p}"));
+    block.iter().any(|b| {
+        host == *b
+            || with_port.as_deref() == Some(b.as_str())
+            || host
+                .strip_suffix(b.as_str())
+                .is_some_and(|sub| sub.ends_with('.'))
+    })
+}
+
+/// The key under which the budgets for another server are counted: its host, so that other ports of one host share
+/// them.
+fn budget_key(origin: &str) -> String {
+    host_of(origin)
+}
+
 /// Whether this server exchanges envelopes with `origin`.
 pub fn allowed(app: &App, origin: &str) -> bool {
-    if app.is_origin(origin) || app.cfg.federation_block.iter().any(|b| b == origin) {
+    if app.is_origin(origin) || blocked(&app.cfg.federation_block, origin) {
         return false;
     }
     match &app.cfg.federation {
@@ -578,7 +643,7 @@ pub async fn post_deliver(
             return Err(bad());
         }
         app.limits
-            .check(format!("federation:{from}"), PER_SERVER, 60)?;
+            .check(format!("federation:{}", budget_key(from)), PER_SERVER, 60)?;
         let t = now();
         let mut failed: Vec<Value> = Vec::new();
         for item in msgs {
@@ -981,11 +1046,12 @@ pub async fn post_relay(
             None => ChunkData::Text(raw),
         };
         let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+        let peer = budget_key(&from);
         app.limits
-            .check(format!("federation-relay:{from}"), RELAY_PER_SERVER, 60)?;
+            .check(format!("federation-relay:{peer}"), RELAY_PER_SERVER, 60)?;
         app.limits.charge(
             &[(
-                format!("federation-relay-bytes:{from}"),
+                format!("federation-relay-bytes:{peer}"),
                 len.saturating_mul(u32::try_from(devices.len()).unwrap_or(1)),
                 RELAY_BYTES_PER_SERVER,
             )],
@@ -1069,8 +1135,11 @@ pub async fn post_presence(
     let run = async {
         app.limits.by_addr("federation", addr, 1200, 60)?;
         let (from, r) = verify(&app, addr, &body, "presence", crate::api::MAX_BODY).await?;
-        app.limits
-            .check(format!("federation-presence:{from}"), 6000, 60)?;
+        app.limits.check(
+            format!("federation-presence:{}", budget_key(&from)),
+            6000,
+            60,
+        )?;
         let online: Vec<Value> = device_list(&r, MAX_PRESENCE)?
             .into_iter()
             .filter(|d| app.hub.is_connected(d))
@@ -1095,7 +1164,7 @@ pub async fn post_space(
         app.limits.by_addr("federation", addr, 1200, 60)?;
         let (from, r) = verify(&app, addr, &body, "space", crate::api::MAX_BODY).await?;
         app.limits
-            .check(format!("federation-space:{from}"), 6000, 60)?;
+            .check(format!("federation-space:{}", budget_key(&from)), 6000, 60)?;
         let bad = || ApiError::new(400, "bad_field");
         let account = r.get("account").and_then(Value::as_str).ok_or_else(bad)?;
         check_account(account)?;
@@ -1155,6 +1224,61 @@ mod tests {
             assert!(!public_origin(o), "{o}");
         }
         assert!(plain_origin("http://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn blocks_go_by_host_and_subdomains() {
+        let block: Vec<String> = [
+            "https://evil.example/",
+            "Bad.Example.",
+            "https://other.example:443",
+            "http://127.0.0.1:8002",
+            "  ",
+        ]
+        .iter()
+        .filter_map(|s| block_entry(s))
+        .collect();
+        assert_eq!(
+            block,
+            vec![
+                "evil.example",
+                "bad.example",
+                "other.example",
+                "127.0.0.1:8002"
+            ]
+        );
+        for o in [
+            "https://evil.example",
+            "https://evil.example:443",
+            "https://evil.example:8443",
+            "http://evil.example",
+            "https://a.evil.example",
+            "https://a.b.evil.example:9000",
+            "https://bad.example",
+            "https://x.bad.example",
+            "https://other.example",
+            "http://127.0.0.1:8002",
+        ] {
+            assert!(blocked(&block, o), "{o} should be blocked");
+        }
+        for o in [
+            "https://notevil.example",
+            "https://evil.example.org",
+            "https://good.example",
+            "https://example",
+            "http://127.0.0.1:8001",
+        ] {
+            assert!(!blocked(&block, o), "{o} should not be blocked");
+        }
+    }
+
+    #[test]
+    fn budgets_are_per_host() {
+        assert_eq!(budget_key("https://a.example"), "a.example");
+        assert_eq!(budget_key("https://a.example:443"), "a.example");
+        assert_eq!(budget_key("https://a.example:8443"), "a.example");
+        assert_eq!(budget_key("http://[::1]:80"), "[::1]");
+        assert_ne!(budget_key("https://b.a.example"), "a.example");
     }
 
     #[test]
