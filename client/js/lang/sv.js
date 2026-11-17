@@ -199,7 +199,7 @@ export default {
   "terms.use.3": "Den som driver servern kan inte läsa dina meddelanden, men kan stänga av en identitet eller enhet på den här servern, ta bort det som sparats för den här, eller sluta utbyta meddelanden med en annan server, vid missbruk, när lagen kräver det eller när det behövs för att skydda tjänsten.",
   "terms.use.4": "Du måste vara gammal nog för att få använda en sådan här tjänst på egen hand där du bor.",
   "terms.privacy": "Personuppgifter",
-  "terms.privacy.1": "Servern behandlar bara det som behövs för att leverera tjänsten: din identifierare och din rootcard-identitet med krypterat valv (om du skapat den här), dina enheters publika nycklar, krypterade meddelanden och filer tills de hämtats (högst 14 dagar), adresser för pushnotiser om du slagit på dem, och nyckelade hashar av nätverksadresser för att begränsa missbruk (högst en timme).",
+  "terms.privacy.1": "Servern behandlar bara det som behövs för att leverera tjänsten: din identifierare och din rootcard-identitet med krypterat valv (om du skapat den här), dina enheters publika nycklar, krypterade meddelanden och filer tills de hämtats (högst 14 dagar), adresser för pushnotiser om du slagit på dem, nyckelade hashar av nätverksadresser för att begränsa missbruk (högst en timme), och nyckelade hashar av vem som skrivit till vem, så att kontakter får en större del av en brevlåda än okända (90 dagar).",
   "terms.privacy.2": "Innehållet i meddelanden och filer är end-to-end-krypterat och kan inte läsas av den som driver servern. Inga åtkomstloggar med IP-adresser skrivs, och tjänsten har ingen reklam, ingen analys och inga spårningscookies. Webbläsarens lagring används bara för appens egen funktion.",
   "terms.privacy.3": "Beroende på var du bor kan du ha rätt att få veta vilka uppgifter om dig som behandlas, få dem rättade eller raderade, invända mot behandlingen och klaga hos en tillsynsmyndighet för dataskydd.",
   "terms.privacy.4": "Uppgifter lämnas till andra bara när tjänsten kräver det: till servern som den du skriver till använder (det krypterade meddelandet och vilka enheter som ska ta emot det), till den rootcard-server där din identitet finns om det inte är den här, till webbläsarens pushtjänst (Google, Mozilla, Apple eller Microsoft) om du slagit på notiser, och till GIPHY om servern har GIF-sökning och du söker. Annars bara när lagen kräver det – och då finns nästan inget läsbart att lämna ut.",
@@ -303,6 +303,8 @@ export default {
   "side.copyHint": "Klicka för att kopiera",
   "side.online": "Ansluten",
   "side.connecting": "Ansluter…",
+  "net.offline": "Ingen anslutning till servern. Ansluter igen…",
+  "net.retry": "Försök nu",
   "side.account": "Konto och inställningar",
   "side.back": "Tillbaka till konversationerna",
 
@@ -473,6 +475,8 @@ export default {
 
   // ── messages ──
   "msg.sending": " · Skickar… {pct}",
+  "msg.sendingText": " · Skickar…",
+  "msg.waitingNet": " · Väntar på anslutningen…",
   "msg.deleteTombstone": "Ta bort platshållaren?",
   "msg.deleteQuestion": "Ta bort meddelandet?",
   "msg.forAllHint": "”Ta bort för alla” byter ut meddelandet mot ”Du tog bort det här meddelandet” på {name}s och dina enheter när de tar emot det. Har {name} redan sett det, sparat det eller använder en äldre version av Murmo kan det finnas kvar – det går inte att ta tillbaka det som redan visats.",
@@ -495,6 +499,10 @@ export default {
   "msg.theyRemoved": "{name} tog bort ett meddelande",
   "msg.notYet": " · Inte skickad än – skickas när mottagaren är ansluten ",
   "msg.tryNow": "Försök nu",
+  "msg.waitingToSend": " · Väntar på anslutning – skickas när den är tillbaka ",
+  "msg.notDelivered": " · Inte levererad ",
+  "msg.sendAgain": "Skicka igen",
+  "msg.stillNotDelivered": "Fortfarande inte levererad till alla enheter.",
   "msg.sentToast": "Skickad.",
   "msg.peerAway": "Mottagaren är inte ansluten just nu.",
   "msg.delivered": "Levererat till mottagaren",

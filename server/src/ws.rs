@@ -23,6 +23,72 @@ pub const MAX_ENVELOPE: usize = 96 * 1024;
 pub const MAX_RECIPIENTS: usize = 24;
 /// Most queued envelopes per device.
 pub const MAX_QUEUE: i64 = 2000;
+/// Most envelopes one account of this server may have waiting in a device of another account that wrote to it
+/// within [`WRITES_TTL`] (a contact), and in one of an account that did not (anybody else, such as a message request).
+/// The account's own devices have no share but the whole mailbox.
+pub const SHARE_CONTACT: i64 = 500;
+pub const SHARE_STRANGER: i64 = 50;
+/// The same for all accounts of another server together (federation), which this server cannot tell apart: contact
+/// when the device's account wrote to someone on that server.
+pub const SHARE_SERVER: i64 = 1000;
+pub const SHARE_SERVER_STRANGER: i64 = 200;
+/// How long it counts that an account wrote to another (seconds, 90 days).
+pub const WRITES_TTL: i64 = 90 * 24 * 3600;
+
+/// The share of `device`'s mailbox for envelopes from `sender`: an account of this server (`account:<id>`) or another
+/// server (`server:<origin>`). `None` for the device's own account, which may use the whole mailbox. Whether the
+/// sender is a contact is whether the device's account wrote to it (see [`note_writes`]).
+pub fn share_for(
+    app: &App,
+    owner: &str,
+    sender: Sender<'_>,
+    now: i64,
+) -> Result<Option<crate::db::Share>, ApiError> {
+    let (key, wrote_to, contact, stranger) = match sender {
+        Sender::Account(a) if a == owner => return Ok(None),
+        Sender::Account(a) => (
+            format!("account:{a}"),
+            a.to_string(),
+            SHARE_CONTACT,
+            SHARE_STRANGER,
+        ),
+        Sender::Server(o) => (
+            format!("server:{o}"),
+            format!("@{o}"),
+            SHARE_SERVER,
+            SHARE_SERVER_STRANGER,
+        ),
+    };
+    let pair = app.limits.tag(&format!("writes:{owner}>{wrote_to}"));
+    let known = app.db.wrote(&pair, now).map_err(ApiError::internal)?;
+    Ok(Some(crate::db::Share {
+        sender: app.limits.tag(&key),
+        max: if known { contact } else { stranger },
+    }))
+}
+
+/// Who sent an envelope, for its share of a mailbox.
+#[derive(Clone, Copy)]
+pub enum Sender<'a> {
+    /// An account of this server.
+    Account(&'a str),
+    /// Another server (federation), by its origin.
+    Server(&'a str),
+}
+
+/// Remember that `account` wrote to each of `to` (accounts of this server, or `@<origin>` for another server): from
+/// then on they count it as a contact for [`WRITES_TTL`]. Kept as keyed hashes only.
+fn note_writes<'a>(app: &App, account: &str, to: impl IntoIterator<Item = &'a str>, now: i64) {
+    let mut seen: Vec<&str> = Vec::new();
+    for t in to {
+        if seen.contains(&t) || t == account {
+            continue;
+        }
+        seen.push(t);
+        let pair = app.limits.tag(&format!("writes:{account}>{t}"));
+        let _ = app.db.note_write(&pair, now + WRITES_TTL);
+    }
+}
 /// Mailbox lifetime in seconds (14 days).
 pub const MAILBOX_TTL: i64 = 14 * 24 * 3600;
 /// Largest relay payload (base64url text): one file chunk.
@@ -60,6 +126,35 @@ pub const BIN_DELIVER: u8 = 0x02;
 pub const MAX_PRESENCE: usize = 32;
 /// Largest frame accepted from a client.
 pub const MAX_FRAME: usize = 3 * 1024 * 1024;
+/// How often the server pings a connected device.
+pub const PING_EVERY: Duration = Duration::from_secs(30);
+/// Pings in a row that may go unanswered before the connection is taken for dead and closed.
+pub const MISSED_PONGS: u32 = 2;
+
+/// Whether the other end of a connection is still there: every ping must be followed by something from it (a pong, or
+/// any other frame) before too many pings have gone by. A half-open socket (a phone that lost its network without
+/// closing) would otherwise stay registered: presence would say it is connected, and pushes and live chunks would go
+/// to it instead of the mailbox and the file queue.
+#[derive(Default)]
+struct Liveness {
+    unanswered: u32,
+}
+
+impl Liveness {
+    /// Something came from the device.
+    fn heard(&mut self) {
+        self.unanswered = 0;
+    }
+
+    /// Time for a ping: false when the last `MISSED_PONGS` went unanswered and the connection should be closed.
+    fn ping(&mut self) -> bool {
+        if self.unanswered >= MISSED_PONGS {
+            return false;
+        }
+        self.unanswered += 1;
+        true
+    }
+}
 
 /// Upgrade to a WebSocket. A browser's `Origin` must be this server's origin.
 pub async fn upgrade(
@@ -252,7 +347,10 @@ async fn session(
             .send(frame(Map::new().with("t", "link").with("request", r.value)))
             .await?;
     }
-    let mut ping = tokio::time::interval(Duration::from_secs(30));
+    let mut ping = tokio::time::interval(PING_EVERY);
+    // The first tick is at once; the device has just authenticated, so it starts from there.
+    ping.tick().await;
+    let mut alive = Liveness::default();
     // File chunks queued while this device was away follow, a few at a time between other frames.
     let mut relay_after = 0i64;
     let mut relay_more = true;
@@ -267,21 +365,33 @@ async fn session(
                     return Ok(());
                 }
             },
-            incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Text(t))) => {
-                    if let Some(r) = text_frame(app, me, t.as_bytes()).resolve().await {
-                        socket.send(r).await?;
-                    }
+            incoming = socket.recv() => {
+                if let Some(Ok(_)) = &incoming {
+                    alive.heard();
                 }
-                Some(Ok(Message::Binary(b))) => {
-                    if let Some(r) = binary_frame(app, me, &b).resolve().await {
-                        socket.send(r).await?;
+                match incoming {
+                    Some(Ok(Message::Text(t))) => {
+                        if let Some(r) = text_frame(app, me, t.as_bytes()).resolve().await {
+                            socket.send(r).await?;
+                        }
                     }
+                    Some(Ok(Message::Binary(b))) => {
+                        if let Some(r) = binary_frame(app, me, &b).resolve().await {
+                            socket.send(r).await?;
+                        }
+                    }
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    _ => return Ok(()),
                 }
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                _ => return Ok(()),
-            },
-            _ = ping.tick() => socket.send(Message::Ping(Vec::new().into())).await?,
+            }
+            _ = ping.tick() => {
+                if !alive.ping() {
+                    // Nothing came back: a half-open connection. Closing it unregisters the device.
+                    let _ = socket.send(Message::Close(None)).await;
+                    return Ok(());
+                }
+                socket.send(Message::Ping(Vec::new().into())).await?;
+            }
             _ = std::future::ready(()), if relay_more => {
                 let batch = app
                     .db
@@ -428,9 +538,11 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
     if to.is_empty() || to.len() > MAX_RECIPIENTS {
         return Err(ApiError::new(400, "bad_field"));
     }
-    let mut failed: Vec<Value> = Vec::new();
-    let mut remote: HashMap<String, Vec<Outgoing>> = HashMap::new();
+    // Every recipient is checked before anything is queued: a bad one fails the whole frame and nothing was sent, so
+    // that a resend does not give the others a second copy. What can only fail for one device (unknown here, a full
+    // mailbox, a server that does not take it) is reported for that device in `failed`.
     let now = now();
+    let mut targets: Vec<(&Map, &str, &str, i64)> = Vec::with_capacity(to.len());
     for r in to {
         let o = r.as_object().ok_or(ApiError::new(400, "bad_field"))?;
         // An optional shorter lifetime for this envelope (disappearing messages): absent means the mailbox TTL.
@@ -441,7 +553,6 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
                 .filter(|t| *t > 0)
                 .ok_or(ApiError::new(400, "bad_field"))?,
         };
-        let expires = now + ttl.clamp(1, MAILBOX_TTL);
         let device = o
             .get("device")
             .and_then(Value::as_str)
@@ -451,6 +562,13 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
             .and_then(Value::as_str)
             .ok_or(ApiError::new(400, "bad_field"))?;
         check_envelope(env)?;
+        targets.push((o, device, env, ttl));
+    }
+    let mut failed: Vec<Value> = Vec::new();
+    let mut remote: HashMap<String, Vec<Outgoing>> = HashMap::new();
+    let mut wrote: Vec<String> = Vec::new();
+    for (o, device, env, ttl) in targets {
+        let expires = now + ttl.clamp(1, MAILBOX_TTL);
         // A device on another Murmo server (federation): handed to that server below.
         if let Some(server) = o.get("server").and_then(Value::as_str)
             && !app.is_origin(server)
@@ -459,25 +577,28 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
                 failed.push(device.into());
             } else {
                 app.fed.learn(&me.account, device, server);
+                wrote.push(format!("@{server}"));
                 remote
                     .entry(server.to_string())
                     .or_default()
                     .push(Outgoing {
                         device: device.to_string(),
                         env: env.to_string(),
-                        ttl: o.get("ttl").map(|_| ttl),
+                        expires,
                         notify: o.get("notify").and_then(Value::as_bool) == Some(true),
                     });
             }
             continue;
         }
-        if !app.db.device_known(device).map_err(ApiError::internal)? {
+        let Some(owner) = app.db.device_owner(device).map_err(ApiError::internal)? else {
             failed.push(device.into());
             continue;
-        }
+        };
+        let share = share_for(app, &owner, Sender::Account(&me.account), now)?;
+        wrote.push(owner);
         match app
             .db
-            .enqueue(device, env, expires, MAX_QUEUE, None)
+            .enqueue(device, env, expires, MAX_QUEUE, None, share.as_ref())
             .map_err(ApiError::internal)?
         {
             Some(mid) => {
@@ -491,6 +612,7 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
             None => failed.push(device.into()),
         }
     }
+    note_writes(app, &me.account, wrote.iter().map(String::as_str), now);
     if remote.is_empty() {
         return Ok(Some(frame(
             Map::new()
@@ -499,18 +621,25 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
                 .with("failed", Value::Array(failed)),
         )));
     }
-    // Envelopes for other servers go there first; `sent` follows when they have answered.
+    // Envelopes for other servers go there first, to all of them at once; `sent` follows when they have answered.
+    // `queued`: devices on servers that could not be reached now, whose envelopes this server keeps trying.
     let (app, device, id) = (app.clone(), me.device.clone(), id.to_string());
     tokio::spawn(async move {
-        for (server, msgs) in remote {
-            for d in crate::federation::deliver(&app, &server, msgs).await {
-                failed.push(d.into());
-            }
+        let answers = futures_util::future::join_all(remote.into_iter().map(|(server, msgs)| {
+            let app = app.clone();
+            async move { crate::federation::deliver(&app, &server, msgs).await }
+        }))
+        .await;
+        let mut queued: Vec<Value> = Vec::new();
+        for a in answers {
+            failed.extend(a.failed.into_iter().map(Value::from));
+            queued.extend(a.queued.into_iter().map(Value::from));
         }
         let sent = Map::new()
             .with("t", "sent")
             .with("id", id)
-            .with("failed", Value::Array(failed));
+            .with("failed", Value::Array(failed))
+            .with("queued", Value::Array(queued));
         app.hub.to_device(&device, Push::Text(text(&sent.into())));
     });
     Ok(None)
@@ -1035,6 +1164,7 @@ fn queue_chunk(
             device,
             &me.device,
             &me.account,
+            None,
             data,
             expires,
             &app.cfg.queue_limits(),
@@ -1107,7 +1237,7 @@ fn relay_space(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Reply, ApiError> 
         .collect();
     let (local, remote) = split_remote(app, me, devices);
     let local: Vec<&str> = local.iter().map(String::as_str).collect();
-    let mut ok: Vec<Value> = space_for(app, &me.account, &local, bytes)?
+    let mut ok: Vec<Value> = space_for(app, &me.account, None, &local, bytes)?
         .into_iter()
         .map(Value::from)
         .collect();
@@ -1141,6 +1271,7 @@ fn relay_space(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Reply, ApiError> 
 pub fn space_for(
     app: &App,
     account: &str,
+    origin: Option<&str>,
     devices: &[&str],
     bytes: i64,
 ) -> Result<Vec<String>, ApiError> {
@@ -1154,7 +1285,11 @@ pub fn space_for(
         if ok.iter().any(|o| o == d) {
             continue;
         }
-        let Some(mut u) = app.db.relay_usage(d, account).map_err(ApiError::internal)? else {
+        let Some(mut u) = app
+            .db
+            .relay_usage(d, account, origin)
+            .map_err(ApiError::internal)?
+        else {
             continue;
         };
         u.account = u.account.saturating_add(granted);
@@ -1385,6 +1520,24 @@ mod tests {
             && m.get("retry")
                 .and_then(Value::as_int)
                 .is_some_and(|s| (1..=60).contains(&s))
+    }
+
+    #[test]
+    fn unanswered_pings_close_the_connection() {
+        let mut alive = Liveness::default();
+        // Answered pings keep it open for as long as it lasts.
+        for _ in 0..10 {
+            assert!(alive.ping());
+            alive.heard();
+        }
+        // MISSED_PONGS pings in a row without an answer are allowed; the next tick closes it.
+        for _ in 0..MISSED_PONGS {
+            assert!(alive.ping());
+        }
+        assert!(!alive.ping());
+        // Anything from the device counts as an answer.
+        alive.heard();
+        assert!(alive.ping());
     }
 
     #[test]
@@ -1750,6 +1903,172 @@ mod tests {
             .put_prekey("B", "b1", &Value::from("p"))
             .expect("prekey");
         (app, me("A", "a1"))
+    }
+
+    /// One frame from `me` with `n` envelopes for `device`; how many of them were refused.
+    fn send_many(app: &Arc<App>, me: &Authed, device: &str, n: usize) -> usize {
+        let item: Value = Map::new().with("device", device).with("env", "e").into();
+        let f = Map::new()
+            .with("t", "send")
+            .with("id", "s")
+            .with("to", Value::Array(vec![item; n]));
+        let r = object(handle(app, me, &f));
+        assert_eq!(r.get("t").and_then(Value::as_str), Some("sent"), "{r:?}");
+        r.get("failed")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    }
+
+    fn fill(app: &Arc<App>, me: &Authed, device: &str, mut n: usize) -> usize {
+        let mut refused = 0;
+        while n > 0 {
+            let k = n.min(MAX_RECIPIENTS);
+            refused += send_many(app, me, device, k);
+            n -= k;
+        }
+        refused
+    }
+
+    fn known(app: &Arc<App>, account: &str, device: &str) {
+        app.db
+            .put_prekey(account, device, &Value::from("p"))
+            .expect("prekey");
+    }
+
+    #[test]
+    fn a_stranger_gets_a_small_share_of_a_mailbox() {
+        let app = app();
+        known(&app, "A", "a1");
+        known(&app, "B", "b1");
+        let share = usize::try_from(SHARE_STRANGER).unwrap_or_default();
+        // A has never been written to by B: only its small share of b1's mailbox, the rest is refused per device.
+        assert_eq!(fill(&app, &me("A", "a1"), "b1", share), 0);
+        assert_eq!(fill(&app, &me("A", "a2"), "b1", 3), 3);
+        // Another sender has its own share.
+        assert_eq!(fill(&app, &me("C", "c1"), "b1", 3), 0);
+    }
+
+    #[test]
+    fn a_contact_gets_a_larger_share_and_own_devices_the_whole_mailbox() {
+        let app = app();
+        known(&app, "A", "a1");
+        known(&app, "A", "a2");
+        known(&app, "B", "b1");
+        // B wrote to A (accepted its request, say): from then on A is a contact of B's devices.
+        assert_eq!(send_many(&app, &me("B", "b1"), "a1", 1), 0);
+        let stranger = usize::try_from(SHARE_STRANGER).unwrap_or_default();
+        let contact = usize::try_from(SHARE_CONTACT).unwrap_or_default();
+        assert_eq!(fill(&app, &me("A", "a1"), "b1", stranger + 10), 0);
+        assert_eq!(fill(&app, &me("A", "a1"), "b1", contact - stranger - 10), 0);
+        assert_eq!(
+            fill(&app, &me("A", "a2"), "b1", 1),
+            1,
+            "the contact share is used up"
+        );
+        // A's own other device takes more than any share.
+        assert_eq!(fill(&app, &me("A", "a1"), "a2", contact + 10), 0);
+    }
+
+    #[test]
+    fn another_server_shares_one_part_of_a_mailbox() {
+        let app = app();
+        known(&app, "B", "b1");
+        let t = now();
+        let share = share_for(&app, "B", Sender::Server("https://x.example"), t)
+            .expect("share")
+            .expect("not own");
+        assert_eq!(share.max, SHARE_SERVER_STRANGER);
+        // Once B wrote to someone there, the server counts as a contact.
+        note_writes(&app, "B", ["@https://x.example"], t);
+        let contact = share_for(&app, "B", Sender::Server("https://x.example"), t)
+            .expect("share")
+            .expect("not own");
+        assert_eq!(contact.max, SHARE_SERVER);
+        assert_eq!(contact.sender, share.sender);
+        // Another server is still a stranger; the account's own name is no server's.
+        let other = share_for(&app, "B", Sender::Server("https://y.example"), t)
+            .expect("share")
+            .expect("not own");
+        assert_eq!(other.max, SHARE_SERVER_STRANGER);
+        assert_ne!(other.sender, share.sender);
+        assert!(
+            share_for(&app, "B", Sender::Account("B"), t)
+                .expect("share")
+                .is_none()
+        );
+        // What one server queued counts against its share only.
+        for i in 0..SHARE_SERVER_STRANGER {
+            assert!(
+                app.db
+                    .enqueue("b1", "e", t + 60, MAX_QUEUE, None, Some(&other))
+                    .expect("enqueue")
+                    .is_some(),
+                "envelope {i}"
+            );
+        }
+        assert!(
+            app.db
+                .enqueue("b1", "e", t + 60, MAX_QUEUE, None, Some(&other))
+                .expect("enqueue")
+                .is_none()
+        );
+        assert!(
+            app.db
+                .enqueue("b1", "e", t + 60, MAX_QUEUE, None, Some(&share))
+                .expect("enqueue")
+                .is_some()
+        );
+    }
+
+    fn mailbox_len(app: &Arc<App>) -> i64 {
+        app.db
+            .conn()
+            .expect("conn")
+            .query_row("SELECT COUNT(*) FROM mailbox", [], |r| r.get(0))
+            .expect("count")
+    }
+
+    fn send_to(app: &Arc<App>, me: &Authed, to: Vec<Value>) -> Map {
+        let f = Map::new()
+            .with("t", "send")
+            .with("id", "s")
+            .with("to", Value::Array(to));
+        object(handle(app, me, &f))
+    }
+
+    #[test]
+    fn a_bad_recipient_fails_the_frame_before_anything_is_queued() {
+        let (app, a) = sender_with_known_device();
+        let good = Map::new().with("device", "b1").with("env", "e");
+        for bad in [
+            Map::new()
+                .with("device", "b1")
+                .with("env", "not base64url!"),
+            Map::new()
+                .with("device", "b1")
+                .with("env", "e")
+                .with("ttl", 0i64),
+            Map::new().with("env", "e"),
+        ] {
+            let r = send_to(&app, &a, vec![good.clone().into(), bad.into()]);
+            assert_eq!(r.get("t").and_then(Value::as_str), Some("error"));
+            assert_eq!(mailbox_len(&app), 0, "nothing queued for the good one");
+        }
+        // Per device failures are reported per device, and the others are queued.
+        let r = send_to(
+            &app,
+            &a,
+            vec![
+                good.clone().into(),
+                Map::new().with("device", "nobody").with("env", "e").into(),
+            ],
+        );
+        assert_eq!(r.get("t").and_then(Value::as_str), Some("sent"));
+        assert_eq!(
+            r.get("failed").and_then(Value::as_array).map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(mailbox_len(&app), 1);
     }
 
     #[test]

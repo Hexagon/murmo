@@ -465,7 +465,7 @@ function showHelp() {
 // ── terms, privacy and the open beta ────────────────────────────────────────────────────────────────────────────
 
 /** The day the terms below last changed (Unix seconds), shown with them. */
-const TERMS_DATE = Date.UTC(2026, 10, 16) / 1000;
+const TERMS_DATE = Date.UTC(2026, 10, 17) / 1000;
 
 /** The sections of the terms, as HELP; the demo section only on a demo server (`MURMO_DEMO`). */
 const termSections = () => [
@@ -1060,6 +1060,8 @@ async function enter({ store, account, handle, home }) {
   messenger.addEventListener("file", (e) => transfers.delete(`in:${e.detail.f}`));
   messenger.addEventListener("status", (e) => {
     renderSidebar();
+    updateNet();
+    if (current && heldMsgs.size) renderThread(); // a held text's mark says whether it can go now
     if (e.detail !== "online") return;
     syncPush().catch((x) => console.warn("push", x?.message ?? x));
     checkVersion(); // the server may have been restarted with a new client
@@ -1280,6 +1282,11 @@ function renderShell() {
   ui.filesBtn = h("button", { class: "icon-btn files-btn", "aria-label": tr("files.title"), title: tr("files.title"), "aria-pressed": "false", onclick: () => openFiles() }, icon("folder"));
   ui.foot = h("div", { class: "side-foot" });
   ui.main = h("main", { class: "main" });
+  ui.net = h("div", { class: "net-banner", role: "status", hidden: true },
+    h("span", { class: "dot" }),
+    h("span", { text: tr("net.offline") }),
+    h("button", { type: "button", class: "link", text: tr("net.retry"), onclick: () => messenger?.wake() }),
+  );
   ui.bell = h("button", { class: "icon-btn bell-off", hidden: true, onclick: async () => toast(await setNotifications(true).catch((x) => say(x))) }, icon("bellOff"));
   ui.shell = h(
     "div",
@@ -1290,7 +1297,7 @@ function renderShell() {
       h(
         "div",
         { class: "side-top" },
-        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo", betaMark()),
+        h("div", { class: "logo" }, h("span", { class: "logo-name" }, h("img", { src: "icon.svg", alt: "" }), "Murmo"), betaMark()),
         h(
           "div",
           { class: "side-actions" },
@@ -1305,9 +1312,11 @@ function renderShell() {
       ui.foot,
     ),
     ui.main,
+    ui.net,
   );
   inApp(true);
   root.replaceChildren(ui.shell);
+  updateNet();
   renderSidebar();
   openConversation(current);
 }
@@ -1462,6 +1471,26 @@ async function renderSearch() {
     hits.length > SEARCH_MAX ? h("p", { class: "hint search-more", text: tr("search.more", { n: i18n.num(SEARCH_MAX) }) }) : null,
     !people.length && !hits.length ? h("p", { class: "hint search-none", text: tr("search.none") }) : null,
   );
+}
+
+// A lost connection is said above everything (on a phone the sidebar's "Connecting…" is hidden inside a
+// conversation), after a grace period so a quick reconnect does not flash it.
+const NET_GRACE = 2500;
+let netTimer = 0;
+function updateNet() {
+  if (!ui.net) return;
+  const down = messenger?.status === "offline";
+  if (!down) {
+    clearTimeout(netTimer);
+    netTimer = 0;
+    ui.net.hidden = true;
+    return;
+  }
+  if (!ui.net.hidden || netTimer) return;
+  netTimer = setTimeout(() => {
+    netTimer = 0;
+    if (messenger?.status === "offline") ui.net.hidden = false;
+  }, NET_GRACE);
 }
 
 function renderFoot() {
@@ -1724,7 +1753,8 @@ function composer(c) {
       if (t) await messenger.sendEphemeral(c.account, text, t, id);
       else await messenger.sendText(c.account, text, id);
     } catch (x) {
-      if (!ta.value.trim()) {
+      // Some devices got it already: it stays in the thread (marked unsent) instead of coming back to be sent again.
+      if (!x?.partial && !ta.value.trim()) {
         ta.value = text;
         grow();
       }
@@ -2422,9 +2452,9 @@ function fuseView(m) {
 function messageSig(m) {
   const f = m.file;
   return JSON.stringify([
-    m.kind, m.text, m.time, m.dir, m.delivered, m.reactions ?? null, m.edited ?? 0, m.held ? (m.firing ? 2 : 1) : 0, m.ttl ?? null, m.expires ?? null,
+    m.kind, m.text, m.time, m.dir, m.delivered, m.reactions ?? null, m.edited ?? 0, m.held ? (m.firing ? 2 : 1) + (messenger.status === "online" ? 0 : 2) : 0, m.ttl ?? null, m.expires ?? null,
     f ? [f.f, f.have, f.missed ?? null, f.peers ?? null, f.mime === "image/gif" && gifHashes.has(f.sha256)] : null,
-    messenger.contacts.get(m.conv)?.state, sending.has(m.id),
+    messenger.contacts.get(m.conv)?.state, sending.has(m.id), !!m.outbox, m.failed?.length ?? 0,
   ]);
 }
 
@@ -2572,7 +2602,9 @@ function message(m) {
   if (m.kind === "ephemeral") meta.append(fuseView(m));
   if (m.edited) meta.append(h("span", { class: "edited", text: tr("msg.edited"), title: tr("msg.editedAt", { when: i18n.dateTime(m.edited) }) }));
   if (m.held) {
-    // Waiting for "Ångra": looks like a sent message; not on the server yet, so no delivery mark.
+    // Waiting for "Ångra": not on the server yet, so no delivery mark. While it is being sent, or when there is no
+    // connection to send it on, a pending mark says so (it must not look sent).
+    if (m.firing || messenger.status !== "online") meta.append(h("span", { class: "pending held-note", text: tr(messenger.status === "online" ? "msg.sendingText" : "msg.waitingNet") }));
     if (!m.firing) meta.append(undoButton(m));
     return h("div", { class: `msg out held${m.kind === "ephemeral" ? " ephemeral" : ""}` }, body, meta);
   }
@@ -2587,6 +2619,23 @@ function message(m) {
         onclick: async () => {
           try {
             toast(tr((await messenger.flushFiles()) ? "msg.sentToast" : "msg.peerAway"));
+          } catch (x) {
+            toast(say(x));
+          }
+        },
+      }),
+    );
+  }
+  else if (m.dir === "out" && m.outbox) meta.append(h("span", { class: "pending", text: tr("msg.waitingToSend") }));
+  else if (m.dir === "out" && m.failed?.length && !m.delivered) {
+    meta.append(
+      h("span", { class: "pending", text: tr("msg.notDelivered") }),
+      h("button", {
+        class: "link",
+        text: tr("msg.sendAgain"),
+        onclick: async () => {
+          try {
+            toast(tr((await messenger.resend(m.id)) ? "msg.sentToast" : "msg.stillNotDelivered"));
           } catch (x) {
             toast(say(x));
           }
