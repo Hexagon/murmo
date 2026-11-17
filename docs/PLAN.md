@@ -99,7 +99,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       refuse accounts homed here
 - [ ] **Unbounded federation caches.** `routes` and `lists` (`federation.rs:154-159, 624-644`, `ws.rs:461`) grow with
       ids named by clients and remote answers up to 4 MiB. Cap per account, cap prekeys, LRU
-- [ ] **Reset leaves old devices connected.** Stale devices are dropped but only `removed` are disconnected
+- [x] **Reset leaves old devices connected.** Stale devices are dropped but only `removed` are disconnected
       (`api.rs:476-490`)
 - [ ] **Prekey freshness.** `verifyPrekey` (`protocol.js:254`) ignores `time`; a server can serve an old prekey whose
       private key it obtained. Refuse prekeys older than rotation + keep, or older than one already seen (T13, G8)
