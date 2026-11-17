@@ -408,6 +408,21 @@ try {
   await a.select("dialog #retention", String(7 * 86400));
   await a.waitForFunction(() => document.querySelector(".topbar .title")?.textContent.includes("raderas efter 1 vecka"), { timeout: 5000 });
   await a.screenshot({ path: `${shots}/a-7-retention.png` });
+  // Deleting the conversation and blocking ask first; Cancel (which has the focus) and Esc leave everything as it was.
+  const confirmShown = async (title) => {
+    await a.waitForFunction((t) => document.querySelector("dialog.confirm h2")?.textContent === t, { timeout: 5000 }, title);
+    if (await a.evaluate(() => document.activeElement?.textContent) !== "Avbryt") throw new Error("Cancel is not focused in the confirmation");
+  };
+  await clickText(a, "Ta bort konversationen", "dialog button");
+  await confirmShown(`Ta bort konversationen med ${bobHandle}?`);
+  await a.screenshot({ path: `${shots}/a-7a-confirm-delete.png` });
+  await a.keyboard.press("Escape");
+  await a.waitForFunction(() => !document.querySelector("dialog.confirm") && document.querySelector("dialog #retention"), { timeout: 5000 });
+  await clickText(a, "Blockera", "dialog button");
+  await confirmShown(`Blockera ${bobHandle}?`);
+  await clickText(a, "Avbryt", "dialog.confirm button");
+  await a.waitForFunction(() => !document.querySelector("dialog.confirm"), { timeout: 5000 });
+  if ((await a.$$(".side-list .conv")).length !== 1 || !(await a.$(".composer textarea"))) throw new Error("a cancelled confirmation changed the conversation");
   await a.keyboard.press("Escape");
   // A long history: the newest messages are drawn first, older ones as the reader scrolls up, and what is on the
   // screen stays in place while they come.
@@ -554,6 +569,18 @@ try {
   await a.click("dialog .check input");
   await clickText(a, "Aktivera pappersnyckeln");
   await a.waitForFunction(() => !document.querySelector("dialog"), { timeout: 10000 });
+  // Taking a device off the list (here the paper key) asks first; cancelled, the key stays.
+  await a.click('[aria-label="Konto och inställningar"]');
+  await clickText(a, "Enheter");
+  await a.waitForFunction(() => [...document.querySelectorAll("dialog button")].some((x) => x.textContent === "Ta bort"), { timeout: 10000 });
+  await clickText(a, "Ta bort", "dialog button");
+  await confirmShown("Ta bort pappersnyckeln?");
+  await clickText(a, "Avbryt", "dialog.confirm button");
+  await a.waitForFunction(() => !document.querySelector("dialog.confirm"), { timeout: 5000 });
+  await sleep(500);
+  if (!(await a.evaluate(() => [...document.querySelectorAll("dialog button")].some((x) => x.textContent === "Ta bort")))) throw new Error("a cancelled confirmation took the paper key away");
+  await a.keyboard.press("Escape");
+  await a.waitForFunction(() => !document.querySelector("dialog"), { timeout: 5000 });
   const a2 = await page("alice2");
   await a2.type("form input[autocomplete=username]", aliceHandle);
   await a2.type("form input[type=password]", "correct horse battery staple");

@@ -112,7 +112,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 
 - [ ] **Connection loss is nearly invisible.** Only small "Connecting…" text in the sidebar, hidden inside a
       conversation on mobile (`app.js:1453`); held messages look sent (`app.js:2552`). Topbar banner and a pending mark
-- [ ] **Destructive actions without confirmation.** "Delete the conversation" removes history on all devices
+- [x] **Destructive actions without confirmation.** "Delete the conversation" removes history on all devices
       (`app.js:3618`, `core.js:557,1039`); block and device removal (`app.js:3800`) too
 - [ ] **Sidebar header overflows** the conversation title on desktop (needs about 352 px of 280 px, `style.css:191`)
 - [ ] **Form fields without accessible names**: labels are siblings without `for` (`app.js:670-673, 715-717, 949, 3858`)

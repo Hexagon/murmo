@@ -151,7 +151,8 @@ mean and offer to make a paper key.
 ### 4.4 Removing a device
 
 Any present device can sign a `remove` entry for any device, including itself ("log out everywhere else" removes the
-others). Contacts stop encrypting to removed devices as soon as they see the new head (§6.3).
+others). Contacts stop encrypting to removed devices as soon as they see the new head (§6.3). The device list asks
+before it removes a device, saying that the device's data is deleted when it next connects.
 
 ### 4.5 Paper key
 
@@ -273,6 +274,8 @@ head, and sends a `request` message with an optional short note (at most 500 cha
   accepted means the sender has lost its data (a new device after a paper key, §4.5): it is answered with `accept` and
   changes nothing else. **Decline** deletes it locally; **Block**
   remembers the account id and drops everything from it.
+- Blocking, and *Ta bort konversationen* (which deletes the conversation's history on all own devices), ask first in a
+  dialog that says what happens; Cancel has the focus. So does removing a device or the paper key (§4.4).
 - Acceptance is a client-side decision. The server cannot tell requests from other messages, which is deliberate: it
   learns no social graph. Spam is limited by per-sender rate limits on the authenticated connection and by the
   per-device mailbox quota.

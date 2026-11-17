@@ -214,6 +214,28 @@ function toast(text) {
   setTimeout(() => t.remove(), 4500);
 }
 
+/**
+ * Ask before something that cannot be taken back (deleting a conversation, blocking, removing a device). Resolves
+ * `true` only when `ok` was chosen; Cancel, Esc and the backdrop leave everything as it was. Cancel has the focus.
+ */
+function confirmDialog(title, text, ok) {
+  return new Promise((resolve) => {
+    let yes = false;
+    const d = dialog(
+      h("h2", { text: title }),
+      h("p", { class: "hint", text }),
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { class: "btn", text: tr("common.cancel"), onclick: () => d.close() }),
+        h("button", { class: "btn danger confirm-ok", text: ok, onclick: () => { yes = true; d.close(); } }),
+      ),
+    );
+    d.classList.add("confirm");
+    d.addEventListener("close", () => resolve(yes));
+  });
+}
+
 function dialog(...children) {
   const d = h("dialog", {}, ...children);
   d.addEventListener("close", () => d.remove());
@@ -1569,7 +1591,7 @@ function requestBox(c) {
       { class: "actions" },
       h("button", { class: "btn primary", text: tr("conv.accept"), onclick: () => messenger.accept(c.account).then(() => openConversation(c.account), (x) => toast(say(x))) }),
       h("button", { class: "btn", text: tr("conv.decline"), onclick: () => messenger.setState(c.account, "declined").then(() => openConversation(null)) }),
-      h("button", { class: "btn danger", text: tr("conv.block"), onclick: () => messenger.setState(c.account, "blocked").then(() => openConversation(null)) }),
+      h("button", { class: "btn danger", text: tr("conv.block"), onclick: () => confirmBlock(c).then((yes) => yes && openConversation(null)) }),
     ),
   );
 }
@@ -3614,11 +3636,36 @@ function showContactMenu(c) {
       c.state === "accepted" ? h("button", { class: "btn", text: tr("contact.showSafety"), onclick: () => { d.close(); showSafety(c); } }) : null,
       h("button", { class: "btn", text: tr("files.ofConversation"), onclick: () => { d.close(); openFiles(c.account, c.account); } }),
       retentionPicker(c),
-      c.state !== "blocked" ? h("button", { class: "btn danger", text: tr("conv.block"), onclick: () => messenger.setState(c.account, "blocked").then(() => { d.close(); openConversation(null); }) }) : null,
-      h("button", { class: "btn danger", text: tr("contact.delete"), onclick: () => messenger.setState(c.account, "declined").then(() => { d.close(); openConversation(null); }) }),
+      c.state !== "blocked" ? h("button", { class: "btn danger", text: tr("conv.block"), onclick: () => confirmBlock(c).then((yes) => { if (yes) { d.close(); openConversation(null); } }) }) : null,
+      h("button", {
+        class: "btn danger",
+        text: tr("contact.delete"),
+        onclick: async () => {
+          if (!(await confirmDialog(tr("contact.deleteQuestion", { handle: c.handle }), tr("contact.deleteHint", { name: personName(c.account) }), tr("contact.deleteOk")))) return;
+          try {
+            await messenger.setState(c.account, "declined");
+            d.close();
+            openConversation(null);
+          } catch (x) {
+            toast(say(x));
+          }
+        },
+      }),
     ),
     h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
   );
+}
+
+/** Block `c` after asking; resolves whether it was blocked. */
+async function confirmBlock(c) {
+  if (!(await confirmDialog(tr("contact.blockQuestion", { handle: c.handle }), tr("contact.blockHint", { name: personName(c.account) }), tr("conv.block")))) return false;
+  try {
+    await messenger.setState(c.account, "blocked");
+    return true;
+  } catch (x) {
+    toast(say(x));
+    return false;
+  }
 }
 
 /** How long the messages of a conversation are kept on this account's devices. */
@@ -3802,7 +3849,10 @@ async function showDevices() {
                 text: tr("common.remove"),
                 onclick: async () => {
                   try {
-                    if (p.isPaper(dev) && !confirm(tr("dev.removePaper"))) return;
+                    const sure = p.isPaper(dev)
+                      ? await confirmDialog(tr("dev.removePaperQuestion"), tr("dev.removePaper"), tr("common.remove"))
+                      : await confirmDialog(tr("dev.removeQuestion", { name: displayName(dev, names) }), tr("dev.removeHint"), tr("common.remove"));
+                    if (!sure) return;
                     await messenger.removeDevice(dev.id);
                     await render();
                   } catch (x) {
