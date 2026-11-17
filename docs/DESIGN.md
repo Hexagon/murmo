@@ -258,6 +258,13 @@ come with the Double Ratchet in phase 2 (PLAN.md).
 - `heads` gossips the device-list heads the sender knows (its own and the recipient's). A recipient that sees a head
   it does not have fetches the list from the server; a head that does not extend the pinned list is a **fork** and
   the conversation is blocked with a warning. Contacts thereby act as witnesses for each other.
+- A fork blocks both directions. The forked list is never cached (it is only shown, for the safety code), and while a
+  contact is marked as forked nothing from that account is taken: its messages do not verify, not even from a device
+  of the pinned list, and its file chunks are not stored. They are dropped (quarantined), not kept for later.
+- The account's own list is pinned the same way, as `{ head, length }` in the device's encrypted store (TOFU on the
+  first list that holds this device). A device refuses an own list that does not extend the pinned one or that no
+  longer holds the device itself, and does not cache it: a server cannot serve an older, validly signed list that still
+  holds a removed device and so give that device a copy of every message, or take its history, sync or names.
 
 ## 6. Conversations and message requests
 
@@ -774,7 +781,7 @@ WebSocket frames (JSON):
 | client → server | `auth` may carry `caps: ["bin"]`: the connection takes binary relay frames (§10.2) |
 | server → client | `{ t: "ready", relay: { bytes, peer, granted, store, frames, slow_frames, grant, binary, window } }` (the relay budgets below and in §10.2) then queued `{ t: "msg", id, env }` frames |
 | client → server | `{ t: "send", id, to: [{ device, env }] }` → `{ t: "sent", id }` |
-| client → server | `{ t: "ack", ids: [...] }` (deletes) |
+| client → server | `{ t: "ack", ids: [...] }` (deletes). Sent only for final results: a message handled, or one that can never be (undecryptable, not for this device, a bad signature or an unknown sender device). An envelope whose sender's device list could not be fetched, or whose handling failed locally (a full store), is left in the mailbox and read again on the next connection (at most until it expires) |
 | client → server | `{ t: "prekey", prekey }` |
 | client → server | `{ t: "presence", devices, ref }` → `{ t: "presence", online, ref }` |
 | client → server | `{ t: "relay", to, data, ref }` → forwarded as `{ t: "relay", from, account, data }` to connected devices only; `{ t: "relay-missed", devices, text?, ref }` for the rest (`text`: connected devices that take no binary frames, for a binary chunk) |
