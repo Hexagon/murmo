@@ -603,7 +603,7 @@ dialog.viewer .close svg { width: 22px; height: 22px; }
 
 /* Progress of a transfer: more than the thread's percentage (bytes, speed, time left). */
 .fprogress { display: grid; gap: 3px; margin-top: 6px; font-size: 12px; }
-.fp-top { display: flex; justify-content: space-between; gap: 6px; }
+.fp-top { display: flex; justify-content: space-between; gap: 8px; }
 .fp-top .what { color: var(--accent); font-weight: 600; }
 .fp-top .pct { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
 .fprogress progress { width: 100%; height: 6px; appearance: none; border: 0; border-radius: 3px; background: var(--line); overflow: hidden; accent-color: var(--accent); }
