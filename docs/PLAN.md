@@ -97,7 +97,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [ ] **Remote relays claim any account.** `sender.account` in `/federation/relay` is trusted (`federation.rs:836-931`)
       and keys local budgets and file-queue quotas; a hostile server can exhaust a local user's. Key on `from` + account,
       refuse accounts homed here
-- [ ] **Unbounded federation caches.** `routes` and `lists` (`federation.rs:154-159, 624-644`, `ws.rs:461`) grow with
+- [x] **Unbounded federation caches.** `routes` and `lists` (`federation.rs:154-159, 624-644`, `ws.rs:461`) grow with
       ids named by clients and remote answers up to 4 MiB. Cap per account, cap prekeys, LRU
 - [x] **Reset leaves old devices connected.** Stale devices are dropped but only `removed` are disconnected
       (`api.rs:476-490`)

@@ -925,7 +925,7 @@ on the live budgets.
 | VAPID key | signing push requests | while the server exists |
 | network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
 | the sending server of an envelope from another server (§14) | the recipient looks the sender up there | with the envelope |
-| other servers' federation keys, nonces of their deliveries, device lists fetched from them, in memory | federation (§14) | an hour, 10 minutes, 20 seconds |
+| other servers' federation keys, nonces of their deliveries, device lists fetched from them, in memory | federation (§14) | an hour, 10 minutes, 20 seconds; at most 1 024 servers, and 256 lists of 16 MiB in all (the least recently fetched go first) |
 
 No access logs with addresses are written by default (`MURMO_LOG=info` logs no addresses or account ids).
 
