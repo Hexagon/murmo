@@ -103,7 +103,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       (`api.rs:476-490`)
 - [x] **Prekey freshness.** `verifyPrekey` (`protocol.js:254`) ignores `time`; a server can serve an old prekey whose
       private key it obtained. Refuse prekeys older than rotation + keep, or older than one already seen (T13, G8)
-- [ ] **Client HTTP without timeout.** `api.js:25`; one hanging `list()` stalls the serial envelope queue. Add
+- [x] **Client HTTP without timeout.** `api.js:25`; one hanging `list()` stalls the serial envelope queue. Add
       `AbortSignal.timeout` and map network errors to a readable `ApiError`
 - [x] **Dead connections stay registered.** Pings without pong check (`ws.rs:259`): presence, push and live relay act
       on half-open sockets. Close after about two missed pongs
