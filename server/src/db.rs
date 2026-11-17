@@ -173,6 +173,15 @@ impl Db {
         if !has_origin {
             conn.execute_batch("ALTER TABLE mailbox ADD COLUMN origin TEXT")?;
         }
+        // Chunks from accounts on other servers count against the sending server and account together.
+        let has_relay_origin: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('relay_queue') WHERE name = 'origin'",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has_relay_origin {
+            conn.execute_batch("ALTER TABLE relay_queue ADD COLUMN origin TEXT")?;
+        }
         Ok(Db(Arc::new(Mutex::new(conn))))
     }
 
@@ -513,22 +522,27 @@ impl Db {
     // ── queued file chunks (ciphertext for devices that were not connected) ─────────────────────────────────────
 
     /// What a sender account has queued for a device, and the totals its limits are checked against; `None` if
-    /// the device is unknown.
+    /// the device is unknown. `origin` is the server the account sent from when that is another server
+    /// (federation): what an account named there has queued is counted apart from what the same account name has
+    /// queued from anywhere else, so that a server cannot use up the share of an account it does not serve.
     pub fn relay_usage(
         &self,
         device: &str,
         account: &str,
+        origin: Option<&str>,
     ) -> Result<Option<QueueUsage>, StoreError> {
-        usage(&*self.conn()?, device, account)
+        usage(&*self.conn()?, device, account, origin)
     }
 
     /// Queue a chunk for a device unless that would exceed one of `limits`. A binary chunk is stored as a `BLOB`,
     /// a text chunk (from a client that sends text frames) as `TEXT`; [`Db::relay_queued`] tells them apart.
+    #[allow(clippy::too_many_arguments)]
     pub fn relay_enqueue(
         &self,
         device: &str,
         sender: &str,
         account: &str,
+        origin: Option<&str>,
         data: ChunkData<'_>,
         expires: i64,
         limits: &QueueLimits,
@@ -536,18 +550,20 @@ impl Db {
         let size = i64::try_from(data.len()).unwrap_or(i64::MAX);
         let mut c = self.conn()?;
         let tx = c.transaction().map_err(store_err)?;
-        match usage(&tx, device, account)? {
+        match usage(&tx, device, account, origin)? {
             Some(u) if u.room(limits) >= size => {}
             _ => return Ok(false),
         }
-        let sql = "INSERT INTO relay_queue (device, sender, account, size, expires, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+        let sql = "INSERT INTO relay_queue (device, sender, account, size, expires, data, origin) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
         match data {
-            ChunkData::Text(t) => {
-                tx.execute(sql, params![device, sender, account, size, expires, t])
-            }
-            ChunkData::Binary(b) => {
-                tx.execute(sql, params![device, sender, account, size, expires, b])
-            }
+            ChunkData::Text(t) => tx.execute(
+                sql,
+                params![device, sender, account, size, expires, t, origin],
+            ),
+            ChunkData::Binary(b) => tx.execute(
+                sql,
+                params![device, sender, account, size, expires, b, origin],
+            ),
         }
         .map_err(store_err)?;
         tx.commit().map_err(store_err)?;
@@ -930,7 +946,12 @@ impl QueueUsage {
     }
 }
 
-fn usage(c: &Connection, device: &str, account: &str) -> Result<Option<QueueUsage>, StoreError> {
+fn usage(
+    c: &Connection,
+    device: &str,
+    account: &str,
+    origin: Option<&str>,
+) -> Result<Option<QueueUsage>, StoreError> {
     let owner: Option<String> = c
         .query_row(
             "SELECT account FROM prekeys WHERE device = ?1",
@@ -951,15 +972,16 @@ fn usage(c: &Connection, device: &str, account: &str) -> Result<Option<QueueUsag
             &[&device],
         )?,
         pair: sum(
-            "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE account = ?1 AND device = ?2",
-            &[&account, &device],
+            "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE account = ?1 AND origin IS ?3 AND device = ?2",
+            &[&account, &device, &origin],
         )?,
         account: sum(
-            "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE account = ?1",
-            &[&account],
+            "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE account = ?1 AND origin IS ?2",
+            &[&account, &origin],
         )?,
         total: sum("SELECT COALESCE(SUM(size), 0) FROM relay_queue", &[])?,
-        own: owner == account,
+        // Only a device's own account on this server: a remote server naming it is somebody else.
+        own: owner == account && origin.is_none(),
     }))
 }
 
@@ -1005,10 +1027,15 @@ mod tests {
     }
 
     fn put(db: &Db, to: &str, from_account: &str, n: usize) -> bool {
+        put_from(db, to, from_account, None, n)
+    }
+
+    fn put_from(db: &Db, to: &str, from_account: &str, origin: Option<&str>, n: usize) -> bool {
         db.relay_enqueue(
             to,
             "dev",
             from_account,
+            origin,
             ChunkData::Text(&"x".repeat(n)),
             10,
             &LIMITS,
@@ -1058,19 +1085,55 @@ mod tests {
         let db = db();
         assert!(put(&db, "b2", "B", 70));
         assert!(!put(&db, "b2", "B", 1), "the account limit still applies");
-        let u = db.relay_usage("b2", "B").expect("usage").expect("known");
+        let u = db
+            .relay_usage("b2", "B", None)
+            .expect("usage")
+            .expect("known");
         assert!(u.own);
         assert_eq!(u.room(&LIMITS), 0);
-        let u = db.relay_usage("b2", "A").expect("usage").expect("known");
+        let u = db
+            .relay_usage("b2", "A", None)
+            .expect("usage")
+            .expect("known");
         assert_eq!((u.own, u.device, u.pair), (false, 70, 0));
         assert_eq!(u.room(&LIMITS), 30);
+    }
+
+    #[test]
+    fn a_remote_server_has_its_own_share_of_an_account_name() {
+        let db = db();
+        // A server naming the local account B is not B: it gets no own-device exemption on B's devices…
+        assert!(put_from(&db, "b2", "B", Some("https://x.example"), 40));
+        assert!(
+            !put_from(&db, "b2", "B", Some("https://x.example"), 1),
+            "pair limit"
+        );
+        let u = db
+            .relay_usage("b2", "B", Some("https://x.example"))
+            .expect("usage")
+            .expect("known");
+        assert!(!u.own);
+        // …and what it queued does not count against B itself, nor against the same name from another server.
+        let u = db
+            .relay_usage("b2", "B", None)
+            .expect("usage")
+            .expect("known");
+        assert_eq!((u.own, u.pair, u.account), (true, 0, 0));
+        assert!(put(&db, "c1", "A", 40));
+        assert!(put_from(&db, "c1", "A", Some("https://x.example"), 40));
+        assert!(put_from(&db, "c1", "A", Some("https://y.example"), 20));
+        let u = db
+            .relay_usage("c1", "A", Some("https://y.example"))
+            .expect("usage")
+            .expect("known");
+        assert_eq!((u.pair, u.account, u.device), (20, 20, 100));
     }
 
     #[test]
     fn binary_and_text_chunks_keep_their_kind() {
         let db = db();
         assert!(
-            db.relay_enqueue("b1", "a1", "A", ChunkData::Text("abc"), 10, &LIMITS)
+            db.relay_enqueue("b1", "a1", "A", None, ChunkData::Text("abc"), 10, &LIMITS)
                 .expect("enqueue")
         );
         assert!(
@@ -1078,6 +1141,7 @@ mod tests {
                 "b1",
                 "a1",
                 "A",
+                None,
                 ChunkData::Binary(&[0, 1, 2, 255]),
                 10,
                 &LIMITS
@@ -1090,7 +1154,10 @@ mod tests {
         assert_eq!(q[1].data, QueuedData::Binary(vec![0, 1, 2, 255]));
         assert_eq!((q[1].sender.as_str(), q[1].account.as_str()), ("a1", "A"));
         // Both count by their length.
-        let u = db.relay_usage("b1", "A").expect("usage").expect("known");
+        let u = db
+            .relay_usage("b1", "A", None)
+            .expect("usage")
+            .expect("known");
         assert_eq!(u.pair, 7);
     }
 
@@ -1098,7 +1165,11 @@ mod tests {
     fn unknown_devices_get_nothing() {
         let db = db();
         assert!(!put(&db, "nobody", "A", 1));
-        assert!(db.relay_usage("nobody", "A").expect("usage").is_none());
+        assert!(
+            db.relay_usage("nobody", "A", None)
+                .expect("usage")
+                .is_none()
+        );
     }
 
     #[test]

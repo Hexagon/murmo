@@ -94,7 +94,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [x] **Block list is exact-string.** `MURMO_FEDERATION_BLOCK` compares origins verbatim (`federation.rs:214`) and
       `:443`, other ports and subdomains are distinct origins (each with its own `PER_SERVER` budget). Normalise origins
       and block by host and subdomains
-- [ ] **Remote relays claim any account.** `sender.account` in `/federation/relay` is trusted (`federation.rs:836-931`)
+- [x] **Remote relays claim any account.** `sender.account` in `/federation/relay` is trusted (`federation.rs:836-931`)
       and keys local budgets and file-queue quotas; a hostile server can exhaust a local user's. Key on `from` + account,
       refuse accounts homed here
 - [x] **Unbounded federation caches.** `routes` and `lists` (`federation.rs:154-159, 624-644`, `ws.rs:461`) grow with

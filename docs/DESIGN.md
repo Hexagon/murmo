@@ -1303,7 +1303,11 @@ The connection waits for the other server's answer before it reads the next fram
 **Each server keeps its own limits** for what comes from other servers: a chunk from an account elsewhere counts
 exactly like one from its own accounts (live per sending account into a device, `relay.peer`; queued per sending
 account, `relay.store`; and the file queue's sizes per device, sender and account), besides 60 000 frames and 2 GiB a
-minute per sending server. It announces them in `/api/v1/info` (`relay`, `file_queue`, `file_queue_limits`), and the
+minute per sending server. The sending server names the account, and the receiving one cannot check that, so those
+budgets and quotas are kept for the sending server and the account together: a server that names someone else's
+account uses up only its own share of that name, never the share of the account where it is served. A request that
+names an account served here (its rootcard home or its device list is on this server) is refused as
+`not_your_account`; such an account never has devices elsewhere. It announces them in `/api/v1/info` (`relay`, `file_queue`, `file_queue_limits`), and the
 sending server passes them to its client with the contact's device list (`limits`). So a transfer keeps within the
 smaller of both servers:
 - the sending server has its own budget for chunks to other servers, `remote` in `ready` (256 MiB a minute per

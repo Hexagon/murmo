@@ -976,6 +976,20 @@ pub async fn space(
     }
 }
 
+/// Refuse a request from another server that speaks for an account this server serves (its rootcard home is here,
+/// or its device list is): that server cannot have one of its devices, and must not use up the account's budgets.
+/// Accounts named by other servers are otherwise only taken at their word for what they send, and their budgets here
+/// are kept per sending server ([`crate::db::Db::relay_usage`]).
+fn refuse_own_account(app: &App, account: &str) -> Result<(), ApiError> {
+    use rootcard_host::store::IdentityStore;
+    let home = app.host.store.load(account).map_err(ApiError::internal)?;
+    let list = app.db.device_list(account).map_err(ApiError::internal)?;
+    if home.is_some() || list.is_some() {
+        return Err(ApiError::new(403, "not_your_account"));
+    }
+    Ok(())
+}
+
 /// The devices of a request from another server: a list of at most `max` device ids.
 fn device_list(r: &Map, max: usize) -> Result<Vec<String>, ApiError> {
     let bad = || ApiError::new(400, "bad_field");
@@ -1016,6 +1030,7 @@ pub async fn post_relay(
             .and_then(Value::as_str)
             .ok_or_else(bad)?;
         check_account(account)?;
+        refuse_own_account(&app, account)?;
         let device = sender
             .get("device")
             .and_then(Value::as_str)
@@ -1084,7 +1099,11 @@ pub async fn post_relay(
                 Some(_) => {
                     app.limits
                         .charge(
-                            &[(format!("relay-to:{account}>{d}"), len, RELAY_PEER_BYTES)],
+                            &[(
+                                format!("relay-to:{account}@{from}>{d}"),
+                                len,
+                                RELAY_PEER_BYTES,
+                            )],
                             60,
                         )
                         .is_ok()
@@ -1093,7 +1112,11 @@ pub async fn post_relay(
                 None if store => {
                     app.limits
                         .charge(
-                            &[(format!("relay-store:{account}"), len, app.cfg.relay_store)],
+                            &[(
+                                format!("relay-store:{account}@{from}"),
+                                len,
+                                app.cfg.relay_store,
+                            )],
                             60,
                         )
                         .is_ok()
@@ -1103,6 +1126,7 @@ pub async fn post_relay(
                                 d,
                                 device,
                                 account,
+                                Some(&from),
                                 data,
                                 expires,
                                 &app.cfg.queue_limits(),
@@ -1168,6 +1192,7 @@ pub async fn post_space(
         let bad = || ApiError::new(400, "bad_field");
         let account = r.get("account").and_then(Value::as_str).ok_or_else(bad)?;
         check_account(account)?;
+        refuse_own_account(&app, account)?;
         let bytes = r
             .get("bytes")
             .and_then(Value::as_int)
@@ -1175,7 +1200,7 @@ pub async fn post_space(
             .ok_or_else(bad)?;
         let devices = device_list(&r, MAX_PRESENCE)?;
         let local: Vec<&str> = devices.iter().map(String::as_str).collect();
-        let ok: Vec<Value> = space_for(&app, account, &local, bytes)?
+        let ok: Vec<Value> = space_for(&app, account, Some(&from), &local, bytes)?
             .into_iter()
             .map(Value::from)
             .collect();
