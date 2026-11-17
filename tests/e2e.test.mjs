@@ -1313,6 +1313,31 @@ test("a refused login: a removed device verifies its removal; a refusal it canno
   await until(async () => frida1.status === "online");
 });
 
+test("a declined sender does not come back with an older request sent again, only with a newer one", async () => {
+  const gretaHandle = await register("Greta", PW);
+  const hansHandle = await register("Hans", PW);
+  const greta = await device(gretaHandle, PW, "greta1");
+  const hans = await device(hansHandle, PW, "hans1");
+  const seen = [];
+  const real = hans.handleMessage.bind(hans);
+  hans.handleMessage = (m) => {
+    if (m.kind === "request") seen.push(m);
+    return real(m);
+  };
+  await greta.request(hansHandle, "Hej");
+  await until(async () => hans.contacts.get(greta.me.account)?.state === "incoming");
+  await hans.setState(greta.me.account, "declined");
+  // The same request again (replayed by a server, or delivered twice): still declined, the note is not shown again.
+  await hans.handleMessage(seen[0]);
+  assert.equal(hans.contacts.get(greta.me.account).state, "declined");
+  assert.equal((await hans.messages(greta.me.account)).length, 0);
+  // A request made after the decline is a new question.
+  await new Promise((r) => setTimeout(r, 1100));
+  await greta.request(hansHandle, "Hej igen");
+  await until(async () => hans.contacts.get(greta.me.account)?.state === "incoming");
+  assert.deepEqual((await hans.messages(greta.me.account)).map((m) => m.text), ["Hej igen"]);
+});
+
 test("homes that are not allowed are refused", async () => {
   await assert.rejects(api.connect("0".repeat(52), "https://evil.example/id"), (e) => e.status === 403 || e.status === 404);
 });

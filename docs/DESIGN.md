@@ -291,8 +291,9 @@ head, and sends a `request` message with an optional short note (at most 500 cha
   shown or stored until the user accepts.
 - **Accept** sends `accept` and opens the conversation on both sides. A `request` from a contact that is already
   accepted means the sender has lost its data (a new device after a paper key, §4.5): it is answered with `accept` and
-  changes nothing else. **Decline** deletes it locally; **Block**
-  remembers the account id and drops everything from it.
+  changes nothing else. **Decline** deletes it locally and remembers when (synced to own devices): only a `request`
+  signed later brings the sender back, not an earlier one delivered again. **Block** remembers the account id and
+  drops everything from it.
 - Blocking, and *Ta bort konversationen* (which deletes the conversation's history on all own devices), ask first in a
   dialog that says what happens; Cancel has the focus. So does removing a device or the paper key (§4.4).
 - Acceptance is a client-side decision. The server cannot tell requests from other messages, which is deliberate: it

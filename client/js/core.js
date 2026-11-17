@@ -657,6 +657,7 @@ export class Messenger extends EventTarget {
     if (!c) return;
     c.state = state;
     c.updated = p.now();
+    if (state === "declined") c.declined = c.updated; // older requests from this sender are replays (handleMessage)
     await this.saveContact(c);
     if (state === "declined") await this.store.deleteConversation(account);
     await this.sendOwn("sync", account, { contact: { account, state } });
@@ -1141,6 +1142,10 @@ export class Messenger extends EventTarget {
         // asks again has lost its data (a new device after a paper key or a reset): it is told that it is accepted.
         if (c?.state === "accepted") return void (await this.send(peer, "accept", {}));
         if (c?.state === "incoming") return;
+        // Declined: only a request made after that brings the sender back, not an earlier one sent again (a replay,
+        // or one the mailbox or an outbox delivers once more). Contacts declined before this was kept fall back to
+        // their last change, which is no earlier.
+        if (c?.state === "declined" && !(m.time > (c.declined ?? c.updated ?? 0))) return;
         const state = (await this.list(peer, true)).state;
         const note = String(m.body?.note ?? "").slice(0, NOTE_MAX);
         if (c?.state === "outgoing") {
@@ -1261,6 +1266,7 @@ export class Messenger extends EventTarget {
         const c = s && this.contacts.get(s.account);
         if (c && ["accepted", "blocked", "declined"].includes(s.state)) {
           c.state = s.state;
+          if (s.state === "declined") c.declined = Math.max(c.declined ?? 0, Number.isSafeInteger(m.time) ? m.time : 0);
           await this.saveContact(c);
           if (s.state === "declined") await this.store.deleteConversation(s.account);
           this.emit("messages", { conv: s.account });
