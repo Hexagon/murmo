@@ -72,7 +72,8 @@ pub struct Config {
     pub demo: bool,
     /// Which other Murmo servers this one exchanges envelopes with (`MURMO_FEDERATION`).
     pub federation: crate::federation::Policy,
-    /// Servers it never exchanges envelopes with (`MURMO_FEDERATION_BLOCK`), as origins.
+    /// Servers it never exchanges envelopes with (`MURMO_FEDERATION_BLOCK`), as host names: each blocks the host on any
+    /// scheme and port, and its subdomains.
     pub federation_block: Vec<String>,
 }
 
