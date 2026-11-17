@@ -1284,14 +1284,18 @@ POSTs to each:
 
 ```
 POST {server}/api/v1/federation/deliver
-{ req: { v: 1, from, to, time, nonce, msgs: [{ device, env, ttl?, notify? }] }, sig }
+{ req: { v: 1, kind: "deliver", from, to, time, nonce, msgs: [{ device, env, ttl?, notify? }] }, sig }
 ```
+
+Every signed request between servers has this shape: `kind` names the endpoint (`deliver`, `relay`, `presence`,
+`space`) and must match the one it is posted to, so a request signed for one cannot be used at another.
 
 `sig` is Ed25519 over `frame("murmo/federation/v1", canonical(req))` by the sending server's **federation key**,
 derived from its host key (`HKDF(host seed, "murmo", "murmo/federation-key/v1")`), so there is nothing new to keep or
 back up. It is published in `/api/v1/info` as `federation.key`. The receiving server:
 - refuses servers outside its policy (§14.4), deliveries not addressed `to` itself, times more than 5 minutes off and
-  nonces it has seen;
+  nonces it has seen. Seen nonces are kept in memory, so a request signed before the server last started is refused
+  too (`stale`): it could be a replay of one it took before the restart. A sender signs again when it retries;
 - fetches the sender's key from `{from}/api/v1/info` (that origin must list itself in `origins`), over https: TLS is
   what ties the key to the name. Keys are cached for an hour and fetched again once when a signature does not verify
   (a new host key), but at most once a minute per origin; a fetch that fails is remembered for a minute as well

@@ -153,6 +153,9 @@ pub struct Federation {
     public_agent: ureq::Agent,
     /// Whether [`flush_outbox`] is running.
     flushing: AtomicBool,
+    /// When this process started. Seen nonces are kept in memory only, so a request signed before then could be a
+    /// replay of one taken before the restart: refused as `stale` (deliveries are signed again when retried).
+    started: i64,
 }
 
 impl Federation {
@@ -170,6 +173,7 @@ impl Federation {
             agent: egress::agent(false),
             public_agent: egress::agent(true),
             flushing: AtomicBool::new(false),
+            started: now(),
         }
     }
 
@@ -551,7 +555,7 @@ async fn verify(
         return Err(bad());
     }
     let t = now();
-    if (t - time).abs() > SKEW {
+    if (t - time).abs() > SKEW || time < app.fed.started {
         return Err(ApiError::new(401, "stale"));
     }
     if !allowed(app, from) {

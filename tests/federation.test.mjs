@@ -291,6 +291,11 @@ test("a server is no relay: only its own accounts send, only its own devices rec
 test("envelopes for a server that is down wait on the sender's server and go when it is back", async () => {
   // Alice's client knows Bob's devices already (a list fetched a moment ago), so it can write while B is down.
   await alice.list(bob.me.account, true);
+  // A request A signed before B stops, taken by B once.
+  const before = await signedBy("a", A, B, "presence", { devices: [bob.me.device] });
+  const toB = (body) => fetch(`${B}/api/v1/federation/presence`, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+  assert.equal((await toB(before)).status, 200);
+  await new Promise((r) => setTimeout(r, 1100)); // B starts in a later second than it was signed
   const b = servers[1];
   const gone = new Promise((r) => b.once("exit", r));
   b.kill();
@@ -308,6 +313,10 @@ test("envelopes for a server that is down wait on the sender's server and go whe
   // B comes back. As soon as it talks to A (Bob writes to Alice), A hands over what waited for it.
   servers[1] = start(B, PORT + 1000, "b", { MURMO_FEDERATION: `${A},${E},${F}`, MURMO_FILE_QUEUE_MB: "1" });
   await up(apiB);
+  // B forgot the nonces it saw, but not that it restarted: the old request is not taken again.
+  const replayed = await toB(before);
+  assert.equal(replayed.status, 401);
+  assert.equal((await replayed.json()).error, "stale");
   await until(() => bob.status === "online", 60000);
   await bob.sendText(alice.me.account, "B är tillbaka");
   await until(async () => (await bob.messages(alice.me.account)).some((m) => m.id === "while-down"), 30000);
