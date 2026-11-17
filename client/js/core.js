@@ -911,21 +911,31 @@ export class Messenger extends EventTarget {
     this.queue = this.queue.then(() => this.handleEnvelope(f)).catch((err) => this.fail(err));
   }
 
+  /**
+   * Only final results are acknowledged: a message that was handled, or one that can never be (undecryptable, not
+   * for this device, forged). One that failed for a reason that may pass (the sender's device list could not be
+   * fetched, the local store refused a write) stays in the mailbox and comes again on the next connection.
+   */
   async handleEnvelope(f) {
     let m;
+    let lookupFailed = false;
     try {
       const plain = await p.open(this.me.device, this.prekeys, f.env);
       const via = isServerOrigin(f.server) ? f.server : null;
-      m = await p.verifyMessage(plain, this.me, (a, d) => this.lookupDeviceVia(a, d, via));
+      m = await p.verifyMessage(plain, this.me, async (a, d) => {
+        try {
+          return await this.lookupDeviceVia(a, d, via);
+        } catch (err) {
+          lookupFailed = true;
+          throw err;
+        }
+      });
     } catch {
-      this.ws.ack([f.id]); // undecryptable or forged: drop it
+      if (!lookupFailed) this.ws.ack([f.id]); // undecryptable or forged: drop it
       return;
     }
-    try {
-      await this.handleMessage(m);
-    } finally {
-      this.ws.ack([f.id]);
-    }
+    await this.handleMessage(m); // a throw leaves the envelope unacknowledged (and is reported)
+    this.ws.ack([f.id]);
   }
 
   async handleMessage(m) {

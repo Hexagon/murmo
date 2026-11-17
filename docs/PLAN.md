@@ -68,7 +68,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [x] **A fork must also stop receiving.** A list that fails `extendsPinned` is still cached (`core.js:400`) and
       incoming messages never check `c.fork`; only sending is blocked. Do not cache a forked list, verify against the
       pinned one, quarantine messages from a forked account (G2, T24)
-- [ ] **Do not ack envelopes on temporary failures.** `handleEnvelope` (`core.js:888-902`) acks when a device-list
+- [x] **Do not ack envelopes on temporary failures.** `handleEnvelope` (`core.js:888-902`) acks when a device-list
       lookup fails on the network, and `finally` acks when `handleMessage` throws (IndexedDB quota). Ack only final
       results (bad decryption or signature, not for this device); leave the rest for the next connection
 - [ ] **SSRF to internal hosts.** `public_origin` (`federation.rs:199`) and `any_home` (`remote.rs:33`) refuse only
