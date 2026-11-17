@@ -252,6 +252,7 @@ export class Messenger extends EventTarget {
       devices: (server, account, fresh = false) => this.ws.remote({ t: "remote-devices", server, account, fresh }),
     };
     this.prekeys = new Map(); // id → { privateKey, publicRaw, time }
+    this.seenPrekeys = new Map(); // `${account} ${device}` → newest verified prekey of another device (never go back)
     this.files = new Map(); // f → transfer state, see fileState()
     this.freed = new Set(); // files removed from this device to free room, not to be taken again unasked (§13.9)
     this.serving = new Set(); // `${f}:${device}` of files streamed now to a contact's device that asked for them
@@ -274,6 +275,7 @@ export class Messenger extends EventTarget {
     for (const s of (await this.store.secret("prekeys")) ?? []) {
       this.prekeys.set(s.id, { privateKey: await p.importPrivate("X25519", s.pkcs8), publicRaw: s.publicRaw, time: s.time, pkcs8: s.pkcs8 });
     }
+    for (const [k, v] of (await this.store.secret("seenPrekeys")) ?? []) this.seenPrekeys.set(k, v);
     for (const c of await this.store.contacts()) this.contacts.set(c.account, c);
     this.ownPinned = (await this.store.secret("ownPinned")) ?? null;
     this.pendingFiles = (await this.store.secret("pendingFiles")) ?? [];
@@ -386,16 +388,17 @@ export class Messenger extends EventTarget {
     const list = r.entries.length
       ? await p.verifyDevices(account, state.instance.account_key, r.entries)
       : { entries: [], present: [], head: "" };
-    const prekeys = new Map();
+    const served = new Map();
     for (const pk of r.prekeys ?? []) {
       const d = list.present.find((x) => x.id === pk.device);
       if (!d) continue;
       try {
-        prekeys.set(d.id, await p.verifyPrekey(account, d, pk));
+        served.set(d.id, await p.verifyPrekey(account, d, pk));
       } catch {
-        // a prekey that does not verify is ignored
+        // a prekey that does not verify, or is too old (stale_prekey), is ignored
       }
     }
+    const prekeys = await this.freshPrekeys(account, list, served);
     // What the other server takes from accounts elsewhere (its relay and file queue limits), for files to it.
     const limits = server && r.limits && typeof r.limits === "object" ? r.limits : null;
     // The own list is checked before it is cached: one that is refused is never used, not even for a minute.
@@ -405,6 +408,43 @@ export class Messenger extends EventTarget {
     // encrypted against it; a list cached before the fork showed stays until it expires.
     if (account === this.me.account || (await this.checkPinned(account, list))) this.lists.set(account, entry);
     return entry;
+  }
+
+  /**
+   * The prekeys to use for an account's present devices: what the server served, unless a newer one was seen before
+   * (a server must not go back to an older prekey, DESIGN.md §5.2). The newest of each is remembered; devices no longer
+   * on the list are forgotten.
+   */
+  async freshPrekeys(account, list, served) {
+    const prekeys = new Map();
+    let changed = false;
+    for (const k of this.seenPrekeys.keys()) {
+      const [a, d] = k.split(" ");
+      if (a === account && !list.present.some((x) => x.id === d)) {
+        this.seenPrekeys.delete(k);
+        changed = true;
+      }
+    }
+    for (const d of list.present) {
+      const k = `${account} ${d.id}`;
+      let seen = this.seenPrekeys.get(k);
+      if (seen && seen !== served.get(d.id)) {
+        try {
+          seen = await p.verifyPrekey(account, d, seen); // it ages too: a device away too long gets nothing
+        } catch {
+          seen = undefined;
+        }
+      }
+      const pk = p.newerPrekey(served.get(d.id), seen);
+      if (pk) prekeys.set(d.id, pk);
+      if (pk && pk !== this.seenPrekeys.get(k)) {
+        this.seenPrekeys.set(k, pk);
+        changed = true;
+      }
+    }
+    // Kept for the next start too; a store that is closed (a stopped messenger) only loses that.
+    if (changed) await this.store?.setSecret("seenPrekeys", [...this.seenPrekeys]).catch(() => {});
+    return prekeys;
   }
 
   /**

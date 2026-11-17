@@ -50,7 +50,7 @@ service.
 | T10 | Spam and harassment | X2 | Message requests; one pending request per sender; block list; rate limits; mailbox quotas | A flood of new accounts, each sending one request (rate limits per address) |
 | T11 | Enumerate users | X2 | No search; lookup needs the full handle; lookups rate limited per address | Tag brute force of a known username at the rate limit (rootcard AR7) |
 | T12 | Offline reading of a stolen browser profile | X5 | All local data, private keys included, encrypted under a key derived from a secret in the rootcard vault; the derived key lives in memory only | "Remember me" stores the derived key on the device (user's choice); a weak password lets someone with the profile *and* the vault guess |
-| T13 | Decrypt recorded traffic later with a stolen device | X3+X5 | Prekeys rotated weekly, private keys deleted after 21 days | Messages from the last three weeks; per-message forward secrecy in phase 2 |
+| T13 | Decrypt recorded traffic later with a stolen device | X3+X5 | Prekeys rotated weekly, private keys deleted after 21 days; senders refuse prekeys older than 28 days or older than one seen before for the device, so a server cannot keep serving an old prekey | Messages from the last three weeks; per-message forward secrecy in phase 2 |
 | T14 | Recovery-card thief | X7 | Out of Murmo's hands: the thief can make a new instance, and a new device list | Contacts see a reset; rootcard AR3 |
 | T15 | Malformed or huge input to the server | X2 | Size limits before parsing, rootcard's strict JSON reader, entry and device limits, per-connection limits | – |
 | T16 | Unauthenticated mailbox access | X2 | WebSocket requires a fresh challenge signed by a device present in the list | – |
