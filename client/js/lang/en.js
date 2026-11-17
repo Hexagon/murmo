@@ -5,6 +5,7 @@ export default {
   "err.unknown_account": "No identity with that identifier exists here.",
   "err.ambiguous_handle": "The identifier is ambiguous. Use the longer tag.",
   "err.not_home": "The identity is not on this server.",
+  "err.wrong_identity": "The server answered with another identity than the one asked for.",
   "err.self": "That is your own identifier.",
   "err.no_devices": "The recipient has no connected device yet.",
   "err.weak_password": "The password must have at least 12 characters and must not be the username.",

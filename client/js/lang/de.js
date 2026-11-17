@@ -5,6 +5,7 @@ export default {
   "err.unknown_account": "Hier gibt es keine Identität mit dieser Kennung.",
   "err.ambiguous_handle": "Die Kennung ist mehrdeutig. Verwende den längeren Tag.",
   "err.not_home": "Die Identität liegt nicht auf diesem Server.",
+  "err.wrong_identity": "Der Server hat mit einer anderen Identität geantwortet als der angefragten.",
   "err.self": "Das ist deine eigene Kennung.",
   "err.no_devices": "Der Empfänger hat noch kein verbundenes Gerät.",
   "err.weak_password": "Das Passwort muss mindestens 12 Zeichen haben und darf nicht der Benutzername sein.",

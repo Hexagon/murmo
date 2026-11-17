@@ -1338,6 +1338,25 @@ test("a declined sender does not come back with an older request sent again, onl
   assert.deepEqual((await hans.messages(greta.me.account)).map((m) => m.text), ["Hej igen"]);
 });
 
+test("a lookup must answer for the identifier asked for", async () => {
+  const ivarHandle = await register("Ivar", PW);
+  const juneHandle = await register("June", PW);
+  const ivar = await api.lookup(ivarHandle);
+  // A server that answers for Ivar with June's (validly signed) identity: refused.
+  const lying = Object.assign(Object.create(api), { lookup: async () => api.lookup(juneHandle) });
+  await assert.rejects(id.lookup(lying, info.realms, ivarHandle), (e) => e.code === "wrong_identity");
+  // Another Murmo server that does the same: refused too.
+  const remote = {
+    lookup: async () => api.lookup(juneHandle),
+    devices: async (_, account) => ({ events: (await api.rcAt(api.base, "GET", `/id/${account}/log`)).events }),
+  };
+  const local = Object.assign(Object.create(api), { lookup: async () => Promise.reject(new ApiError(404, "unknown_account")) });
+  await assert.rejects(id.lookup(local, info.realms, `${ivarHandle}@other.example`, remote), (e) => e.code === "wrong_identity");
+  // The honest answer, also with the username in other letter case.
+  assert.equal((await id.lookup(api, info.realms, ivarHandle)).state.account, ivar.account);
+  assert.equal((await id.lookup(api, info.realms, ivarHandle.toLowerCase())).state.account, ivar.account);
+});
+
 test("homes that are not allowed are refused", async () => {
   await assert.rejects(api.connect("0".repeat(52), "https://evil.example/id"), (e) => e.status === 403 || e.status === 404);
 });

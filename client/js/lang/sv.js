@@ -5,6 +5,7 @@ export default {
   "err.unknown_account": "Ingen identitet med den identifieraren finns här.",
   "err.ambiguous_handle": "Identifieraren är tvetydig. Använd den längre taggen.",
   "err.not_home": "Identiteten finns inte på den här servern.",
+  "err.wrong_identity": "Servern svarade med en annan identitet än den som efterfrågades.",
   "err.self": "Det är din egen identifierare.",
   "err.no_devices": "Mottagaren har ingen ansluten enhet ännu.",
   "err.weak_password": "Lösenordet måste ha minst 12 tecken och får inte vara användarnamnet.",

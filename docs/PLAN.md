@@ -146,7 +146,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       `ws.rs:541-545`); per-server budget on the sending side, dedupe `fresh`
 - [ ] Presence is open to any federated server at 6000 req/min (`federation.rs:952-973`); limit to contacts or lower
 - [x] A declined contact comes back with a replayed `request` (`core.js:916-925`); require a newer `time`
-- [ ] Check that a remote lookup answers for the requested `Name#TAG` (`identity.js:149-152`)
+- [x] Check that a remote lookup answers for the requested `Name#TAG` (`identity.js:149-152`); every lookup does
 - [ ] Log push failures and `fork` in `refresh_if_remote` (`push.rs:180-235`, `remote.rs:140-144`); scheduled pushes
       are lost on restart
 - [x] Poisoned mutexes disable the database and hub for good (`db.rs:180-184`, `app.rs:171`): recover with

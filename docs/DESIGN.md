@@ -282,8 +282,9 @@ prekey, which it does as soon as it connects.
 A conversation starts only from an exact identifier `Name#TAG` (or `Name#TAG@host` to pick the home). The client asks
 the Murmo server (`GET /api/v1/lookup?handle=…`), which answers only for identities it knows: its own and identities
 from other homes that have connected (§3.1). The full handle is required and lookups are rate limited. The client
-then fetches and verifies the identity's log from its home, verifies the device list, pins the account id and the
-head, and sends a `request` message with an optional short note (at most 500 characters).
+then fetches and verifies the identity's log from its home, checks that it is the identity asked for (the log's
+username and account id match `Name#TAG`, whichever server answered; `wrong_identity` otherwise), verifies the device
+list, pins the account id and the head, and sends a `request` message with an optional short note (at most 500 characters).
 
 ### 6.2 Receiving
 
