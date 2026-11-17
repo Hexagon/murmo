@@ -18,6 +18,7 @@
 use crate::api::check_account;
 use crate::app::{App, Push, now, random, text};
 use crate::db::ChunkData;
+use crate::egress;
 use crate::error::{ApiError, json};
 use crate::remote::origin_of;
 use crate::ws::{
@@ -32,7 +33,6 @@ use rootcard::encoding::{base64url_decode, base64url_decode_fixed, base64url_enc
 use rootcard::json::{Map, Value, canonical, parse_limited};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// Domain separation for a delivery's signature.
@@ -108,8 +108,10 @@ pub struct Federation {
     /// Where devices of other servers are, for each local account that writes to them (`account device` → origin,
     /// last used): learned from its `send` and `remote-devices`, used for its file chunks and presence questions.
     routes: Mutex<HashMap<String, (String, i64)>>,
-    /// Connections to other servers, kept open between requests.
+    /// Connections to other servers, kept open between requests: to servers on the operator's allowlist, and (open
+    /// federation) to public addresses only (`egress`).
     agent: ureq::Agent,
+    public_agent: ureq::Agent,
 }
 
 impl Federation {
@@ -124,12 +126,8 @@ impl Federation {
             nonces: Mutex::default(),
             lists: Mutex::default(),
             routes: Mutex::default(),
-            agent: ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(10)))
-                .max_redirects(0)
-                .http_status_as_error(false)
-                .build()
-                .into(),
+            agent: egress::agent(false),
+            public_agent: egress::agent(true),
         }
     }
 
@@ -195,18 +193,14 @@ fn plain_origin(o: &str) -> bool {
         })
 }
 
-/// A public https origin with a domain name: never an IP literal or a name without a dot.
+/// A public https origin with a domain name: never an IP literal in any spelling, a name without a dot or a local
+/// name (`egress::public_host`). Its addresses are checked again when it is connected to.
 fn public_origin(o: &str) -> bool {
     let Some(host) = o.strip_prefix("https://") else {
         return false;
     };
     let name = host.split(':').next().unwrap_or_default();
-    plain_origin(o)
-        && name.contains('.')
-        && !name.ends_with(".local")
-        && !name.ends_with(".internal")
-        && !name.ends_with(".localhost")
-        && name.parse::<std::net::Ipv4Addr>().is_err()
+    plain_origin(o) && egress::public_host(name)
 }
 
 /// Whether this server exchanges envelopes with `origin`.
@@ -241,8 +235,16 @@ fn answer(
 }
 
 /// GET a JSON document from another server (blocking task).
+/// The agent for a request to another server: open federation reaches public addresses only.
+fn agent(app: &App) -> ureq::Agent {
+    match app.cfg.federation {
+        Policy::Open => app.fed.public_agent.clone(),
+        _ => app.fed.agent.clone(),
+    }
+}
+
 async fn get(app: &App, url: String) -> Result<(u16, Value), ApiError> {
-    let agent = app.fed.agent.clone();
+    let agent = agent(app);
     tokio::task::spawn_blocking(move || answer(agent.get(&url).call()))
         .await
         .map_err(ApiError::internal)?
@@ -250,7 +252,7 @@ async fn get(app: &App, url: String) -> Result<(u16, Value), ApiError> {
 
 /// POST a JSON body to another server (blocking task).
 async fn post(app: &App, url: String, body: Vec<u8>) -> Result<(u16, Value), ApiError> {
-    let agent = app.fed.agent.clone();
+    let agent = agent(app);
     tokio::task::spawn_blocking(move || {
         answer(
             agent
@@ -1031,6 +1033,17 @@ mod tests {
         assert!(!public_origin("https://user@murmo.example"));
         assert!(!public_origin("https://Murmo.example"));
         assert!(!public_origin("https://printer.local"));
+        // Spellings that resolvers read as internal addresses or as localhost (T23, T40).
+        for o in [
+            "https://127.1",
+            "https://10.1",
+            "https://0x7f.0.0.1",
+            "https://localhost.",
+            "https://127.0.0.1:8443",
+            "https://db.internal",
+        ] {
+            assert!(!public_origin(o), "{o}");
+        }
         assert!(plain_origin("http://127.0.0.1:8080"));
     }
 
