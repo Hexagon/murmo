@@ -228,6 +228,12 @@ This gives **forward secrecy with a window of about three weeks**: once a prekey
 ciphertext to it cannot be decrypted even with the device. Per-message forward secrecy and post-compromise security
 come with the Double Ratchet in phase 2 (PLAN.md).
 
+A sender checks a prekey's `time` as well as its signature: it uses no prekey older than rotation + keep (28 days),
+whose private key the device may have deleted or a server may have obtained (T13), and none older than the newest one
+it has seen for that device (remembered, encrypted, on the sender's device). A server therefore cannot go back to an
+old prekey; a device that has been away for more than four weeks gets no envelopes until it has published a new
+prekey, which it does as soon as it connects.
+
 ### 5.3 Plaintext
 
 ```json

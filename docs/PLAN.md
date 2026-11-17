@@ -101,7 +101,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       ids named by clients and remote answers up to 4 MiB. Cap per account, cap prekeys, LRU
 - [ ] **Reset leaves old devices connected.** Stale devices are dropped but only `removed` are disconnected
       (`api.rs:476-490`)
-- [ ] **Prekey freshness.** `verifyPrekey` (`protocol.js:254`) ignores `time`; a server can serve an old prekey whose
+- [x] **Prekey freshness.** `verifyPrekey` (`protocol.js:254`) ignores `time`; a server can serve an old prekey whose
       private key it obtained. Refuse prekeys older than rotation + keep, or older than one already seen (T13, G8)
 - [ ] **Client HTTP without timeout.** `api.js:25`; one hanging `list()` stalls the serial envelope queue. Add
       `AbortSignal.timeout` and map network errors to a readable `ApiError`
