@@ -116,7 +116,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       (`app.js:3618`, `core.js:557,1039`); block and device removal (`app.js:3800`) too
 - [ ] **Sidebar header overflows** the conversation title on desktop (needs about 352 px of 280 px, `style.css:191`)
 - [ ] **Form fields without accessible names**: labels are siblings without `for` (`app.js:670-673, 715-717, 949, 3858`)
-- [ ] **Show storage and background errors.** The messenger's `error` events only reach `console.warn`
+- [x] **Show storage and background errors.** The messenger's `error` events only reach `console.warn`
       (`app.js:1047`); quota exhaustion is silent
 
 ### P2: documentation and privacy statements

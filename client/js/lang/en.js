@@ -48,6 +48,8 @@ export default {
   "err.no_message": "The message no longer exists.",
   "err.too_late": "The message can no longer be edited or deleted for everyone (that is possible for 24 hours). You can delete it for yourself.",
   "err.unknown": "Something went wrong ({code}).",
+  "err.background": "Something went wrong in the background: {error}",
+  "err.storageFullBg": "This device's storage is full: new messages and files cannot be saved here. Free space in Files, or delete old conversations.",
   "err.ephemeral_files": "With the timer on, only pictures can be sent (PNG, JPEG, GIF, WebP). Turn the timer off to send other files.",
   "err.ephemeral_gifs": "GIFs from your collection cannot be sent with the timer on. Turn the timer off first.",
   "err.bad_ttl": "Invalid time for a disappearing message.",

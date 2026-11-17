@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Api, ApiError } from "../client/js/api.js";
 import * as id from "../client/js/identity.js";
-import { EPHEMERAL_TTLS, EPHEMERAL_WAIT, Messenger, Store, setupDevice } from "../client/js/core.js";
+import { EPHEMERAL_TTLS, EPHEMERAL_WAIT, isStorageFull, Messenger, Store, setupDevice } from "../client/js/core.js";
 import { PART_BATCH } from "../client/js/store.js";
 import * as p from "../client/js/protocol.js";
 
@@ -180,6 +180,25 @@ test("message request, acceptance and text", async () => {
   await until(async () => (await alice.messages(bob.me.account)).every((m) => m.dir !== "out" || m.delivered > 0));
   assert.equal((await alice.messages(bob.me.account)).filter((m) => m.dir === "out").length, 2);
   assert.equal(await alice.safetyCode(bob.me.account), await bob.safetyCode(alice.me.account));
+});
+
+test("a message that cannot be stored (a full disk) is told to the interface, not only logged", async () => {
+  // Sent with `deliver`, so Alice's side records nothing (later tests count her messages).
+  const put = bob.store.putMessage;
+  bob.store.putMessage = async () => {
+    throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+  };
+  try {
+    const failed = waitFor(bob, "error");
+    await alice.deliver(await alice.peerTargets(bob.me.account), "text", bob.me.account, { text: "får inte plats" });
+    const detail = await failed;
+    assert.equal(detail.name, "QuotaExceededError");
+    assert.ok(isStorageFull(detail));
+  } finally {
+    bob.store.putMessage = put;
+  }
+  assert.ok(!isStorageFull({ message: "offline", name: "Error", code: null }));
+  assert.ok(isStorageFull(new ApiError(507, "storage_full")));
 });
 
 test("a password alone cannot add a device", async () => {

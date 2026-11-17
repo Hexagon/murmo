@@ -48,6 +48,8 @@ export default {
   "err.no_message": "Die Nachricht gibt es nicht mehr.",
   "err.too_late": "Die Nachricht kann nicht mehr für alle geändert oder gelöscht werden (das geht 24 Stunden lang). Du kannst sie für dich löschen.",
   "err.unknown": "Etwas ist schiefgegangen ({code}).",
+  "err.background": "Im Hintergrund ist etwas schiefgegangen: {error}",
+  "err.storageFullBg": "Der Speicher dieses Geräts ist voll: Neue Nachrichten und Dateien können hier nicht gespeichert werden. Schaffe Platz unter Dateien oder lösche alte Unterhaltungen.",
   "err.ephemeral_files": "Mit eingeschaltetem Timer können nur Bilder gesendet werden (PNG, JPEG, GIF, WebP). Schalte den Timer aus, um andere Dateien zu senden.",
   "err.ephemeral_gifs": "GIFs aus deiner Sammlung können nicht mit eingeschaltetem Timer gesendet werden. Schalte zuerst den Timer aus.",
   "err.bad_ttl": "Ungültige Zeit für eine verschwindende Nachricht.",

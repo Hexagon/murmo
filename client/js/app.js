@@ -3,7 +3,7 @@
 import * as p from "./protocol.js";
 import { Api, ApiError } from "./api.js";
 import * as id from "./identity.js";
-import { displayName, EPHEMERAL_TTLS, GIF_MAX_BYTES, GIF_MAX_COUNT, Messenger, NAME_MAX, Store, setupDevice, validRetention } from "./core.js";
+import { displayName, EPHEMERAL_TTLS, GIF_MAX_BYTES, GIF_MAX_COUNT, isStorageFull, Messenger, NAME_MAX, Store, setupDevice, validRetention } from "./core.js";
 import * as emoji from "./emoji.js";
 import * as code from "./code.js";
 import * as giphy from "./giphy.js";
@@ -204,6 +204,34 @@ function addressHint() {
 function say(err) {
   const code = err instanceof ApiError ? err.code : (err?.code ?? err?.message ?? String(err));
   return has(`err.${code}`) ? tr(`err.${code}`, { max: GIF_MAX_COUNT }) : tr("err.unknown", { code });
+}
+
+// Failures in the background (an incoming message that could not be stored, a timer, a file part) have no button to
+// answer: a full disk is a lasting alert with a way to free space, anything else a toast, the same one at most once a
+// minute. A lost connection is not repeated here; the sidebar (and the connection's own signs) say it.
+const BG_REPEAT = 60_000;
+const bgShown = new Map(); // text → when it was last shown
+let fullShown = 0;
+function backgroundError(detail) {
+  if (isStorageFull(detail)) return showStorageFull();
+  if (["offline", "disconnected", "timeout"].includes(detail.code ?? detail.message)) return;
+  const text = tr("err.background", { error: say(detail) });
+  if (Date.now() - (bgShown.get(text) ?? 0) < BG_REPEAT) return;
+  bgShown.set(text, Date.now());
+  toast(text);
+}
+
+function showStorageFull() {
+  if (document.querySelector(".storage-alert") || Date.now() - fullShown < 10 * BG_REPEAT) return;
+  fullShown = Date.now();
+  const bar = h(
+    "div",
+    { class: "storage-alert", role: "alert" },
+    h("span", { text: tr("err.storageFullBg") }),
+    messenger ? h("button", { type: "button", class: "btn small", text: tr("files.title"), onclick: () => { bar.remove(); openFiles(); } }) : null,
+    h("button", { type: "button", class: "icon-btn", "aria-label": tr("common.close"), title: tr("common.close"), onclick: () => bar.remove() }, icon("close")),
+  );
+  document.body.append(bar);
 }
 
 function toast(text) {
@@ -1044,7 +1072,10 @@ async function enter({ store, account, handle, home }) {
   });
   messenger.addEventListener("incoming", (e) => onIncoming(e.detail));
   messenger.addEventListener("link", (e) => showLinkRequest(e.detail));
-  messenger.addEventListener("error", (e) => console.warn(e.detail.message));
+  messenger.addEventListener("error", (e) => {
+    console.warn(e.detail.message);
+    backgroundError(e.detail);
+  });
   // Murmo was opened again in another tab or window on this device, which has the connection now: this page says so
   // and offers to take it back (a reload: what the other page stored is read afresh).
   messenger.addEventListener("replaced", () => showReplaced());

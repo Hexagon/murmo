@@ -571,6 +571,12 @@ the mailbox or in a history hand-over) is not stored. The setting is synced to t
 `{ contact: { account, retention } }`) and travels with the contact records in a history hand-over. It applies only
 to this account's devices: the other party decides about their copies, and nothing is sent to them.
 
+**A full disk.** When the browser refuses to store more (`QuotaExceededError`), what was being done in the background
+(an incoming message or file part, a timer, a file asked for again) cannot finish. The interface does not leave that
+in the console: it shows a lasting alert that this device's storage is full, with a way to the files view to free
+space (§9.4); it comes back at most every ten minutes. Other background failures are shown as a short notice, the
+same one at most once a minute; a lost connection is not repeated there.
+
 ## 9. Files
 
 Files go live between connected devices. For devices that are not connected the server may keep the encrypted
