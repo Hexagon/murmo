@@ -71,7 +71,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [ ] **Do not ack envelopes on temporary failures.** `handleEnvelope` (`core.js:888-902`) acks when a device-list
       lookup fails on the network, and `finally` acks when `handleMessage` throws (IndexedDB quota). Ack only final
       results (bad decryption or signature, not for this device); leave the rest for the next connection
-- [ ] **SSRF to internal hosts.** `public_origin` (`federation.rs:199`) and `any_home` (`remote.rs:33`) refuse only
+- [x] **SSRF to internal hosts.** `public_origin` (`federation.rs:199`) and `any_home` (`remote.rs:33`) refuse only
       what `Ipv4Addr` parses; `127.1`, `10.1`, `0x7f.0.0.1`, `localhost.` pass and resolve internally, and
       `/federation/deliver` fetches `{from}/api/v1/info` before any signature check. Resolve and refuse private,
       loopback and link-local addresses (or pin the checked IP); require a host name with a letter (T23, T40)

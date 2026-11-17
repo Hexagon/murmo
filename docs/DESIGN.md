@@ -72,7 +72,11 @@ domain the user types, which the client resolves with the host pointer `/.well-k
   refreshes the log every few minutes when the identity is used, never moves back to an older version and refuses
   forks ([VER-4]).
 - The server contacts **only allowlisted homes** (origins in `MURMO_REMOTE_HOMES`; `*` allows any public https host
-  that is not an IP literal). Clients therefore cannot make the server fetch arbitrary addresses.
+  with a public host name: dotted, its last label alphabetic, so never an IP literal in any spelling such as `127.1` or
+  `0x7f.0.0.1`, nor `localhost.` or a local name). Such a home is resolved by the server itself at connection time
+  and reached only at public addresses (not loopback, private, link-local, CGNAT, multicast or reserved; the
+  connection goes to the addresses that were checked). Clients therefore cannot make the server fetch arbitrary
+  addresses. Origins the operator lists are reached as configured, also on internal addresses.
 - Clients never rely on the server's copy: they fetch every contact's log from the contact's own home and verify it.
   The page's CSP allows connections to this server and to the allowed homes only.
 - Proofs instead of sessions: a link request carries a rootcard **proof** by the account key (SPEC §14) for a
@@ -1244,8 +1248,9 @@ disappearing messages and history between own devices (which are always on one s
 
 ### 14.4 Policy
 
-`MURMO_FEDERATION` is `open` (the default: any public https origin with a domain name, never an IP literal, `localhost`
-or `.local`/`.internal`), `off`, or a list of origins; `MURMO_FEDERATION_BLOCK` lists origins never to talk to. The
+`MURMO_FEDERATION` is `open` (the default: any https origin with a public host name, never an IP literal in any
+spelling, `localhost` or a local name such as `.local`/`.internal`, and connected to only at public addresses, checked
+when it is resolved as for `*` homes in §3.1), `off`, or a list of origins (reached as configured); `MURMO_FEDERATION_BLOCK` lists origins never to talk to. The
 policy decides both what the server fetches for its clients and what it accepts. A server with `off` publishes no
 federation key, and other servers then refuse it as `federation_refused` rather than reporting an unknown account.
 
