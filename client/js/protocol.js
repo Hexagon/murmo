@@ -26,6 +26,14 @@ export const MAX_ENTRIES = 32;
 export const MAX_DEVICES = 8;
 export const PREKEY_ROTATE = 7 * 24 * 3600;
 export const PREKEY_KEEP = 21 * 24 * 3600;
+/**
+ * The oldest prekey a sender still uses (seconds): a device publishes a new one at least every PREKEY_ROTATE while it is
+ * online and deletes a replaced one's private key PREKEY_KEEP later. An older prekey may be one whose private key is
+ * gone from the device, or one a server keeps serving because it got hold of that key (T13, G8).
+ */
+export const PREKEY_MAX_AGE = PREKEY_ROTATE + PREKEY_KEEP;
+/** How far in the future a prekey's time may be (clocks differ). */
+const PREKEY_SKEW = 24 * 3600;
 export const CHUNK = 48 * 1024;
 /**
  * The largest file. Files are read, stored and sent part by part, so this is not bounded by memory; the server's file
@@ -251,11 +259,28 @@ export async function newPrekey(account, device) {
   return { value, secret: { id, privateKey: kp.privateKey, pkcs8: kp.pkcs8, time: value.time } };
 }
 
-export async function verifyPrekey(account, device, p) {
+/**
+ * Verify a device's signed prekey, and that it is fresh: no older than PREKEY_MAX_AGE at `at` (seconds), when it is
+ * refused as `stale_prekey`, and not from the future.
+ */
+export async function verifyPrekey(account, device, p, at = now()) {
   if (p.v !== 1 || p.account !== account || p.device !== device.id || typeof p.id !== "string") throw new Error("bad_prekey");
+  if (!Number.isSafeInteger(p.time) || p.time > at + PREKEY_SKEW) throw new Error("bad_prekey");
   rc.parseKey(p.key, "x25519");
   await verifyObject(LABELS.prekey, p, device.keyRaw);
+  if (at - p.time > PREKEY_MAX_AGE) throw new Error("stale_prekey");
   return p;
+}
+
+/**
+ * Of a prekey the server serves now and the newest one seen before for the same device (both verified, or absent),
+ * the one to use: never an older one than seen before, so that a server cannot go back to a prekey it has the private
+ * key of. Returns undefined when there is none.
+ */
+export function newerPrekey(served, seen) {
+  if (!seen) return served;
+  if (!served) return seen;
+  return served.time >= seen.time ? served : seen;
 }
 
 // ── WebSocket authentication ────────────────────────────────────────────────────────────────────────────────────

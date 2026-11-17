@@ -478,6 +478,10 @@ pub async fn post_devices(
                 .drop_devices(&cur.stale)
                 .map_err(ApiError::internal)?;
         }
+        // Devices of the earlier instance that are still connected lose their connection, as removed ones do.
+        for d in cur.stale.iter().filter(|d| list.device(d).is_none()) {
+            app.hub.disconnect(d);
+        }
         for p in &prekeys {
             app.db
                 .put_prekey(&account, &p.device, &p.value)

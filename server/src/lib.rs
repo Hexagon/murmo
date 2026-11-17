@@ -20,7 +20,7 @@
 //! | `MURMO_GIPHY_RATING` | `pg-13` | GIPHY content rating for searches (`g`, `pg`, `pg-13`, `r`) |
 //! | `MURMO_BETA` | `1` | mark the service as an open beta in the client (`0`: no mark) |
 //! | `MURMO_FEDERATION` | `open` | other Murmo servers to exchange messages with: `open` (any public https server), `off`, or a comma-separated list of origins |
-//! | `MURMO_FEDERATION_BLOCK` | empty | servers never to exchange messages with (comma-separated origins) |
+//! | `MURMO_FEDERATION_BLOCK` | empty | servers never to exchange messages with (comma-separated origins or host names; each also blocks its other ports and subdomains) |
 //! | `MURMO_DEMO` | `0` | mark this server as a demo whose data may be wiped at any time (`1`), as murmo.org |
 //!
 //! Each variable is also read under its old name, `MESG_…`, when the `MURMO_…` name is not set. The default files
@@ -32,6 +32,7 @@ pub mod api;
 pub mod app;
 pub mod db;
 pub mod devices;
+pub mod egress;
 pub mod error;
 pub mod federation;
 pub mod push;
@@ -200,8 +201,8 @@ fn config() -> Result<Config, String> {
         demo: env("MURMO_DEMO", "0") == "1",
         federation: federation::Policy::parse(&env("MURMO_FEDERATION", "open")),
         federation_block: list(&env("MURMO_FEDERATION_BLOCK", ""))
-            .into_iter()
-            .map(|o| o.trim_end_matches('/').to_ascii_lowercase())
+            .iter()
+            .filter_map(|o| federation::block_entry(o))
             .collect(),
     })
 }
@@ -422,6 +423,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if let Err(e) = sweeper.limits.save() {
                 eprintln!("rate limits: {e}");
             }
+        }
+    });
+
+    // Envelopes for servers that could not be reached are tried again (federation).
+    let retrier = app.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            tick.tick().await;
+            federation::flush_outbox(&retrier).await;
         }
     });
 

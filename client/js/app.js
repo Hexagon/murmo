@@ -443,7 +443,7 @@ function showHelp() {
 // ── terms, privacy and the open beta ────────────────────────────────────────────────────────────────────────────
 
 /** The day the terms below last changed (Unix seconds), shown with them. */
-const TERMS_DATE = Date.UTC(2026, 10, 16) / 1000;
+const TERMS_DATE = Date.UTC(2026, 10, 17) / 1000;
 
 /** The sections of the terms, as HELP; the demo section only on a demo server (`MURMO_DEMO`). */
 const termSections = () => [
@@ -1275,7 +1275,7 @@ function renderShell() {
       h(
         "div",
         { class: "side-top" },
-        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo", betaMark()),
+        h("div", { class: "logo" }, h("span", { class: "logo-name" }, h("img", { src: "icon.svg", alt: "" }), "Murmo"), betaMark()),
         h(
           "div",
           { class: "side-actions" },
@@ -1731,7 +1731,8 @@ function composer(c) {
       if (t) await messenger.sendEphemeral(c.account, text, t, id);
       else await messenger.sendText(c.account, text, id);
     } catch (x) {
-      if (!ta.value.trim()) {
+      // Some devices got it already: it stays in the thread (marked unsent) instead of coming back to be sent again.
+      if (!x?.partial && !ta.value.trim()) {
         ta.value = text;
         grow();
       }
@@ -2431,7 +2432,7 @@ function messageSig(m) {
   return JSON.stringify([
     m.kind, m.text, m.time, m.dir, m.delivered, m.reactions ?? null, m.edited ?? 0, m.held ? (m.firing ? 2 : 1) + (messenger.status === "online" ? 0 : 2) : 0, m.ttl ?? null, m.expires ?? null,
     f ? [f.f, f.have, f.missed ?? null, f.peers ?? null, f.mime === "image/gif" && gifHashes.has(f.sha256)] : null,
-    messenger.contacts.get(m.conv)?.state, sending.has(m.id),
+    messenger.contacts.get(m.conv)?.state, sending.has(m.id), !!m.outbox, m.failed?.length ?? 0,
   ]);
 }
 
@@ -2596,6 +2597,23 @@ function message(m) {
         onclick: async () => {
           try {
             toast(tr((await messenger.flushFiles()) ? "msg.sentToast" : "msg.peerAway"));
+          } catch (x) {
+            toast(say(x));
+          }
+        },
+      }),
+    );
+  }
+  else if (m.dir === "out" && m.outbox) meta.append(h("span", { class: "pending", text: tr("msg.waitingToSend") }));
+  else if (m.dir === "out" && m.failed?.length && !m.delivered) {
+    meta.append(
+      h("span", { class: "pending", text: tr("msg.notDelivered") }),
+      h("button", {
+        class: "link",
+        text: tr("msg.sendAgain"),
+        onclick: async () => {
+          try {
+            toast(tr((await messenger.resend(m.id)) ? "msg.sentToast" : "msg.stillNotDelivered"));
           } catch (x) {
             toast(say(x));
           }
