@@ -17,7 +17,7 @@
 
 use crate::api::check_account;
 use crate::app::{App, Push, now, random, text};
-use crate::db::ChunkData;
+use crate::db::{ChunkData, OutboxItem};
 use crate::error::{ApiError, json};
 use crate::remote::origin_of;
 use crate::ws::{
@@ -31,6 +31,7 @@ use rootcard::crypto::{ed25519_public, ed25519_sign, ed25519_verify, frame, hkdf
 use rootcard::encoding::{base64url_decode, base64url_decode_fixed, base64url_encode};
 use rootcard::json::{Map, Value, canonical, parse_limited};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -110,6 +111,8 @@ pub struct Federation {
     routes: Mutex<HashMap<String, (String, i64)>>,
     /// Connections to other servers, kept open between requests.
     agent: ureq::Agent,
+    /// Whether [`flush_outbox`] is running.
+    flushing: AtomicBool,
 }
 
 impl Federation {
@@ -130,6 +133,7 @@ impl Federation {
                 .http_status_as_error(false)
                 .build()
                 .into(),
+            flushing: AtomicBool::new(false),
         }
     }
 
@@ -401,6 +405,11 @@ async fn verify(
     if !app.fed.fresh(from, nonce, t) {
         return Err(ApiError::new(409, "replay"));
     }
+    // It is up: what waits for it here goes now rather than after its backoff.
+    if app.db.outbox_wake(from, t).unwrap_or(0) > 0 {
+        let app = app.clone();
+        tokio::spawn(async move { flush_outbox(&app).await });
+    }
     Ok((from.to_string(), r.clone()))
 }
 
@@ -408,20 +417,76 @@ async fn verify(
 pub struct Outgoing {
     pub device: String,
     pub env: String,
-    pub ttl: Option<i64>,
+    /// When it is given up: the mailbox lifetime from now, or its shorter `ttl`.
+    pub expires: i64,
     pub notify: bool,
 }
 
-/// Deliver envelopes to devices on `server`; returns the devices they could not be delivered to.
-pub async fn deliver(app: &Arc<App>, server: &str, msgs: Vec<Outgoing>) -> Vec<String> {
-    let devices: Vec<String> = msgs.iter().map(|m| m.device.clone()).collect();
-    let items: Vec<Value> = msgs
+/// What became of envelopes for another server: the devices they could not be delivered to, and those they are kept
+/// for because the server could not be reached now (tried again later, see [`flush_outbox`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Delivery {
+    pub failed: Vec<String>,
+    pub queued: Vec<String>,
+}
+
+/// Most envelopes kept for one server that cannot be reached.
+pub const MAX_OUTBOX: i64 = 20_000;
+
+/// When to try again after `attempts` tries that did not reach the server (seconds): a minute, doubling, at most an
+/// hour.
+pub fn retry_after(attempts: i64) -> i64 {
+    60i64.saturating_mul(1i64 << attempts.clamp(0, 6)).min(3600)
+}
+
+/// Deliver envelopes to devices on `server`. When it cannot be reached (no answer, a server error, its rate limit),
+/// they are kept and tried again with backoff until they expire; a server that answers decides at once.
+pub async fn deliver(app: &Arc<App>, server: &str, msgs: Vec<Outgoing>) -> Delivery {
+    let items: Vec<OutboxItem> = msgs
         .into_iter()
-        .map(|m| {
-            let mut o = Map::new().with("device", m.device).with("env", m.env);
-            if let Some(ttl) = m.ttl {
-                o.insert("ttl", ttl.into());
+        .map(|m| OutboxItem {
+            device: m.device,
+            env: m.env,
+            notify: m.notify,
+            expires: m.expires,
+            attempts: 0,
+        })
+        .collect();
+    match send_items(app, server, &items).await {
+        Some(failed) => Delivery {
+            failed,
+            queued: Vec::new(),
+        },
+        None => {
+            let queued = app
+                .db
+                .outbox_put(server, &items, now() + retry_after(0), MAX_OUTBOX)
+                .unwrap_or_default();
+            Delivery {
+                failed: items
+                    .iter()
+                    .filter(|it| !queued.contains(&it.device))
+                    .map(|it| it.device.clone())
+                    .collect(),
+                queued,
             }
+        }
+    }
+}
+
+/// Hand envelopes to `server`: the devices they could not be delivered to when it answered, or None when it could
+/// not be reached and they should be tried again (no answer, a server error, a rate limit, a time it did not take).
+async fn send_items(app: &Arc<App>, server: &str, items: &[OutboxItem]) -> Option<Vec<String>> {
+    let devices: Vec<String> = items.iter().map(|m| m.device.clone()).collect();
+    let t = now();
+    let msgs: Vec<Value> = items
+        .iter()
+        .map(|m| {
+            // What is left of its lifetime: the other server keeps it no longer than this one would have.
+            let mut o = Map::new()
+                .with("device", m.device.as_str())
+                .with("env", m.env.as_str())
+                .with("ttl", (m.expires - t).clamp(1, MAILBOX_TTL));
             if m.notify {
                 o.insert("notify", true.into());
             }
@@ -432,7 +497,7 @@ pub async fn deliver(app: &Arc<App>, server: &str, msgs: Vec<Outgoing>) -> Vec<S
         app,
         server,
         "deliver",
-        Map::new().with("msgs", Value::Array(items)),
+        Map::new().with("msgs", Value::Array(msgs)),
     );
     match post(app, format!("{server}/api/v1/federation/deliver"), body).await {
         Ok((200, v)) => {
@@ -446,10 +511,46 @@ pub async fn deliver(app: &Arc<App>, server: &str, msgs: Vec<Outgoing>) -> Vec<S
                         .collect()
                 })
                 .unwrap_or_default();
-            devices.into_iter().filter(|d| failed.contains(d)).collect()
+            Some(devices.into_iter().filter(|d| failed.contains(d)).collect())
         }
-        _ => devices,
+        Ok((status, _)) if status == 401 || status == 429 || status >= 500 => None,
+        Ok(_) => Some(devices),
+        Err(_) => None,
     }
+}
+
+/// Try again what waits for servers that could not be reached, whose time has come: delivered or refused envelopes
+/// are done, the others wait longer (see [`retry_after`]) until they expire. One run at a time.
+pub async fn flush_outbox(app: &Arc<App>) {
+    if app.fed.flushing.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    // Servers that still do not answer are put back for later, so this ends.
+    for _ in 0..1000 {
+        let t = now();
+        let Ok(Some((server, items))) = app.db.outbox_due(t, MAX_RECIPIENTS as i64) else {
+            break;
+        };
+        // A server blocked or left out of the policy since then gets nothing more.
+        if !allowed(app, &server) {
+            continue;
+        }
+        if send_items(app, &server, &items).await.is_some() {
+            continue;
+        }
+        let again: Vec<OutboxItem> = items
+            .into_iter()
+            .map(|mut it| {
+                it.attempts += 1;
+                it
+            })
+            .collect();
+        let attempts = again.first().map_or(1, |it| it.attempts);
+        let _ = app
+            .db
+            .outbox_put(&server, &again, t + retry_after(attempts), MAX_OUTBOX);
+    }
+    app.fed.flushing.store(false, Ordering::Release);
 }
 
 fn respond(r: Result<Response, ApiError>) -> Response {
@@ -1032,6 +1133,58 @@ mod tests {
         assert!(!public_origin("https://Murmo.example"));
         assert!(!public_origin("https://printer.local"));
         assert!(plain_origin("http://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn retries_back_off_to_an_hour() {
+        assert_eq!(retry_after(0), 60);
+        assert_eq!(retry_after(1), 120);
+        assert_eq!(retry_after(5), 1920);
+        assert_eq!(retry_after(6), 3600);
+        assert_eq!(retry_after(100), 3600);
+        assert_eq!(retry_after(-3), 60);
+    }
+
+    fn item(device: &str) -> OutboxItem {
+        OutboxItem {
+            device: device.into(),
+            env: "e".into(),
+            notify: false,
+            expires: 1000,
+            attempts: 0,
+        }
+    }
+
+    #[test]
+    fn the_outbox_keeps_envelopes_per_server_within_its_cap() {
+        let db = crate::db::Db::open(":memory:").expect("db");
+        let kept = db
+            .outbox_put(
+                "https://a.example",
+                &[item("d1"), item("d2"), item("d3")],
+                100,
+                2,
+            )
+            .expect("put");
+        assert_eq!(kept, vec!["d1", "d2"]);
+        db.outbox_put("https://b.example", &[item("e1")], 500, 2)
+            .expect("put");
+        // Nothing is due before its time; then one server at a time, taken out as it is handed over.
+        assert_eq!(db.outbox_due(99, 24).expect("due"), None);
+        let (server, items) = db.outbox_due(100, 24).expect("due").expect("some");
+        assert_eq!(server, "https://a.example");
+        assert_eq!(items.len(), 2);
+        assert_eq!(db.outbox_due(100, 24).expect("due"), None);
+        // A server heard from is due at once; expired envelopes are not handed out.
+        assert_eq!(db.outbox_wake("https://b.example", 200).expect("wake"), 1);
+        let (server, items) = db.outbox_due(200, 24).expect("due").expect("some");
+        assert_eq!(
+            (server.as_str(), items[0].device.as_str()),
+            ("https://b.example", "e1")
+        );
+        db.outbox_put("https://b.example", &[item("e2")], 100, 2)
+            .expect("put");
+        assert_eq!(db.outbox_due(1001, 24).expect("due"), None);
     }
 
     #[test]

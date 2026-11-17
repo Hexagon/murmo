@@ -2402,7 +2402,7 @@ function messageSig(m) {
   return JSON.stringify([
     m.kind, m.text, m.time, m.dir, m.delivered, m.reactions ?? null, m.edited ?? 0, m.held ? (m.firing ? 2 : 1) : 0, m.ttl ?? null, m.expires ?? null,
     f ? [f.f, f.have, f.missed ?? null, f.peers ?? null, f.mime === "image/gif" && gifHashes.has(f.sha256)] : null,
-    messenger.contacts.get(m.conv)?.state, sending.has(m.id),
+    messenger.contacts.get(m.conv)?.state, sending.has(m.id), !!m.outbox, m.failed?.length ?? 0,
   ]);
 }
 
@@ -2565,6 +2565,23 @@ function message(m) {
         onclick: async () => {
           try {
             toast(tr((await messenger.flushFiles()) ? "msg.sentToast" : "msg.peerAway"));
+          } catch (x) {
+            toast(say(x));
+          }
+        },
+      }),
+    );
+  }
+  else if (m.dir === "out" && m.outbox) meta.append(h("span", { class: "pending", text: tr("msg.waitingToSend") }));
+  else if (m.dir === "out" && m.failed?.length && !m.delivered) {
+    meta.append(
+      h("span", { class: "pending", text: tr("msg.notDelivered") }),
+      h("button", {
+        class: "link",
+        text: tr("msg.sendAgain"),
+        onclick: async () => {
+          try {
+            toast(tr((await messenger.resend(m.id)) ? "msg.sentToast" : "msg.stillNotDelivered"));
           } catch (x) {
             toast(say(x));
           }

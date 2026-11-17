@@ -1,7 +1,8 @@
 // Federation end to end: two real Murmo servers (target/debug/murmo-server) that exchange envelopes, and the real
 // client engine on each. Alice is on server A, Bob on server B; each client talks only to its own server. Covers
 // lookup with `@server`, the request and acceptance, text both ways with receipts, that files are refused for now,
-// that a server outside the federation policy is refused, and that nothing stays on either server once delivered.
+// that a server outside the federation policy is refused, that envelopes for a server that is down wait and go when
+// it is back, and that nothing stays on either server once delivered.
 //
 //   cargo build && npm test
 
@@ -264,11 +265,37 @@ test("a server is no relay: only its own accounts send, only its own devices rec
   assert.deepEqual(unknown.failed, ["Zm9vYmFyYmF6"]);
 });
 
+test("envelopes for a server that is down wait on the sender's server and go when it is back", async () => {
+  // Alice's client knows Bob's devices already (a list fetched a moment ago), so it can write while B is down.
+  await alice.list(bob.me.account, true);
+  const b = servers[1];
+  const gone = new Promise((r) => b.once("exit", r));
+  b.kill();
+  await gone;
+  const r = await alice.sendText(bob.me.account, "medan B var nere", "while-down");
+  // Not refused: A keeps it for Bob's device and tries again.
+  assert.equal(r.failed?.length ?? 0, 0);
+  assert.equal((await alice.store.message("while-down")).failed, undefined);
+  const db = new DatabaseSync(join(dir, "a.sqlite"), { readOnly: true });
+  try {
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM fed_outbox WHERE server = ?").get(B).n, 1);
+  } finally {
+    db.close();
+  }
+  // B comes back. As soon as it talks to A (Bob writes to Alice), A hands over what waited for it.
+  servers[1] = start(B, PORT + 1000, "b", { MURMO_FEDERATION: A, MURMO_FILE_QUEUE_MB: "1" });
+  await up(apiB);
+  await until(() => bob.status === "online", 60000);
+  await bob.sendText(alice.me.account, "B är tillbaka");
+  await until(async () => (await bob.messages(alice.me.account)).some((m) => m.id === "while-down"), 30000);
+  await until(async () => (await alice.messages(bob.me.account)).some((m) => m.text === "B är tillbaka"));
+});
+
 test("nothing stays on either server once delivered", async () => {
   await until(() => {
     for (const name of ["a", "b"]) {
       const db = new DatabaseSync(join(dir, `${name}.sqlite`), { readOnly: true });
-      const n = db.prepare("SELECT COUNT(*) AS n FROM mailbox").get().n;
+      const n = db.prepare("SELECT COUNT(*) AS n FROM mailbox").get().n + db.prepare("SELECT COUNT(*) AS n FROM fed_outbox").get().n;
       db.close();
       if (n !== 0) return false;
     }

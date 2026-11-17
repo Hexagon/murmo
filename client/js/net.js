@@ -305,11 +305,22 @@ export class Socket extends EventTarget {
     }
   }
 
+  /**
+   * Send envelopes, 24 to a frame. Returns what the server said about them: `failed`, the devices they could not be
+   * delivered to (unknown, full mailbox, another server that refused them), and `queued`, devices on another server
+   * that could not be reached now, which their server keeps trying.
+   */
   async sendEnvelopes(to) {
+    const failed = [];
+    const queued = [];
+    const strings = (a) => (Array.isArray(a) ? a.filter((d) => typeof d === "string") : []);
     for (let i = 0; i < to.length; i += 24) {
       const id = p.b64(p.random(12));
-      await this.call({ t: "send", id, to: to.slice(i, i + 24) }, id);
+      const r = await this.call({ t: "send", id, to: to.slice(i, i + 24) }, id);
+      failed.push(...strings(r?.failed));
+      queued.push(...strings(r?.queued));
     }
+    return { failed, queued };
   }
 
   async presence(devices) {

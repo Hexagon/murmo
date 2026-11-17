@@ -81,7 +81,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 
 ### P1: abuse resistance and delivery
 
-- [ ] **Undelivered messages are invisible.** The client ignores `sent.failed` (`net.js:326`); federation tries a
+- [x] **Undelivered messages are invisible.** The client ignores `sent.failed` (`net.js:326`); federation tries a
       server once for 10 s and reports everything as failed (`federation.rs:437-452`), servers one after another.
       Client outbox with retry and a "not delivered" mark; server-side federation outbox with backoff; deliver to
       servers in parallel
