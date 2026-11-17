@@ -34,6 +34,13 @@ const RELAY_DEFAULT = {
 // Stay this far under them, so that a paced transfer does not run into a limit.
 const RELAY_MARGIN = 0.9;
 
+/** `e` (an Error, or what was thrown) marked as having come after part of a send went out. */
+function partial(e) {
+  const err = e instanceof Error ? e : new Error(String(e?.message ?? e));
+  err.partial = true;
+  return err;
+}
+
 export class Socket extends EventTarget {
   /** `auth(nonce)` returns `{ account, device, sig }`. */
   constructor(url, auth) {
@@ -305,10 +312,20 @@ export class Socket extends EventTarget {
     }
   }
 
+  /**
+   * Send envelopes, 24 to a frame. The server takes a frame whole or not at all; when a later frame fails after an
+   * earlier one was taken, the error is marked `partial`: some devices have the message, and sending it again under
+   * a new id would give them a second copy.
+   */
   async sendEnvelopes(to) {
     for (let i = 0; i < to.length; i += 24) {
       const id = p.b64(p.random(12));
-      await this.call({ t: "send", id, to: to.slice(i, i + 24) }, id);
+      try {
+        await this.call({ t: "send", id, to: to.slice(i, i + 24) }, id);
+      } catch (e) {
+        if (i > 0) throw partial(e);
+        throw e;
+      }
     }
   }
 

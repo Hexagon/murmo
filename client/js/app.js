@@ -1268,7 +1268,7 @@ function renderShell() {
       h(
         "div",
         { class: "side-top" },
-        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo", betaMark()),
+        h("div", { class: "logo" }, h("span", { class: "logo-name" }, h("img", { src: "icon.svg", alt: "" }), "Murmo"), betaMark()),
         h(
           "div",
           { class: "side-actions" },
@@ -1702,7 +1702,8 @@ function composer(c) {
       if (t) await messenger.sendEphemeral(c.account, text, t, id);
       else await messenger.sendText(c.account, text, id);
     } catch (x) {
-      if (!ta.value.trim()) {
+      // Some devices got it already: it stays in the thread (marked unsent) instead of coming back to be sent again.
+      if (!x?.partial && !ta.value.trim()) {
         ta.value = text;
         grow();
       }
