@@ -342,6 +342,27 @@ test("another server cannot speak for an account served here", async () => {
   assert.equal(res.status, 200);
 });
 
+test("another server asks about one device no more often than a local device may", async () => {
+  const ask = async (devices) =>
+    fetch(`${A}/api/v1/federation/presence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: await signedBy("b", B, A, "presence", { devices }),
+    });
+  // 120 a minute for one device (scaled by 10 here); other devices are still answered after that.
+  let res;
+  let n = 0;
+  for (; n < 1300; n++) {
+    res = await ask([alice.me.device]);
+    if (res.status !== 200) break;
+  }
+  assert.equal(res.status, 429);
+  assert.equal(n, 1200);
+  res = await ask(["some-other-device"]);
+  assert.equal(res.status, 200);
+  assert.deepEqual((await res.json()).online, []);
+});
+
 test("nothing stays on either server once delivered", async () => {
   await until(() => {
     for (const name of ["a", "b"]) {

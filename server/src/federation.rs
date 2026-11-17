@@ -55,6 +55,9 @@ const REFETCH_EVERY: i64 = 60;
 const FAILED_PER_ADDR: u32 = 10;
 /// Envelopes per minute from one server.
 const PER_SERVER: u32 = 6000;
+/// Presence questions per minute from one server, and devices asked about in them.
+const PRESENCE_PER_SERVER: u32 = 1200;
+const PRESENCE_DEVICES_PER_SERVER: u32 = 4000;
 /// How long a device list fetched from another server is reused for other requests (seconds). All of this server's
 /// users share its network address at the other server, and so its rate limits there.
 const LIST_CACHE: i64 = 20;
@@ -1315,12 +1318,27 @@ pub async fn post_presence(
     let run = async {
         app.limits.by_addr("federation", addr, 1200, 60)?;
         let (from, r) = verify(&app, addr, &body, "presence", crate::api::MAX_BODY).await?;
-        app.limits.check(
-            format!("federation-presence:{}", budget_key(&from)),
-            6000,
-            60,
-        )?;
-        let online: Vec<Value> = device_list(&r, MAX_PRESENCE)?
+        let devices = device_list(&r, MAX_PRESENCE)?;
+        // Presence answers anyone who knows device ids (THREAT_MODEL T21), but another server gets no more than its
+        // users plausibly need: requests and devices asked about in all, and about one device no more often than a
+        // local device may ask (120 a minute).
+        let key = budget_key(&from);
+        let n = u32::try_from(devices.len()).unwrap_or(u32::MAX);
+        let mut items = vec![
+            (format!("federation-presence:{key}"), 1, PRESENCE_PER_SERVER),
+            (
+                format!("federation-presence-devices:{key}"),
+                n,
+                PRESENCE_DEVICES_PER_SERVER,
+            ),
+        ];
+        items.extend(
+            devices
+                .iter()
+                .map(|d| (format!("federation-presence-of:{key} {d}"), 1, 120)),
+        );
+        app.limits.charge(&items, 60)?;
+        let online: Vec<Value> = devices
             .into_iter()
             .filter(|d| app.hub.is_connected(d))
             .map(Value::from)

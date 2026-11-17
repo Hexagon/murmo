@@ -1353,7 +1353,7 @@ servers to those servers, signed like a delivery (`kind` binds each request to i
 | Endpoint | Request | Answer |
 |---|---|---|
 | `POST /api/v1/federation/relay` | `sender: { account, device }, devices, store, ttl?, data, bin` (one chunk; `bin`: the payload of a binary frame, base64url) | `{ missed, text }` |
-| `POST /api/v1/federation/presence` | `devices` | `{ online }` |
+| `POST /api/v1/federation/presence` | `devices` | `{ online }`; per sending server at most 1 200 questions and 4 000 devices a minute, and 120 a minute about one device (as for a local device) |
 | `POST /api/v1/federation/space` | `account, devices, bytes` | `{ ok }` |
 
 The server knows which devices are elsewhere from what its own account told it: the `server` of envelopes in `send`
