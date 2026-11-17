@@ -1268,7 +1268,7 @@ function renderShell() {
       h(
         "div",
         { class: "side-top" },
-        h("div", { class: "logo" }, h("img", { src: "icon.svg", alt: "" }), "Murmo", betaMark()),
+        h("div", { class: "logo" }, h("span", { class: "logo-name" }, h("img", { src: "icon.svg", alt: "" }), "Murmo"), betaMark()),
         h(
           "div",
           { class: "side-actions" },
