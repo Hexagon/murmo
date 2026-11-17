@@ -350,21 +350,30 @@ export class Store {
     }
     return out;
   }
-  /** Up to `max` bytes from the start of a file. */
+  /**
+   * Up to `max` bytes from the start of a file. Only the parts that hold them are read and decrypted (not the whole
+   * block of PART_BATCH that `fileReader` would read): a picture's header is read for every picture of a thread.
+   */
   async fileHead(f, max) {
-    const read = await this.fileReader(f);
-    if (!read) return undefined;
-    const out = [];
-    let got = 0;
-    for (let i = 0; i < read.n && got < max; i++) {
-      const x = await read(i);
-      if (!x) break;
-      out.push(x);
-      got += x.length;
+    const r = await this.fileHeader(f);
+    if (!r) return undefined;
+    let out;
+    if (r.v) out = [await p.decryptLocal(this.key, r.v, `file:${r.k}`)];
+    else {
+      out = [];
+      const count = Math.min(r.n, Math.ceil(max / p.CHUNK));
+      for (let from = 0; from < count; from += PART_BATCH) {
+        const parts = await this.partsByTag(r.k, from, Math.min(PART_BATCH, count - from));
+        const end = parts.indexOf(undefined);
+        out.push(...(end < 0 ? parts : parts.slice(0, end)));
+        if (end >= 0) break;
+      }
     }
+    const got = out.reduce((a, x) => a + x.length, 0);
     const b = new Uint8Array(Math.min(got, max));
     let o = 0;
     for (const x of out) {
+      if (o >= b.length) break;
       b.set(x.subarray(0, b.length - o), o);
       o += Math.min(x.length, b.length - o);
     }
