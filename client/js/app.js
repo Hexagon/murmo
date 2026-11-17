@@ -2956,6 +2956,42 @@ function nearScreen(el) {
   });
 }
 
+/**
+ * Reading the thread's pictures from storage, a few at a time and the newest first: the bottom of the thread, where
+ * a conversation opens, comes before the pictures above it. `job.fill` (putting a picture together once it nears the
+ * screen) goes before `job.size` (reading a header), so a picture on the screen is not kept waiting behind the
+ * headers of older ones. Jobs of a conversation that was left are dropped (their promise never settles).
+ */
+const picJobs = [];
+let picRunning = 0;
+const PIC_PARALLEL = 2;
+
+function picJob(kind, time, fn) {
+  const conv = current;
+  return new Promise((resolve, reject) => {
+    picJobs.push({ rank: kind === "fill" ? 1 : 0, time, conv, run: () => fn().then(resolve, reject) });
+    queueMicrotask(pumpPictures); // after the whole thread is drawn, so the order is decided over all its pictures
+  });
+}
+
+function pumpPictures() {
+  while (picRunning < PIC_PARALLEL && picJobs.length) {
+    let best = 0;
+    for (let i = 1; i < picJobs.length; i++) {
+      const a = picJobs[i];
+      const b = picJobs[best];
+      if (a.rank > b.rank || (a.rank === b.rank && a.time > b.time)) best = i;
+    }
+    const [job] = picJobs.splice(best, 1);
+    if (job.conv !== current) continue;
+    picRunning++;
+    job.run().finally(() => {
+      picRunning--;
+      pumpPictures();
+    });
+  }
+}
+
 function fileView(m) {
   const f = m.file;
   if (f.have && p.inlineVideo(f.mime, f.size)) return imgNodes.get(f.f) ?? fileCard(m, null, true);
@@ -2992,7 +3028,7 @@ function fileView(m) {
       show(kept.url);
       return img;
     }
-    messenger.imageSize(f.f).then(async (size) => {
+    picJob("size", m.time, () => messenger.imageSize(f.f)).then(async (size) => {
       if (!p.imageFits(size)) {
         const why = size ? tr("msg.tooBig", { w: i18n.num(size.width), h: i18n.num(size.height) }) : tr("msg.cannotShow");
         const card = fileCard(m, why);
@@ -3004,7 +3040,7 @@ function fileView(m) {
       placeImage(img, size);
       // Put together from its stored parts only when it nears the screen: a long thread does not read all its pictures.
       await nearScreen(img);
-      const b = await messenger.fileBlob(f.f, f.mime);
+      const b = await picJob("fill", m.time, () => messenger.fileBlob(f.f, f.mime));
       if (!b) throw new Error("no_file");
       let url = objectUrls.get(f.f);
       if (!url) {
