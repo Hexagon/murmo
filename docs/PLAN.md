@@ -61,21 +61,21 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 
 ### P0: integrity and lost messages (before the next release)
 
-- [ ] **Pin the account's own device list.** `checkPinned` runs only for other accounts (`core.js:402`); a server can
+- [x] **Pin the account's own device list.** `checkPinned` runs only for other accounts (`core.js:402`); a server can
       serve an older, validly signed own list that still holds a removed (stolen) device, which then gets a copy of every
       message and can push `history`/`sync`/`names`. Keep `{head, length}` for the own list in the encrypted store,
       refuse lists that do not extend it or that lack this device (T3, G1, G3)
-- [ ] **A fork must also stop receiving.** A list that fails `extendsPinned` is still cached (`core.js:400`) and
+- [x] **A fork must also stop receiving.** A list that fails `extendsPinned` is still cached (`core.js:400`) and
       incoming messages never check `c.fork`; only sending is blocked. Do not cache a forked list, verify against the
       pinned one, quarantine messages from a forked account (G2, T24)
-- [ ] **Do not ack envelopes on temporary failures.** `handleEnvelope` (`core.js:888-902`) acks when a device-list
+- [x] **Do not ack envelopes on temporary failures.** `handleEnvelope` (`core.js:888-902`) acks when a device-list
       lookup fails on the network, and `finally` acks when `handleMessage` throws (IndexedDB quota). Ack only final
       results (bad decryption or signature, not for this device); leave the rest for the next connection
-- [ ] **SSRF to internal hosts.** `public_origin` (`federation.rs:199`) and `any_home` (`remote.rs:33`) refuse only
+- [x] **SSRF to internal hosts.** `public_origin` (`federation.rs:199`) and `any_home` (`remote.rs:33`) refuse only
       what `Ipv4Addr` parses; `127.1`, `10.1`, `0x7f.0.0.1`, `localhost.` pass and resolve internally, and
       `/federation/deliver` fetches `{from}/api/v1/info` before any signature check. Resolve and refuse private,
       loopback and link-local addresses (or pin the checked IP); require a host name with a letter (T23, T40)
-- [ ] **Unthrottled key refetch.** A bad signature always forces a fresh fetch (`federation.rs:395-399`), failed
+- [x] **Unthrottled key refetch.** A bad signature always forces a fresh fetch (`federation.rs:395-399`), failed
       fetches are not cached (`:281`), each takes up to 10 s on the shared blocking pool, at 1200 req/min per address.
       Negative cache, at most one forced refetch per origin a minute, a low per-address budget for failed verifications
 
@@ -114,7 +114,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       conversation on mobile (`app.js:1453`); held messages look sent (`app.js:2552`). Topbar banner and a pending mark
 - [ ] **Destructive actions without confirmation.** "Delete the conversation" removes history on all devices
       (`app.js:3618`, `core.js:557,1039`); block and device removal (`app.js:3800`) too
-- [ ] **Sidebar header overflows** the conversation title on desktop (needs about 352 px of 280 px, `style.css:191`)
+- [x] **Sidebar header overflows** the conversation title on desktop (needs about 352 px of 280 px, `style.css:191`)
 - [ ] **Form fields without accessible names**: labels are siblings without `for` (`app.js:670-673, 715-717, 949, 3858`)
 - [ ] **Show storage and background errors.** The messenger's `error` events only reach `console.warn`
       (`app.js:1047`); quota exhaustion is silent

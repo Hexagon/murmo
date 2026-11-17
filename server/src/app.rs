@@ -434,6 +434,21 @@ impl Limiter {
         Ok(())
     }
 
+    /// Whether `key` has used up its `max` in the current `window`, without counting anything: Err (rate limited)
+    /// when it has.
+    pub fn spent(&self, key: &str, max: u32, window: i64) -> Result<(), ApiError> {
+        let k = self.hash(key);
+        let t = now();
+        let g = self.counters.lock().map_err(ApiError::internal)?;
+        match g.get(&k) {
+            Some(e) if t - e.start < window && e.start <= t && e.count >= self.budget(max) => {
+                let wait = u64::try_from(window - (t - e.start)).unwrap_or(1).max(1);
+                Err(ApiError::rate_limited(wait))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// What a limit of `max` allows here (multiplied by the scale).
     pub fn budget(&self, max: u32) -> u32 {
         max.saturating_mul(self.scale)
@@ -987,6 +1002,19 @@ mod limit_tests {
         }
         assert!(l.by_addr("x", ip("2001:db8:1:2::ff"), 3, 60).is_err());
         assert!(l.by_addr("x", ip("2001:db8:1:3::1"), 3, 60).is_ok());
+    }
+
+    #[test]
+    fn spent_looks_without_counting() {
+        let l = Limiter::scaled(2);
+        for _ in 0..10 {
+            assert!(l.spent("k", 2, 60).is_ok()); // looking counts nothing
+        }
+        for _ in 0..4 {
+            assert!(l.check("k".into(), 2, 60).is_ok());
+        }
+        assert!(l.spent("k", 2, 60).is_err());
+        assert!(l.spent("other", 2, 60).is_ok());
     }
 
     #[test]
