@@ -142,7 +142,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [x] A refused login (`unknown_device`, `bad_signature`) reconnects forever, without jitter (`net.js:237-251`);
       unhandled rejection when `auth()` fails (`net.js:189-193`). Refusals for good are retried every few minutes
       and shown; a device wipes itself only when its signed list confirms the removal
-- [ ] One user can rate-limit the whole server at a remote one (lookups and `fresh` lists share one IP's budget,
+- [x] One user can rate-limit the whole server at a remote one (lookups and `fresh` lists share one IP's budget,
       `ws.rs:541-545`); per-server budget on the sending side, dedupe `fresh`
 - [ ] Presence is open to any federated server at 6000 req/min (`federation.rs:952-973`); limit to contacts or lower
 - [x] A declined contact comes back with a replayed `request` (`core.js:916-925`); require a newer `time`

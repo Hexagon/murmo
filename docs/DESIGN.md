@@ -1268,7 +1268,10 @@ The client verifies the log (`stateFromEvents`: self-certifying, so it does not 
 list against the account key the log names, and pins the head, exactly as for an account on its own server (§4, §5.3).
 A server in the middle can withhold or delay a list, never forge one. Answers of `remote-devices` are reused for 20
 seconds for other requests, since all users of a server share its address, and so its rate limits, at the other
-server; `fresh` (a device not seen yet, a list that changed) always asks.
+server; `fresh` (a device not seen yet, a list that changed) asks again unless the list was fetched in the last 5
+seconds. For the same reason the server spends at most 16 lookups and 100 list fetches a minute at one other server
+(below what that server allows one address), and each local account at most 4 and 30 of them, so one user cannot use
+up the others' budget (`rate_limited` otherwise).
 
 Every server answers for its own accounts with what it already published: `/api/v1/lookup`,
 `/api/v1/accounts/{account}/devices`, and now `GET /api/v1/accounts/{account}/log` (the newest log it has, its own or

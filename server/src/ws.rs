@@ -678,9 +678,9 @@ fn remote(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiEr
     let (app, device, account) = (app.clone(), me.device.clone(), me.account.clone());
     tokio::spawn(async move {
         let answer = if what == "lookup" {
-            crate::federation::lookup(&app, &server, &arg).await
+            crate::federation::lookup(&app, &account, &server, &arg).await
         } else {
-            crate::federation::devices(&app, &server, &arg, fresh).await
+            crate::federation::devices(&app, &account, &server, &arg, fresh).await
         };
         if let Ok(v) = &answer
             && what == "devices"
@@ -1520,6 +1520,38 @@ mod tests {
             && m.get("retry")
                 .and_then(Value::as_int)
                 .is_some_and(|s| (1..=60).contains(&s))
+    }
+
+    #[test]
+    fn remote_lookups_share_the_other_servers_budget_fairly() {
+        use crate::federation::{LOOKUPS_PER_ACCOUNT, LOOKUPS_TO_SERVER, asking};
+        let app = app();
+        let ask = |me: &str, server: &str| {
+            asking(
+                &app,
+                "lookup",
+                me,
+                server,
+                LOOKUPS_PER_ACCOUNT,
+                LOOKUPS_TO_SERVER,
+            )
+        };
+        // One account gets its part, not the server's whole budget at the other server.
+        for _ in 0..LOOKUPS_PER_ACCOUNT {
+            assert!(ask("a", "https://b.example").is_ok());
+        }
+        assert!(ask("a", "https://b.example").is_err());
+        // Others still can, and the same account can still ask another server.
+        assert!(ask("c", "https://b.example").is_ok());
+        assert!(ask("a", "https://d.example").is_ok());
+        // All of them together stay under what the other server allows one network address.
+        let mut n = LOOKUPS_PER_ACCOUNT + 1;
+        for i in 0..100 {
+            if ask(&format!("x{i}"), "https://b.example").is_ok() {
+                n += 1;
+            }
+        }
+        assert_eq!(n, LOOKUPS_TO_SERVER);
     }
 
     #[test]

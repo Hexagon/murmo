@@ -58,6 +58,16 @@ const PER_SERVER: u32 = 6000;
 /// How long a device list fetched from another server is reused for other requests (seconds). All of this server's
 /// users share its network address at the other server, and so its rate limits there.
 const LIST_CACHE: i64 = 20;
+/// What this server asks of one other server per minute on its users' behalf (`remote-lookup`, `remote-devices`). The
+/// other server counts lookups (20) and device lists (120, each with a log) per network address, and all of this
+/// server's users share one: the total stays below that, and each local account gets only a part of it, so one user
+/// cannot use up the budget of everyone else here.
+pub(crate) const LOOKUPS_TO_SERVER: u32 = 16;
+pub(crate) const LOOKUPS_PER_ACCOUNT: u32 = 4;
+const LISTS_TO_SERVER: u32 = 100;
+const LISTS_PER_ACCOUNT: u32 = 30;
+/// A `fresh` device list asked for within this many seconds of the last fetch of it is answered from that fetch.
+const FRESH_AGAIN: i64 = 5;
 /// How long a learned route (a device of a contact on another server) is kept without being used (seconds).
 const ROUTE_TTL: i64 = 7 * 24 * 3600;
 /// Chunk frames per minute from one server, and bytes.
@@ -855,11 +865,24 @@ fn passed_on(status: u16, v: &Value) -> ApiError {
 
 /// An exact identifier on another server, looked up there for one of this server's users (the client never contacts
 /// other servers itself): `{ account, home, handle, server }`.
-pub async fn lookup(app: &Arc<App>, server: &str, handle: &str) -> Result<Value, ApiError> {
+pub async fn lookup(
+    app: &Arc<App>,
+    me: &str,
+    server: &str,
+    handle: &str,
+) -> Result<Value, ApiError> {
     let server = server_param(app, server)?;
     if handle.is_empty() || handle.len() > 128 {
         return Err(ApiError::new(400, "bad_handle"));
     }
+    asking(
+        app,
+        "lookup",
+        me,
+        &server,
+        LOOKUPS_PER_ACCOUNT,
+        LOOKUPS_TO_SERVER,
+    )?;
     // Only a Murmo server that takes part in federation (an older one, or another kind of host, does not).
     peer_key(app, &server, false).await?;
     let (status, v) = get(
@@ -892,12 +915,30 @@ pub async fn lookup(app: &Arc<App>, server: &str, handle: &str) -> Result<Value,
 /// (a device the client does not know yet, a changed list) always asks the other server.
 pub async fn devices(
     app: &Arc<App>,
+    me: &str,
     server: &str,
     account: &str,
     fresh: bool,
 ) -> Result<Value, ApiError> {
-    let v = devices_of(app, server, account, fresh).await?;
-    Ok(v)
+    devices_of(app, me, server, account, fresh).await
+}
+
+/// Count one request that `me` (a local account) makes of `server`, against its own part and the server's total.
+pub(crate) fn asking(
+    app: &App,
+    what: &str,
+    me: &str,
+    server: &str,
+    per_account: u32,
+    per_server: u32,
+) -> Result<(), ApiError> {
+    app.limits.charge(
+        &[
+            (format!("fed-{what}:{server} {me}"), 1, per_account),
+            (format!("fed-{what}:{server}"), 1, per_server),
+        ],
+        60,
+    )
 }
 
 /// The routes to an account's devices on another server, learned for the local account `me` that asked.
@@ -926,6 +967,7 @@ pub fn learn_list(app: &App, me: &str, v: &Value) {
 
 async fn devices_of(
     app: &Arc<App>,
+    me: &str,
     server: &str,
     account: &str,
     fresh: bool,
@@ -933,12 +975,22 @@ async fn devices_of(
     let server = server_param(app, server)?;
     check_account(account)?;
     let key = format!("{server} {account}");
-    if !fresh
-        && let Some((v, _, at)) = app.fed.lists.locked().get(&key).cloned()
-        && now() - at < LIST_CACHE
+    // A list fetched a moment ago is fresh enough for anyone: devices that ask together (a sender's own devices, all
+    // the contacts of a changed account) cost the other server one fetch.
+    let reuse = if fresh { FRESH_AGAIN } else { LIST_CACHE };
+    if let Some((v, _, at)) = app.fed.lists.locked().get(&key).cloned()
+        && now() - at < reuse
     {
         return Ok(v);
     }
+    asking(
+        app,
+        "devices",
+        me,
+        &server,
+        LISTS_PER_ACCOUNT,
+        LISTS_TO_SERVER,
+    )?;
     let (status, devices) = get(app, format!("{server}/api/v1/accounts/{account}/devices")).await?;
     if status != 200 {
         return Err(passed_on(status, &devices));
