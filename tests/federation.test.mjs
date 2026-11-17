@@ -9,13 +9,15 @@ import "fake-indexeddb/auto";
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Api, ApiError } from "../client/js/api.js";
 import * as id from "../client/js/identity.js";
 import { Messenger, Store, setupDevice } from "../client/js/core.js";
+import * as rc from "../client/vendor/rootcard/src/index.js";
+import { frame, hkdf } from "../client/vendor/rootcard/src/crypto.js";
 
 const PORT = 21000 + Math.floor(Math.random() * 1000);
 const A = `http://127.0.0.1:${PORT}`;
@@ -262,6 +264,34 @@ test("a server is no relay: only its own accounts send, only its own devices rec
   assert.deepEqual(r.failed, [alice.me.device]);
   const unknown = await own.call({ t: "send", id: "relay-test2", to: [{ device: "Zm9vYmFyYmF6", env: "AAAA", server: B }] }, "relay-test2");
   assert.deepEqual(unknown.failed, ["Zm9vYmFyYmF6"]);
+});
+
+/** A request from server `name` (its federation key derived from its host key, as the server does), signed. */
+async function signedBy(name, from, to, kind, fields) {
+  const hostSeed = Uint8Array.from(readFileSync(join(dir, `${name}.key`), "utf8").trim().match(/../g), (x) => parseInt(x, 16));
+  const enc = new TextEncoder();
+  const seed = await hkdf(hostSeed, enc.encode("murmo"), enc.encode("murmo/federation-key/v1"));
+  const nonce = rc.base64urlEncode(crypto.getRandomValues(new Uint8Array(16)));
+  const req = { v: 1, kind, from, to, time: Math.floor(Date.now() / 1000), nonce, ...fields };
+  const sig = await rc.ed25519Sign(seed, frame("murmo/federation/v1", rc.canonical(req)));
+  return JSON.stringify({ req, sig: rc.base64urlEncode(sig) });
+}
+
+test("another server cannot speak for an account served here", async () => {
+  const relay = (account) =>
+    signedBy("b", B, A, "relay", {
+      sender: { account, device: bob.me.device }, devices: [alice.me.device], store: true, data: "AAAA", bin: false,
+    });
+  const post = async (path, body) => fetch(`${A}/api/v1/federation/${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+  // B naming Alice (an account of A) as the sender of a chunk, or asking for her file queue room, is refused.
+  let res = await post("relay", await relay(alice.me.account));
+  assert.equal(res.status, 403);
+  assert.equal((await res.json()).error, "not_your_account");
+  res = await post("space", await signedBy("b", B, A, "space", { account: alice.me.account, bytes: 1, devices: [alice.me.device] }));
+  assert.equal(res.status, 403);
+  // The same request in the name of B's own account is taken (the signature and everything else were fine).
+  res = await post("relay", await relay(bob.me.account));
+  assert.equal(res.status, 200);
 });
 
 test("nothing stays on either server once delivered", async () => {

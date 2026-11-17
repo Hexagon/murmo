@@ -1035,6 +1035,7 @@ fn queue_chunk(
             device,
             &me.device,
             &me.account,
+            None,
             data,
             expires,
             &app.cfg.queue_limits(),
@@ -1107,7 +1108,7 @@ fn relay_space(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Reply, ApiError> 
         .collect();
     let (local, remote) = split_remote(app, me, devices);
     let local: Vec<&str> = local.iter().map(String::as_str).collect();
-    let mut ok: Vec<Value> = space_for(app, &me.account, &local, bytes)?
+    let mut ok: Vec<Value> = space_for(app, &me.account, None, &local, bytes)?
         .into_iter()
         .map(Value::from)
         .collect();
@@ -1141,6 +1142,7 @@ fn relay_space(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Reply, ApiError> 
 pub fn space_for(
     app: &App,
     account: &str,
+    origin: Option<&str>,
     devices: &[&str],
     bytes: i64,
 ) -> Result<Vec<String>, ApiError> {
@@ -1154,7 +1156,11 @@ pub fn space_for(
         if ok.iter().any(|o| o == d) {
             continue;
         }
-        let Some(mut u) = app.db.relay_usage(d, account).map_err(ApiError::internal)? else {
+        let Some(mut u) = app
+            .db
+            .relay_usage(d, account, origin)
+            .map_err(ApiError::internal)?
+        else {
             continue;
         };
         u.account = u.account.saturating_add(granted);
