@@ -1054,6 +1054,67 @@ test("a paper key brings back an account whose only device is lost", async () =>
   assert.equal(db2count("mailbox"), 0);
 });
 
+test("envelopes are acknowledged only on final results; temporary failures come again on the next connection", async () => {
+  const hugoHandle = await register("Hugo", PW);
+  const idaHandle = await register("Ida", PW);
+  const hugo = await device(hugoHandle, PW, "hugo1");
+  const ida = await device(idaHandle, PW, "ida1");
+  await hugo.request(idaHandle, "Hej Ida");
+  await until(async () => ida.contacts.get(hugo.me.account)?.state === "incoming");
+  await ida.accept(hugo.me.account);
+  await until(async () => hugo.contacts.get(ida.me.account)?.state === "accepted");
+  const queued = () => {
+    const db = new DatabaseSync(DB, { readOnly: true });
+    const n = db.prepare("SELECT COUNT(*) AS n FROM mailbox WHERE device = ?").get(ida.me.device).n;
+    db.close();
+    return n;
+  };
+  const reconnect = async () => {
+    const online = waitFor(ida, "status", (st) => st === "online");
+    ida.ws.dropped(ida.ws.ws);
+    await online;
+  };
+  const has = async (text) => (await ida.messages(hugo.me.account)).some((m) => m.text === text);
+  await until(async () => queued() === 0);
+
+  // The sender's device list cannot be fetched (the network): not acknowledged.
+  const real = ida.api;
+  ida.api = Object.assign(Object.create(real), {
+    devices: async (a) => (a === hugo.me.account ? Promise.reject(new TypeError("Failed to fetch")) : real.devices(a)),
+  });
+  ida.lists.clear();
+  await hugo.sendText(ida.me.account, "nät borta");
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.ok(!(await has("nät borta")));
+  assert.equal(queued(), 1);
+  ida.api = real;
+  await reconnect();
+  await until(() => has("nät borta"));
+  await until(async () => queued() === 0);
+
+  // The local store refuses a write (a full disk): not acknowledged either.
+  const put = ida.store.putMessage;
+  ida.store.putMessage = async () => {
+    throw new DOMException("full", "QuotaExceededError");
+  };
+  const error = waitFor(ida, "error");
+  await hugo.sendText(ida.me.account, "disken full");
+  await error;
+  assert.equal(queued(), 1);
+  ida.store.putMessage = put;
+  await reconnect();
+  await until(() => has("disken full"));
+  await until(async () => queued() === 0);
+
+  // A final result is acknowledged: an envelope this device cannot open is dropped.
+  const acked = [];
+  const ack = ida.ws.ack;
+  ida.ws.ack = (ids) => acked.push(...ids);
+  await ida.handleEnvelope({ id: 4711, env: "not an envelope" });
+  ida.ws.ack = ack;
+  assert.deepEqual(acked, [4711]);
+});
+
 test("homes that are not allowed are refused", async () => {
   await assert.rejects(api.connect("0".repeat(52), "https://evil.example/id"), (e) => e.status === 403 || e.status === 404);
 });

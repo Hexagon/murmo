@@ -770,7 +770,7 @@ WebSocket frames (JSON):
 | client → server | `auth` may carry `caps: ["bin"]`: the connection takes binary relay frames (§10.2) |
 | server → client | `{ t: "ready", relay: { bytes, peer, granted, store, frames, slow_frames, grant, binary, window } }` (the relay budgets below and in §10.2) then queued `{ t: "msg", id, env }` frames |
 | client → server | `{ t: "send", id, to: [{ device, env }] }` → `{ t: "sent", id }` |
-| client → server | `{ t: "ack", ids: [...] }` (deletes) |
+| client → server | `{ t: "ack", ids: [...] }` (deletes). Sent only for final results: a message handled, or one that can never be (undecryptable, not for this device, a bad signature or an unknown sender device). An envelope whose sender's device list could not be fetched, or whose handling failed locally (a full store), is left in the mailbox and read again on the next connection (at most until it expires) |
 | client → server | `{ t: "prekey", prekey }` |
 | client → server | `{ t: "presence", devices, ref }` → `{ t: "presence", online, ref }` |
 | client → server | `{ t: "relay", to, data, ref }` → forwarded as `{ t: "relay", from, account, data }` to connected devices only; `{ t: "relay-missed", devices, text?, ref }` for the rest (`text`: connected devices that take no binary frames, for a binary chunk) |
