@@ -306,7 +306,7 @@ test("envelopes for a server that is down wait on the sender's server and go whe
     db.close();
   }
   // B comes back. As soon as it talks to A (Bob writes to Alice), A hands over what waited for it.
-  servers[1] = start(B, PORT + 1000, "b", { MURMO_FEDERATION: A, MURMO_FILE_QUEUE_MB: "1" });
+  servers[1] = start(B, PORT + 1000, "b", { MURMO_FEDERATION: `${A},${E},${F}`, MURMO_FILE_QUEUE_MB: "1" });
   await up(apiB);
   await until(() => bob.status === "online", 60000);
   await bob.sendText(alice.me.account, "B är tillbaka");
