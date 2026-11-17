@@ -155,8 +155,9 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       `into_inner` as `federation.rs` does (`Locked::locked` in `app.rs`, used for every server mutex)
 - [x] Spec: §14.3 `req` lacks `kind`; "fetched again once" is unbounded; replay nonces are lost on restart (requests
       signed before the server started are refused as `stale`)
-- [ ] Federation tests: open mode, replay, stale time, wrong `to`/`kind`, key rotation, block-list variants, a peer that
-      is down or slow, spoofed relay account, mailbox flooding, IDN addresses
+- [x] Federation tests: replay (also across a restart), stale time, wrong `to`/`kind`, a signature by another key,
+      block-list variants, a peer that is down, spoofed relay account, mailbox flooding, IDN addresses
+- [ ] Federation tests still missing: open mode (needs public addresses), key rotation of a peer, a slow peer
 
 ### P3: polish
 

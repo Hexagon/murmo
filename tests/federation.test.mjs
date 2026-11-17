@@ -372,6 +372,40 @@ test("another server asks about one device no more often than a local device may
   assert.deepEqual((await res.json()).online, []);
 });
 
+test("signed requests: the wrong kind or recipient, a stale time and a replay are refused", async () => {
+  const toA = (path, body) => fetch(`${A}/api/v1/federation/${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+  const presence = (fields = {}) => signedBy("b", B, A, "presence", { devices: ["c2lnLXRlc3Q"], ...fields });
+  // Signed for presence, posted to space: the kind is part of what is signed and must match the endpoint.
+  let res = await toA("space", await presence());
+  assert.equal(res.status, 400);
+  // Signed for another server.
+  res = await toA("presence", await signedBy("b", B, E, "presence", { devices: ["c2lnLXRlc3Q"] }));
+  assert.equal(res.status, 400);
+  // More than five minutes off, either way.
+  for (const off of [-301, 301]) {
+    res = await toA("presence", await presence({ time: Math.floor(Date.now() / 1000) + off }));
+    assert.equal(res.status, 401);
+    assert.equal((await res.json()).error, "stale");
+  }
+  // Taken once, then refused as a replay.
+  const once = await presence();
+  assert.equal((await toA("presence", once)).status, 200);
+  res = await toA("presence", once);
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).error, "replay");
+  // A signature by another key (C's) in B's name.
+  res = await toA("presence", await signedBy("c", B, A, "presence", { devices: ["c2lnLXRlc3Q"] }));
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, "bad_signature");
+});
+
+test("internationalised server names are used in their ASCII form", () => {
+  assert.equal(id.serverOrigin("bücher.example"), "https://xn--bcher-kva.example");
+  assert.equal(id.serverOrigin("BÜCHER.example:8443"), "https://xn--bcher-kva.example:8443");
+  assert.ok(id.isServerOrigin(id.serverOrigin("bücher.example")));
+  assert.throws(() => id.serverOrigin("bücher.example/path"), (e) => e.code === "bad_server");
+});
+
 test("nothing stays on either server once delivered", async () => {
   await until(() => {
     for (const name of ["a", "b"]) {
