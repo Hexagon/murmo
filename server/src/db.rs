@@ -2,6 +2,7 @@
 //! mailbox. One connection behind a mutex: every change is atomic, which is the compare-and-swap rootcard needs
 //! ([HST-19]). `secure_delete` overwrites deleted rows, so delivered ciphertext does not linger in free pages.
 
+use crate::app::Locked;
 use rootcard::json::{Value, canonical, parse_json};
 use rootcard::log::LogState;
 use rootcard_host::store::{Expected, HandleKey, IdentityStore, Insert, StoreError, Stored};
@@ -214,11 +215,9 @@ impl Db {
         Ok(Db(Arc::new(Mutex::new(conn))))
     }
 
-    /// The connection.
+    /// The connection. Kept usable after a panic while it was held (see [`Locked`]).
     pub fn conn(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
-        self.0
-            .lock()
-            .map_err(|_| StoreError("lock poisoned".into()))
+        Ok(self.0.locked())
     }
 
     // ── device lists ────────────────────────────────────────────────────────────────────────────────────────────

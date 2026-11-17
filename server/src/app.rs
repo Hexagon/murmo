@@ -9,8 +9,8 @@ use rootcard_host::Host;
 use rootcard_host::store::{IdentityStore, MemoryChallengeStore, MemorySessionStore};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
@@ -101,6 +101,21 @@ impl Config {
     }
 }
 
+/// Locking that survives a panic elsewhere: a mutex whose holder panicked is used as it was left instead of failing
+/// every later caller (which would turn one panic into a server that refuses all logins or all writes for good). The
+/// data behind these locks is kept consistent by each critical section (no half-done updates across a panic point), and
+/// SQLite rolls back an open transaction when its guard is dropped during the unwind.
+pub trait Locked<T> {
+    /// The guard, also from a poisoned mutex.
+    fn locked(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> Locked<T> for Mutex<T> {
+    fn locked(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Seconds since the epoch.
 pub fn now() -> i64 {
     SystemTime::now()
@@ -170,7 +185,8 @@ impl Hub {
         tx: mpsc::Sender<Push>,
     ) -> u64 {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut g) = self.conns.lock() {
+        {
+            let mut g = self.conns.locked();
             // The same device connected again (another tab or window of the same browser profile): the newer one
             // takes over, and the older one is told, so that it does not connect again and push this one out in
             // turn. Its connection then ends (its sender is dropped below).
@@ -193,17 +209,12 @@ impl Hub {
 
     /// Whether a connected device takes binary relay frames; `None` when it is not connected.
     pub fn binary(&self, device: &str) -> Option<bool> {
-        self.conns
-            .lock()
-            .ok()
-            .and_then(|g| g.get(device).map(|c| c.binary))
+        self.conns.locked().get(device).map(|c| c.binary)
     }
 
     /// `to` lets `from` stream up to `bytes` more to it until `expires` (replacing an earlier grant; 0 removes it).
     pub fn grant(&self, to: &str, from: &str, bytes: u64, expires: i64) {
-        let Ok(mut g) = self.grants.lock() else {
-            return;
-        };
+        let mut g = self.grants.locked();
         let t = now();
         let mine = g.entry(to.to_string()).or_default();
         mine.retain(|_, x| x.expires > t && x.bytes > 0);
@@ -230,22 +241,17 @@ impl Hub {
     pub fn granted(&self, to: &str, from: &str) -> u64 {
         let t = now();
         self.grants
-            .lock()
-            .ok()
-            .and_then(|g| {
-                g.get(to)
-                    .and_then(|m| m.get(from))
-                    .filter(|x| x.expires > t)
-                    .map(|x| x.bytes)
-            })
-            .unwrap_or(0)
+            .locked()
+            .get(to)
+            .and_then(|m| m.get(from))
+            .filter(|x| x.expires > t)
+            .map_or(0, |x| x.bytes)
     }
 
     /// Use `n` bytes of the grant from `from` to `to` (what is left of it, at most).
     pub fn use_grant(&self, to: &str, from: &str, n: u64) {
-        if let Ok(mut g) = self.grants.lock()
-            && let Some(x) = g.get_mut(to).and_then(|m| m.get_mut(from))
-        {
+        let mut g = self.grants.locked();
+        if let Some(x) = g.get_mut(to).and_then(|m| m.get_mut(from)) {
             x.bytes = x.bytes.saturating_sub(n);
         }
     }
@@ -253,7 +259,8 @@ impl Hub {
     /// Forget expired and used-up grants.
     pub fn sweep_grants(&self) {
         let t = now();
-        if let Ok(mut g) = self.grants.lock() {
+        {
+            let mut g = self.grants.locked();
             for m in g.values_mut() {
                 m.retain(|_, x| x.expires > t && x.bytes > 0);
             }
@@ -263,33 +270,25 @@ impl Hub {
 
     /// Remove a connection (only if it is still the registered one).
     pub fn unregister(&self, device: &str, id: u64) {
-        if let Ok(mut g) = self.conns.lock()
-            && g.get(device).is_some_and(|c| c.id == id)
-        {
+        let mut g = self.conns.locked();
+        if g.get(device).is_some_and(|c| c.id == id) {
             g.remove(device);
         }
     }
 
     /// Drop the connection of a device (for example after it was removed from its list).
     pub fn disconnect(&self, device: &str) {
-        if let Ok(mut g) = self.conns.lock() {
-            g.remove(device);
-        }
+        self.conns.locked().remove(device);
     }
 
     /// Whether a device is connected now.
     pub fn is_connected(&self, device: &str) -> bool {
-        self.conns
-            .lock()
-            .map(|g| g.contains_key(device))
-            .unwrap_or(false)
+        self.conns.locked().contains_key(device)
     }
 
     /// Push to one device; returns whether it was connected and accepted the push.
     pub fn to_device(&self, device: &str, p: Push) -> bool {
-        let Ok(mut g) = self.conns.lock() else {
-            return false;
-        };
+        let mut g = self.conns.locked();
         let Some(c) = g.get(device) else { return false };
         match c.tx.try_send(p) {
             Ok(()) => true,
@@ -304,14 +303,11 @@ impl Hub {
     pub fn to_account(&self, account: &str, p: &Push) {
         let devices: Vec<String> = self
             .conns
-            .lock()
-            .map(|g| {
-                g.iter()
-                    .filter(|(_, c)| c.account == account)
-                    .map(|(d, _)| d.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
+            .locked()
+            .iter()
+            .filter(|(_, c)| c.account == account)
+            .map(|(d, _)| d.clone())
+            .collect();
         for d in devices {
             self.to_device(&d, p.clone());
         }
@@ -419,7 +415,7 @@ impl Limiter {
     pub fn check(&self, key: String, max: u32, window: i64) -> Result<(), ApiError> {
         let k = self.hash(&key);
         let t = now();
-        let mut g = self.counters.lock().map_err(ApiError::internal)?;
+        let mut g = self.counters.locked();
         let e = g.entry(k).or_insert(Counter {
             count: 0,
             start: t,
@@ -446,7 +442,7 @@ impl Limiter {
     pub fn spent(&self, key: &str, max: u32, window: i64) -> Result<(), ApiError> {
         let k = self.hash(key);
         let t = now();
-        let g = self.counters.lock().map_err(ApiError::internal)?;
+        let g = self.counters.locked();
         match g.get(&k) {
             Some(e) if t - e.start < window && e.start <= t && e.count >= self.budget(max) => {
                 let wait = u64::try_from(window - (t - e.start)).unwrap_or(1).max(1);
@@ -466,7 +462,7 @@ impl Limiter {
     pub fn charge(&self, items: &[(String, u32, u32)], window: i64) -> Result<(), ApiError> {
         let keys: Vec<[u8; 16]> = items.iter().map(|(k, _, _)| self.hash(k)).collect();
         let t = now();
-        let mut g = self.counters.lock().map_err(ApiError::internal)?;
+        let mut g = self.counters.locked();
         let mut wait = 0i64;
         for (k, (_, n, max)) in keys.iter().zip(items) {
             let used = match g.get(k) {
@@ -505,7 +501,8 @@ impl Limiter {
     /// Forget windows that have ended (and anything older than an hour).
     pub fn sweep(&self) {
         let t = now();
-        if let Ok(mut g) = self.counters.lock() {
+        {
+            let mut g = self.counters.locked();
             g.retain(|_, c| t - c.start < c.window.min(3600));
         }
     }
@@ -515,8 +512,7 @@ impl Limiter {
         let Some(db) = &self.db else { return Ok(()) };
         let rows: Vec<crate::db::RateRow> = self
             .counters
-            .lock()
-            .map_err(|_| "lock poisoned".to_string())?
+            .locked()
             .iter()
             .filter(|(_, c)| c.window >= PERSIST_WINDOW && c.count > 0)
             .map(|(k, c)| (k.to_vec(), c.count, c.start, c.window))
@@ -688,7 +684,7 @@ pub const LINK_TTL: i64 = 600;
 impl Links {
     /// Add a request; refuses when the account already has [`MAX_LINKS`].
     pub fn add(&self, account: &str, r: LinkRequest) -> Result<(), ApiError> {
-        let mut g = self.0.lock().map_err(ApiError::internal)?;
+        let mut g = self.0.locked();
         let t = now();
         let list = g.entry(account.to_string()).or_default();
         list.retain(|x| x.expires > t && x.device != r.device);
@@ -703,20 +699,16 @@ impl Links {
     pub fn pending(&self, account: &str) -> Vec<LinkRequest> {
         let t = now();
         self.0
-            .lock()
-            .map(|g| {
-                g.get(account)
-                    .map(|l| l.iter().filter(|x| x.expires > t).cloned().collect())
-                    .unwrap_or_default()
-            })
+            .locked()
+            .get(account)
+            .map(|l| l.iter().filter(|x| x.expires > t).cloned().collect())
             .unwrap_or_default()
     }
 
     /// Remove requests by id or by device.
     pub fn remove(&self, account: &str, pred: impl Fn(&LinkRequest) -> bool) {
-        if let Ok(mut g) = self.0.lock()
-            && let Some(l) = g.get_mut(account)
-        {
+        let mut g = self.0.locked();
+        if let Some(l) = g.get_mut(account) {
             l.retain(|x| !pred(x));
         }
     }
@@ -724,7 +716,8 @@ impl Links {
     /// Drop expired requests.
     pub fn sweep(&self) {
         let t = now();
-        if let Ok(mut g) = self.0.lock() {
+        {
+            let mut g = self.0.locked();
             for l in g.values_mut() {
                 l.retain(|x| x.expires > t);
             }
@@ -744,7 +737,7 @@ impl Challenges {
     pub fn issue(&self) -> Result<String, ApiError> {
         let nonce = rootcard::encoding::base64url_encode(&random::<32>());
         let t = now();
-        let mut g = self.0.lock().map_err(ApiError::internal)?;
+        let mut g = self.0.locked();
         g.retain(|_, e| *e > t);
         if g.len() > 100_000 {
             return Err(ApiError::rate_limited(10));
@@ -756,10 +749,7 @@ impl Challenges {
     /// Take a challenge (once).
     pub fn take(&self, nonce: &str) -> bool {
         let t = now();
-        self.0
-            .lock()
-            .map(|mut g| g.remove(nonce).is_some_and(|e| e > t))
-            .unwrap_or(false)
+        self.0.locked().remove(nonce).is_some_and(|e| e > t)
     }
 }
 
@@ -1059,6 +1049,39 @@ mod limit_tests {
                 .charge(&[("c".into(), 101, 100)], 60)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn a_panic_under_a_lock_does_not_disable_it() {
+        let db = Db::open(":memory:").expect("db");
+        let l = Limiter::persistent(1, db.clone()).expect("limiter");
+        let hub = Hub::default();
+        let poison = |m: &dyn Fn()| {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(m));
+            assert!(r.is_err());
+        };
+        poison(&|| {
+            let _g = db.conn().expect("conn");
+            panic!("while holding the database");
+        });
+        poison(&|| {
+            let _g = l.counters.lock();
+            panic!("while holding the counters");
+        });
+        poison(&|| {
+            let _g = hub.conns.lock();
+            panic!("while holding the connections");
+        });
+        assert!(l.counters.is_poisoned() && hub.conns.is_poisoned());
+        // Everything still works afterwards: writes, rate limits, connections.
+        db.set_setting("after", "panic").expect("write");
+        assert_eq!(db.setting("after").expect("read").as_deref(), Some("panic"));
+        assert!(l.check("k".into(), 1, 60).is_ok());
+        assert!(l.check("k".into(), 1, 60).is_err());
+        l.save().expect("save");
+        let (tx, _rx) = mpsc::channel(1);
+        hub.register("d", "a", false, tx);
+        assert!(hub.is_connected("d"));
     }
 
     #[test]

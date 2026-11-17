@@ -149,8 +149,8 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [ ] Check that a remote lookup answers for the requested `Name#TAG` (`identity.js:149-152`)
 - [ ] Log push failures and `fork` in `refresh_if_remote` (`push.rs:180-235`, `remote.rs:140-144`); scheduled pushes
       are lost on restart
-- [ ] Poisoned mutexes disable the database and hub for good (`db.rs:180-184`, `app.rs:171`): recover with
-      `into_inner` as `federation.rs` does
+- [x] Poisoned mutexes disable the database and hub for good (`db.rs:180-184`, `app.rs:171`): recover with
+      `into_inner` as `federation.rs` does (`Locked::locked` in `app.rs`, used for every server mutex)
 - [ ] Spec: §14.3 `req` lacks `kind`; "fetched again once" is unbounded; replay nonces are lost on restart
 - [ ] Federation tests: open mode, replay, stale time, wrong `to`/`kind`, key rotation, block-list variants, a peer that
       is down or slow, spoofed relay account, mailbox flooding, IDN addresses

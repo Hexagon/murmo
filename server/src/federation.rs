@@ -16,7 +16,7 @@
 //! `MURMO_FEDERATION_BLOCK`). An open server talks only to public https origins with a domain name.
 
 use crate::api::check_account;
-use crate::app::{App, Push, now, random, text};
+use crate::app::{App, Locked, Push, now, random, text};
 use crate::db::{ChunkData, OutboxItem};
 use crate::devices::{MAX_DEVICES, MAX_ENTRIES};
 use crate::egress;
@@ -166,7 +166,7 @@ impl Federation {
 
     /// Remember a delivery; false if it was seen before.
     fn fresh(&self, origin: &str, nonce: &str, t: i64) -> bool {
-        let mut n = self.nonces.lock().unwrap_or_else(|e| e.into_inner());
+        let mut n = self.nonces.locked();
         n.retain(|_, seen| t - *seen < 2 * SKEW);
         match n.entry(format!("{origin} {nonce}")) {
             std::collections::hash_map::Entry::Occupied(_) => false,
@@ -181,7 +181,7 @@ impl Federation {
     /// [`MAX_ROUTES`] devices forgets the one it used least recently.
     pub fn learn(&self, account: &str, device: &str, origin: &str) {
         let t = now();
-        let mut routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut routes = self.routes.locked();
         let mine = routes.entry(account.to_string()).or_default();
         if !mine.contains_key(device) && mine.len() >= MAX_ROUTES {
             evict_oldest(mine, |(_, at)| *at);
@@ -192,8 +192,7 @@ impl Federation {
     /// The server a device is on, as `account` knows it; None for a device of this server (or one it never named).
     pub fn route(&self, account: &str, device: &str) -> Option<String> {
         self.routes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .locked()
             .get(account)
             .and_then(|m| m.get(device))
             .map(|(o, _)| o.clone())
@@ -205,7 +204,7 @@ impl Federation {
         if size > MAX_LISTS_BYTES / 4 {
             return;
         }
-        let mut lists = self.lists.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lists = self.lists.locked();
         lists.remove(&key);
         lists.retain(|_, (_, _, at)| t - *at < LIST_CACHE);
         while !lists.is_empty()
@@ -219,7 +218,7 @@ impl Federation {
 
     /// Keep what this server knows of a peer, within [`MAX_PEERS`].
     fn keep_peer(&self, origin: &str, p: Peer) {
-        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        let mut keys = self.keys.locked();
         if !keys.contains_key(origin) && keys.len() >= MAX_PEERS {
             evict_oldest(&mut keys, |p| p.at);
         }
@@ -229,19 +228,15 @@ impl Federation {
     /// Forget peers' keys fetched long ago.
     pub fn sweep(&self) {
         let t = now();
-        self.keys
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, p| t - p.at < KEY_TTL);
-        let mut routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+        self.keys.locked().retain(|_, p| t - p.at < KEY_TTL);
+        let mut routes = self.routes.locked();
         for mine in routes.values_mut() {
             mine.retain(|_, (_, at)| t - *at < ROUTE_TTL);
         }
         routes.retain(|_, mine| !mine.is_empty());
         drop(routes);
         self.lists
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .locked()
             .retain(|_, (_, _, at)| t - *at < LIST_CACHE);
     }
 }
@@ -404,13 +399,7 @@ async fn post(app: &App, url: String, body: Vec<u8>) -> Result<(u16, Value), Api
 /// than once in [`REFETCH_EVERY`] seconds; a failed fetch is cached for as long).
 async fn peer(app: &Arc<App>, origin: &str, fresh: bool) -> Result<Peer, ApiError> {
     let t = now();
-    let cached = app
-        .fed
-        .keys
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(origin)
-        .cloned();
+    let cached = app.fed.keys.locked().get(origin).cloned();
     if let Some(p) = &cached {
         let valid = t - p.at < if p.key.is_some() { KEY_TTL } else { 60 };
         if (valid && !fresh) || t - p.tried < REFETCH_EVERY {
@@ -945,13 +934,7 @@ async fn devices_of(
     check_account(account)?;
     let key = format!("{server} {account}");
     if !fresh
-        && let Some((v, _, at)) = app
-            .fed
-            .lists
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .cloned()
+        && let Some((v, _, at)) = app.fed.lists.locked().get(&key).cloned()
         && now() - at < LIST_CACHE
     {
         return Ok(v);

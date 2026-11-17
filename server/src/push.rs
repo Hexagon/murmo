@@ -7,7 +7,7 @@
 //! from this server at that time. Endpoints are only accepted on allowlisted push hosts (no requests to arbitrary
 //! addresses).
 
-use crate::app::{App, now, random};
+use crate::app::{App, Locked, now, random};
 use crate::error::ApiError;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
@@ -183,9 +183,7 @@ pub fn schedule(app: &Arc<App>, device: &str, id: i64) {
         return;
     }
     {
-        let Ok(mut g) = app.push.scheduled.lock() else {
-            return;
-        };
+        let mut g = app.push.scheduled.locked();
         if !g.insert(device.to_string()) {
             return;
         }
@@ -193,13 +191,7 @@ pub fn schedule(app: &Arc<App>, device: &str, id: i64) {
     let app = app.clone();
     let device = device.to_string();
     tokio::spawn(async move {
-        let last = app
-            .push
-            .last
-            .lock()
-            .ok()
-            .and_then(|g| g.get(&device).copied())
-            .unwrap_or(0);
+        let last = app.push.last.locked().get(&device).copied().unwrap_or(0);
         let gap = u64::try_from(last + MIN_GAP - now()).unwrap_or(0);
         let wait = if app.hub.is_connected(&device) {
             ACK_WAIT
@@ -207,9 +199,7 @@ pub fn schedule(app: &Arc<App>, device: &str, id: i64) {
             1
         };
         tokio::time::sleep(Duration::from_secs(wait.max(gap))).await;
-        if let Ok(mut g) = app.push.scheduled.lock() {
-            g.remove(&device);
-        }
+        app.push.scheduled.locked().remove(&device);
         if !app.db.queued_since(&device, id).unwrap_or(false) {
             return;
         }
@@ -222,7 +212,8 @@ pub fn schedule(app: &Arc<App>, device: &str, id: i64) {
         let Some(auth) = app.push.authorization(&origin) else {
             return;
         };
-        if let Ok(mut g) = app.push.last.lock() {
+        {
+            let mut g = app.push.last.locked();
             if g.len() > 100_000 {
                 g.clear();
             }
