@@ -1334,8 +1334,8 @@ function renderShell() {
   ui.main = h("main", { class: "main" });
   ui.net = h("div", { class: "net-banner", role: "status", hidden: true },
     h("span", { class: "dot" }),
-    h("span", { text: tr("net.offline") }),
-    h("button", { type: "button", class: "link", text: tr("net.retry"), onclick: () => messenger?.wake() }),
+    h("span", { class: "net-text", text: tr("net.offline") }),
+    h("button", { type: "button", class: "link", text: tr("net.retry"), onclick: () => messenger?.wake(true) }),
   );
   ui.bell = h("button", { class: "icon-btn bell-off", hidden: true, onclick: async () => toast(await setNotifications(true).catch((x) => say(x))) }, icon("bellOff"));
   ui.shell = h(
@@ -1529,6 +1529,15 @@ const NET_GRACE = 2500;
 let netTimer = 0;
 function updateNet() {
   if (!ui.net) return;
+  // Refused for good (the server does not take this device's login): said at once, and not retried on its own soon.
+  const refused = messenger?.status === "refused";
+  ui.net.querySelector(".net-text").textContent = refused ? tr("net.refused") : tr("net.offline");
+  if (refused) {
+    clearTimeout(netTimer);
+    netTimer = 0;
+    ui.net.hidden = false;
+    return;
+  }
   const down = messenger?.status === "offline";
   if (!down) {
     clearTimeout(netTimer);

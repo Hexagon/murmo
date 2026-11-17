@@ -1035,9 +1035,11 @@ stores no more than it does now, unless an idea says otherwise and that is accep
 
 ### 13.1 Recovery and identity
 
-**Remote wipe.** Partly there: a removed device that starts and connects finds itself missing from the list
-(`unknown_device`), deletes its local store and forgets the account on the login screen (`logout(true)` in `app.js`),
-and contacts stop encrypting to it (§4.4). What is missing:
+**Remote wipe.** Partly there: a removed device that starts and connects is refused (`unknown_device`), checks the
+removal itself (its account's signed list, fetched afresh, extends the pinned one and no longer holds it), deletes its
+local store and forgets the account on the login screen (`logout(true)` in `app.js`), and contacts stop encrypting
+to it (§4.4). A refusal it cannot verify (a server that lost or rolled back the account) only shows a banner and is
+tried again every few minutes, so a server cannot make a device forget its history. What is missing:
 - The owner learns nothing. The device could, before deleting, send a last message signed with its device key to the
   own devices ("wiped at …"); the server would have to let a just-removed device send this one message, or the
   device signs it and the server keeps it with the removal. Shown in the device list.

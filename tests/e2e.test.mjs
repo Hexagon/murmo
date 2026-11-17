@@ -1283,6 +1283,36 @@ test("the own device list is pinned: an older list that still holds a removed de
   assert.equal((await erik1.ownList(true)).present.length, 1);
 });
 
+test("a refused login: a removed device verifies its removal; a refusal it cannot verify only shows", async () => {
+  const fridaHandle = await register("Frida", PW);
+  const frida1 = await device(fridaHandle, PW, "frida1");
+  const frida2 = await device(fridaHandle, PW, "frida2", async () => {
+    const req = await waitFor(frida1, "link");
+    await frida1.approveLink(req.request);
+  });
+  await until(async () => frida2.status === "online");
+  await frida2.ownList(true); // pins the list with both devices
+  // Removed while connected: the server drops it, the next login is refused, and the signed list confirms it.
+  const removed = waitFor(frida2, "removed", () => true, 20000);
+  await frida1.removeDevice(frida2.me.device);
+  await removed;
+  assert.equal(frida2.status, "refused");
+  assert.equal(frida2.ws.refused, "unknown_device");
+  frida2.stop();
+
+  // A server that refuses a device still on the list (say, one restored from an old backup): shown, never wiped.
+  let wiped = false;
+  frida1.addEventListener("removed", () => (wiped = true));
+  frida1.ws.dispatchEvent(new CustomEvent("refused", { detail: "unknown_device" }));
+  assert.equal(frida1.status, "refused");
+  assert.equal(await frida1.confirmRemoved(), false);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(wiped, false);
+  frida1.ws.dropped(frida1.ws.ws);
+  frida1.wake(true);
+  await until(async () => frida1.status === "online");
+});
+
 test("homes that are not allowed are refused", async () => {
   await assert.rejects(api.connect("0".repeat(52), "https://evil.example/id"), (e) => e.status === 403 || e.status === 404);
 });

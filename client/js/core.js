@@ -333,8 +333,17 @@ export class Messenger extends EventTarget {
     this.ws.addEventListener("frame-error", (e) => {
       if (this.missed.has(e.detail.id)) this.refused.add(e.detail.id);
     });
-    this.ws.addEventListener("server-error", (e) => {
-      if (e.detail === "unknown_device") this.emit("removed");
+    // The server refused this device's login for good. Only a removal that this device can verify itself (its
+    // account's signed list, extending the pinned one, without this device) wipes it; anything else, such as a server
+    // that lost or rolled back the account, is shown and tried again later, so a server cannot make a device forget
+    // its history by refusing it.
+    this.ws.addEventListener("refused", (e) => {
+      this.status = "refused";
+      this.refusal = e.detail;
+      this.emit("status", "refused");
+      this.confirmRemoved()
+        .then((gone) => gone && this.emit("removed"))
+        .catch(() => {}); // not confirmed (the network): asked again at the next refusal
     });
     this.queue = Promise.resolve();
     this.ws.connect();
@@ -351,8 +360,9 @@ export class Messenger extends EventTarget {
   }
 
   /** The page is visible again or the network came back: check the connection now. */
-  wake() {
-    this.ws?.wake();
+  /** `force`: the person asked to connect, also after a refused login. */
+  wake(force = false) {
+    this.ws?.wake(force);
     this.sweepTimed().catch(() => {}); // timers do not run while a page sleeps
   }
 
@@ -473,6 +483,20 @@ export class Messenger extends EventTarget {
       this.ownPinned = { head: list.head, length: list.entries.length };
       await this.store.setSecret("ownPinned", this.ownPinned);
     }
+  }
+
+  /**
+   * Whether this device is verifiably removed from its account: the account's signed list, fetched afresh, extends
+   * the pinned one and no longer holds this device. A list that forks, or one this device cannot verify, is not proof.
+   */
+  async confirmRemoved() {
+    const r = await this.api.devices(this.me.account);
+    if (!r.entries.length) return false;
+    const state = await fetchState(this.api, r.home, this.realms, this.me.account);
+    const list = await p.verifyDevices(this.me.account, state.instance.account_key, r.entries);
+    if (list.present.some((d) => d.id === this.me.device)) return false;
+    const pin = this.ownPinned;
+    return Boolean(pin) && (await p.extendsPinned(list, pin.head, pin.length));
   }
 
   /**

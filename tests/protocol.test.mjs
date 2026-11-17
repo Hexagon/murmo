@@ -569,3 +569,44 @@ test("part keys sort in part order, and keys of parts stored before stay the sam
   // All within the range a file's parts are deleted by (`t:` … `t:\uffff`), and not in another tag's.
   for (const k of keys) assert.ok(k > "t:" && k < "t:\uffff");
 });
+
+test("socket: a login refused for good is not retried at once; a failing auth does not throw; reconnects are jittered", async () => {
+  const s = new Socket("ws://unused", async () => {
+    throw new Error("no key");
+  });
+  const delays = [];
+  const realTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (f, ms) => {
+    delays.push(ms);
+    return 0;
+  };
+  try {
+    const ws = { send() {}, close() {} };
+    // A refusal for good: told once, and the next try waits minutes, not a second.
+    const refused = [];
+    s.addEventListener("refused", (e) => refused.push(e.detail));
+    s.ws = ws;
+    await s.onFrame(JSON.stringify({ t: "error", error: "unknown_device" }));
+    assert.deepEqual(refused, ["unknown_device"]);
+    assert.equal(s.refused, "unknown_device");
+    assert.ok(delays.at(-1) >= 150_000 && delays.at(-1) <= 300_000);
+    // Focus and visibility do not bring it back; the person asking does.
+    s.wake();
+    assert.equal(s.ws, null);
+    s.connect = () => (s.ws = ws);
+    s.wake(true);
+    assert.equal(s.ws, ws);
+    // A temporary refusal (rate limit, the server's own error) is retried with the normal backoff.
+    s.refused = null;
+    s.retry = null;
+    s.backoff = 1000;
+    await s.onFrame(JSON.stringify({ t: "error", error: "internal" }));
+    assert.equal(s.refused, null);
+    assert.ok(delays.at(-1) >= 500 && delays.at(-1) <= 1000);
+    // An auth that throws rejects onFrame (caught by the socket's message handler), it never sends a half login.
+    s.ws = ws;
+    await assert.rejects(s.onFrame(JSON.stringify({ t: "challenge", nonce: "n" })), /no key/);
+  } finally {
+    globalThis.setTimeout = realTimeout;
+  }
+});

@@ -306,6 +306,7 @@ export default {
   "side.online": "Verbunden",
   "side.connecting": "Verbinde…",
   "net.offline": "Keine Verbindung zum Server. Verbinde neu…",
+  "net.refused": "Der Server nimmt dieses Gerät gerade nicht an. Murmo versucht es in einigen Minuten erneut.",
   "net.retry": "Jetzt versuchen",
   "side.account": "Konto und Einstellungen",
   "side.back": "Zurück zu den Unterhaltungen",

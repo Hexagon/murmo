@@ -306,6 +306,7 @@ export default {
   "side.online": "Ansluten",
   "side.connecting": "Ansluter…",
   "net.offline": "Ingen anslutning till servern. Ansluter igen…",
+  "net.refused": "Servern godtar inte den här enheten just nu. Murmo försöker igen om några minuter.",
   "net.retry": "Försök nu",
   "side.account": "Konto och inställningar",
   "side.back": "Tillbaka till konversationerna",
