@@ -303,6 +303,8 @@ export default {
   "side.copyHint": "Klicka för att kopiera",
   "side.online": "Ansluten",
   "side.connecting": "Ansluter…",
+  "net.offline": "Ingen anslutning till servern. Ansluter igen…",
+  "net.retry": "Försök nu",
   "side.account": "Konto och inställningar",
   "side.back": "Tillbaka till konversationerna",
 
@@ -473,6 +475,8 @@ export default {
 
   // ── messages ──
   "msg.sending": " · Skickar… {pct}",
+  "msg.sendingText": " · Skickar…",
+  "msg.waitingNet": " · Väntar på anslutningen…",
   "msg.deleteTombstone": "Ta bort platshållaren?",
   "msg.deleteQuestion": "Ta bort meddelandet?",
   "msg.forAllHint": "”Ta bort för alla” byter ut meddelandet mot ”Du tog bort det här meddelandet” på {name}s och dina enheter när de tar emot det. Har {name} redan sett det, sparat det eller använder en äldre version av Murmo kan det finnas kvar – det går inte att ta tillbaka det som redan visats.",

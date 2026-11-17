@@ -286,7 +286,10 @@ proves that neither server nor anyone else sits in between. The code changes whe
 ### 6.4 Receipts: queued or delivered
 
 The interface shows a ring on a sent message while the server holds it for the recipient, and a ring with a check
-once one of the recipient's devices has it.
+once one of the recipient's devices has it. A text that has not reached the server yet (held for "Ångra", §6.6) has
+no ring: while it is being sent it says "Skickar…", and while there is no connection "Väntar på anslutningen…". When
+the connection to the server has been lost for a few seconds, a banner under the top bar says so in every view (on a
+phone the sidebar's "Ansluter…" is hidden inside a conversation), with a button to try again at once.
 
 - The server tells the sender nothing about delivery (it would have to remember who sent what). Instead the
   recipient's device answers with a `receipt` message, `body: { ids: [<message id>, …] }`, end-to-end encrypted to the
