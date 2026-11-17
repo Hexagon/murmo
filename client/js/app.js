@@ -222,6 +222,24 @@ function dialog(...children) {
   return d;
 }
 
+let fieldIds = 0;
+/**
+ * A form field: the label above the control is tied to it, so screen readers and voice control know the control by
+ * its name and a click on the label focuses it (`for` and an id; a group of buttons gets `aria-labelledby`).
+ */
+function field(label, control, ...rest) {
+  const lab = h("label", { text: label });
+  if (control.labels) {
+    control.id ||= `field-${++fieldIds}`;
+    lab.htmlFor = control.id;
+  } else {
+    lab.id = `field-${++fieldIds}`;
+    if (!control.getAttribute("role")) control.setAttribute("role", "group");
+    control.setAttribute("aria-labelledby", lab.id);
+  }
+  return h("div", { class: "field" }, lab, control, ...rest);
+}
+
 /** Choices for how long a conversation's messages are kept (seconds; 0: until the conversation is deleted). */
 const RETENTIONS = [
   [0, "ret.forever"],
@@ -614,7 +632,8 @@ async function loginForm(body, err, prefill) {
   const known = await accounts.all();
   const remote = h("input", { class: "input", placeholder: "rootcard.org", spellcheck: "false", autocomplete: "off" });
   let where = "local";
-  const remoteField = h("div", { class: "field hidden" }, h("label", { text: tr("auth.remoteLabel") }), remote, h("div", { class: "hint", text: tr("auth.remoteHint", { homes: allowedHomes() || tr("auth.noOtherHome") }) }));
+  const remoteField = field(tr("auth.remoteLabel"), remote, h("div", { class: "hint", text: tr("auth.remoteHint", { homes: allowedHomes() || tr("auth.noOtherHome") }) }));
+  remoteField.classList.add("hidden");
   const seg = h("div", { class: "seg" });
   const setWhere = (w) => {
     where = w;
@@ -667,10 +686,10 @@ async function loginForm(body, err, prefill) {
       },
     },
     chips,
-    h("div", { class: "field" }, h("label", { text: tr("auth.where") }), seg),
+    field(tr("auth.where"), seg),
     remoteField,
-    h("div", { class: "field" }, h("label", { text: tr("common.handle") }), handle),
-    h("div", { class: "field" }, h("label", { text: tr("common.password") }), pw),
+    field(tr("common.handle"), handle),
+    field(tr("common.password"), pw),
     h(
       "label",
       { class: "check" },
@@ -712,9 +731,9 @@ function registerForm(body, err) {
           }
         },
       },
-      h("div", { class: "field" }, h("label", { text: tr("auth.username") }), user),
-      h("div", { class: "field" }, h("label", { text: tr("auth.passwordMin") }), pw),
-      h("div", { class: "field" }, h("label", { text: tr("auth.repeat") }), pw2),
+      field(tr("auth.username"), user),
+      field(tr("auth.passwordMin"), pw),
+      field(tr("auth.repeat"), pw2),
       h("p", { class: "hint", text: tr("auth.handleHint") }),
       (info?.homes ?? []).length ? h("p", { class: "hint", text: tr("auth.haveIdentity", { homes: allowedHomes() }) }) : null,
       h("p", { class: "hint" }, tr("terms.accept"), " ", h("button", { class: "link", type: "button", text: tr("terms.read"), onclick: showTerms })),
@@ -946,7 +965,7 @@ function paperKeyForm(setup, done) {
       },
     },
     h("p", {}, h("strong", { text: tr("paper.have") }), tr("paper.haveText")),
-    h("div", { class: "field" }, h("label", { text: tr("paper.label") }), input),
+    field(tr("paper.label"), input),
     go,
     err,
     h("p", { class: "hint", text: tr("paper.none") }),
@@ -3723,8 +3742,10 @@ function showAccountMenu() {
         undo,
         h("span", {}, tr("acct.undo"), h("span", { class: "hint", style: "display:block", text: tn("acct.undoHint", UNDO_SEND / 1000) })),
       ),
-      h("div", { class: "field", style: "margin:6px 0 0" }, h("label", { text: tr("theme.label") }), themePicker()),
-      h("div", { class: "field", style: "margin:6px 0 0" }, h("label", { text: tr("common.language") }), languagePicker(() => { d.close(); renderShell(); showAccountMenu(); })),
+      [field(tr("theme.label"), themePicker()), field(tr("common.language"), languagePicker(() => { d.close(); renderShell(); showAccountMenu(); }))].map((f) => {
+        f.style.margin = "6px 0 0";
+        return f;
+      }),
       h("button", { class: "btn danger", text: tr("acct.logout"), onclick: () => { d.close(); logout(false); } }),
     ),
     h("div", { class: "actions" }, h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() })),
@@ -3855,7 +3876,7 @@ function showPaperKey(onDone = () => {}) {
       },
     },
     h("p", { text: tr("pk.intro") }),
-    h("div", { class: "field" }, h("label", { text: tr("pk.yourPassword") }), pw),
+    field(tr("pk.yourPassword"), pw),
     h("div", { class: "actions" }, h("button", { class: "btn", type: "button", text: tr("common.cancel"), onclick: () => d.close() }), go),
     err,
   );

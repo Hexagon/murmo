@@ -55,9 +55,32 @@ async function clickText(pg, text, sel = "button") {
   for (const e of els) if ((await e.evaluate((x) => x.textContent.trim())) === text) return e.click();
   throw new Error(`no ${sel} with text ${text}`);
 }
+/**
+ * Every form control that is shown has an accessible name: a label tied to it (`for`, or wrapped), `aria-label` or
+ * `aria-labelledby`; a group of buttons under a field label is named by it. `labels`: label text → what it must name.
+ */
+async function named(pg, where, labels = {}) {
+  const bad = await pg.evaluate((labels) => {
+    const scope = document.querySelector("dialog[open]") ?? document;
+    const name = (el) => (el.labels?.length ? [...el.labels].map((l) => l.textContent.trim()).join(" ") : "") || el.getAttribute("aria-label") || (el.getAttribute("aria-labelledby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent.trim() ?? "").join(" ").trim();
+    const out = [];
+    for (const el of scope.querySelectorAll("input:not([type=hidden]), select, textarea")) {
+      if (el.offsetParent !== null && !name(el)) out.push(el.outerHTML.slice(0, 80));
+    }
+    for (const [text, sel] of Object.entries(labels)) {
+      const label = [...scope.querySelectorAll(".field > label")].find((l) => l.textContent === text);
+      const target = label && (label.control ?? document.querySelector(`[aria-labelledby="${label.id}"]`));
+      if (!target || !target.matches(sel)) out.push(`label "${text}" does not name ${sel}`);
+    }
+    return out;
+  }, labels);
+  if (bad.length) throw new Error(`${where}: form fields without an accessible name: ${bad.join("; ")}`);
+}
 async function register(pg, user, tag) {
   await pg.screenshot({ path: `${shots}/${tag}-1-login.png` });
+  await named(pg, "login", { Identifierare: "input[autocomplete=username]", Lösenord: "input[type=password]", "Var finns din identitet?": ".seg[role=group]" });
   await clickText(pg, "Skapa konto");
+  await named(pg, "register", { Användarnamn: "input" });
   const inputs = await pg.$$("form input");
   await inputs[0].type(user);
   await inputs[1].type("correct horse battery staple");
@@ -541,11 +564,14 @@ try {
   await a.waitForFunction(() => document.querySelector(".me .s")?.textContent.includes("Ansluten"), { timeout: 10000 });
   // Alice makes a paper key, loses her only browser, and comes back with it on a new one.
   await a.click('[aria-label="Konto och inställningar"]');
+  await a.waitForSelector("dialog select.lang", { timeout: 5000 });
+  await named(a, "account menu", { Tema: ".theme[role=radiogroup]", Språk: "select.lang" });
   await clickText(a, "Enheter");
   await a.waitForFunction(() => [...document.querySelectorAll("dialog button")].some((x) => x.textContent === "Skapa pappersnyckel"), { timeout: 10000 });
   await a.screenshot({ path: `${shots}/a-8-devices.png` });
   await clickText(a, "Skapa pappersnyckel");
   await a.waitForSelector("dialog input[type=password]", { timeout: 5000 });
+  await named(a, "paper key password", { "Ditt lösenord": "input[type=password]" });
   await a.type("dialog input[type=password]", "correct horse battery staple");
   await clickText(a, "Fortsätt");
   await a.waitForSelector("dialog pre.paperkey", { timeout: 60000 });
@@ -560,6 +586,7 @@ try {
   await a2.click("form button[type=submit]");
   await a2.waitForSelector(".code", { timeout: 60000 });
   await clickText(a2, "Jag har ingen annan enhet kvar");
+  await named(a2, "link with paper key", { Pappersnyckel: "form.paper input" });
   await a2.type("form.paper input", paperKey.toLowerCase());
   await a2.screenshot({ path: `${shots}/a2-1-link-paper.png`, fullPage: true });
   await clickText(a2, "Använd pappersnyckeln");
