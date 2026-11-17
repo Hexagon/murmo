@@ -72,7 +72,11 @@ domain the user types, which the client resolves with the host pointer `/.well-k
   refreshes the log every few minutes when the identity is used, never moves back to an older version and refuses
   forks ([VER-4]).
 - The server contacts **only allowlisted homes** (origins in `MURMO_REMOTE_HOMES`; `*` allows any public https host
-  that is not an IP literal). Clients therefore cannot make the server fetch arbitrary addresses.
+  with a public host name: dotted, its last label alphabetic, so never an IP literal in any spelling such as `127.1` or
+  `0x7f.0.0.1`, nor `localhost.` or a local name). Such a home is resolved by the server itself at connection time
+  and reached only at public addresses (not loopback, private, link-local, CGNAT, multicast or reserved; the
+  connection goes to the addresses that were checked). Clients therefore cannot make the server fetch arbitrary
+  addresses. Origins the operator lists are reached as configured, also on internal addresses.
 - Clients never rely on the server's copy: they fetch every contact's log from the contact's own home and verify it.
   The page's CSP allows connections to this server and to the allowed homes only.
 - Proofs instead of sessions: a link request carries a rootcard **proof** by the account key (SPEC §14) for a
@@ -254,6 +258,13 @@ come with the Double Ratchet in phase 2 (PLAN.md).
 - `heads` gossips the device-list heads the sender knows (its own and the recipient's). A recipient that sees a head
   it does not have fetches the list from the server; a head that does not extend the pinned list is a **fork** and
   the conversation is blocked with a warning. Contacts thereby act as witnesses for each other.
+- A fork blocks both directions. The forked list is never cached (it is only shown, for the safety code), and while a
+  contact is marked as forked nothing from that account is taken: its messages do not verify, not even from a device
+  of the pinned list, and its file chunks are not stored. They are dropped (quarantined), not kept for later.
+- The account's own list is pinned the same way, as `{ head, length }` in the device's encrypted store (TOFU on the
+  first list that holds this device). A device refuses an own list that does not extend the pinned one or that no
+  longer holds the device itself, and does not cache it: a server cannot serve an older, validly signed list that still
+  holds a removed device and so give that device a copy of every message, or take its history, sync or names.
 
 ## 6. Conversations and message requests
 
@@ -770,7 +781,7 @@ WebSocket frames (JSON):
 | client → server | `auth` may carry `caps: ["bin"]`: the connection takes binary relay frames (§10.2) |
 | server → client | `{ t: "ready", relay: { bytes, peer, granted, store, frames, slow_frames, grant, binary, window } }` (the relay budgets below and in §10.2) then queued `{ t: "msg", id, env }` frames |
 | client → server | `{ t: "send", id, to: [{ device, env }] }` → `{ t: "sent", id }` |
-| client → server | `{ t: "ack", ids: [...] }` (deletes) |
+| client → server | `{ t: "ack", ids: [...] }` (deletes). Sent only for final results: a message handled, or one that can never be (undecryptable, not for this device, a bad signature or an unknown sender device). An envelope whose sender's device list could not be fetched, or whose handling failed locally (a full store), is left in the mailbox and read again on the next connection (at most until it expires) |
 | client → server | `{ t: "prekey", prekey }` |
 | client → server | `{ t: "presence", devices, ref }` → `{ t: "presence", online, ref }` |
 | client → server | `{ t: "relay", to, data, ref }` → forwarded as `{ t: "relay", from, account, data }` to connected devices only; `{ t: "relay-missed", devices, text?, ref }` for the rest (`text`: connected devices that take no binary frames, for a binary chunk) |
@@ -1247,8 +1258,9 @@ disappearing messages and history between own devices (which are always on one s
 
 ### 14.4 Policy
 
-`MURMO_FEDERATION` is `open` (the default: any public https origin with a domain name, never an IP literal, `localhost`
-or `.local`/`.internal`), `off`, or a list of origins; `MURMO_FEDERATION_BLOCK` lists origins never to talk to. The
+`MURMO_FEDERATION` is `open` (the default: any https origin with a public host name, never an IP literal in any
+spelling, `localhost` or a local name such as `.local`/`.internal`, and connected to only at public addresses, checked
+when it is resolved as for `*` homes in §3.1), `off`, or a list of origins (reached as configured); `MURMO_FEDERATION_BLOCK` lists origins never to talk to. The
 policy decides both what the server fetches for its clients and what it accepts. A server with `off` publishes no
 federation key, and other servers then refuse it as `federation_refused` rather than reporting an unknown account.
 
