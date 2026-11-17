@@ -475,6 +475,16 @@ try {
   await a.waitForFunction(() => document.querySelector(".side-search").offsetParent === null, { timeout: 5000 });
   // The files view (DESIGN.md §13.9): every file of the conversations, pictures as tiles, other files as rows; the
   // viewer steps through the pictures; a file removed from this device stays as a message with "Hämta igen".
+  // The sidebar header fits its 300 px column with the beta mark and all four buttons (the bell is shown here): no
+  // button reaches past the sidebar, under the main column's top bar, and the name does not run under a button.
+  const head = await a.evaluate(() => {
+    const side = document.querySelector(".sidebar").getBoundingClientRect();
+    const top = document.querySelector(".side-top");
+    const btns = [...top.querySelectorAll(".icon-btn")].filter((e) => e.offsetWidth > 0).map((e) => e.getBoundingClientRect());
+    const name = top.querySelector(".logo-name").getBoundingClientRect();
+    return { n: btns.length, inside: btns.every((r) => r.left >= side.left && r.right <= side.right), over: top.scrollWidth - top.clientWidth, clear: btns[0].left - name.right };
+  });
+  if (head.n !== 4 || !head.inside || head.over > 0 || head.clear < 0) throw new Error(`sidebar header overflows: ${JSON.stringify(head)}`);
   await a.click(".side-top .files-btn");
   await a.waitForSelector(".fv-tile img[src]", { timeout: 20000 });
   await a.waitForFunction(() => [...document.querySelectorAll(".fv-row .fn")].some((e) => e.textContent === "icon.svg"), { timeout: 5000 });

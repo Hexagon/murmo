@@ -1115,6 +1115,79 @@ test("envelopes are acknowledged only on final results; temporary failures come 
   assert.deepEqual(acked, [4711]);
 });
 
+test("a fork also stops receiving: the forked list is not cached and the account's messages are quarantined", async () => {
+  const fiaHandle = await register("Fia", PW);
+  const gusHandle = await register("Gus", PW);
+  const fia = await device(fiaHandle, PW, "fia1");
+  const gus = await device(gusHandle, PW, "gus1");
+  const account = fia.me.account;
+  await fia.request(gusHandle, "Hej Gus");
+  await until(async () => gus.contacts.get(account)?.state === "incoming");
+  await gus.accept(account);
+  await until(async () => fia.contacts.get(gus.me.account)?.state === "accepted");
+  const before = await api.devices(account); // validly signed, one device
+  await device(fiaHandle, PW, "fia2", async () => fia.approveLink((await waitFor(fia, "link")).request));
+  gus.lists.clear();
+  assert.equal((await gus.list(account, true)).list.present.length, 2);
+  assert.equal(gus.contacts.get(account).pinned.length, 2);
+  await fia.sendText(gus.me.account, "före");
+  await until(async () => (await gus.messages(account)).some((m) => m.text === "före"));
+
+  // The server rolls Fia's list back: it does not extend the pinned one.
+  const real = gus.api;
+  gus.api = Object.assign(Object.create(real), { devices: async (a) => (a === account ? before : real.devices(a)) });
+  gus.lists.clear();
+  const forked = await gus.list(account, true);
+  assert.equal(forked.list.present.length, 1); // still returned, for the safety code
+  assert.ok(gus.contacts.get(account).fork);
+  assert.ok(!gus.lists.has(account)); // but never cached
+  gus.api = real;
+
+  // Nothing from the forked account is taken, not even from a device in the pinned list; sending stays blocked.
+  fia.lists.clear();
+  await fia.sendText(gus.me.account, "under gaffeln");
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.ok(!(await gus.messages(account)).some((m) => m.text === "under gaffeln"));
+  assert.equal(await gus.lookupDeviceVia(account, fia.me.device, null), undefined);
+  assert.ok(!gus.mayRelay({ account }));
+  await assert.rejects(gus.sendText(account, "svar"), (e) => e.code === "fork");
+});
+
+test("the own device list is pinned: an older list that still holds a removed device is refused", async () => {
+  const erikHandle = await register("Erik", PW);
+  const erik1 = await device(erikHandle, PW, "erik1");
+  const account = erik1.me.account;
+  const erik2 = await device(erikHandle, PW, "erik2", async () => {
+    const req = await waitFor(erik1, "link");
+    await erik1.approveLink(req.request);
+  });
+  const withBoth = await api.devices(account); // validly signed, holds both devices
+  assert.equal((await erik1.ownList(true)).present.length, 2);
+  // The second device is stolen and removed; the pin moves on with the list.
+  await erik1.removeDevice(erik2.me.device);
+  erik2.stop();
+  assert.equal((await erik1.ownList(true)).present.length, 1);
+  const pinned = await erik1.store.secret("ownPinned");
+  assert.equal(pinned.length, (await api.devices(account)).entries.length);
+
+  // A server that serves the older list again: refused and never cached, so nothing is encrypted to the stolen device.
+  const real = erik1.api;
+  erik1.api = Object.assign(Object.create(real), { devices: async (a) => (a === account ? withBoth : real.devices(a)) });
+  erik1.lists.clear();
+  await assert.rejects(erik1.ownList(true), /own_list_fork/);
+  assert.ok(!erik1.lists.has(account));
+  await assert.rejects(erik1.ownTargets(), /own_list_fork/);
+  // A pin survives a restart: it lives in the encrypted store.
+  assert.deepEqual(await erik1.store.secret("ownPinned"), pinned);
+
+  // A list that no longer holds this device is refused too.
+  erik1.api = real;
+  const now = await erik1.ownList(true);
+  const without = { ...now, present: now.present.filter((d) => d.id !== erik1.me.device) };
+  await assert.rejects(erik1.checkOwnPinned(without), /own_list_without_device/);
+  assert.equal((await erik1.ownList(true)).present.length, 1);
+});
+
 test("homes that are not allowed are refused", async () => {
   await assert.rejects(api.connect("0".repeat(52), "https://evil.example/id"), (e) => e.status === 403 || e.status === 404);
 });

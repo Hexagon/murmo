@@ -254,6 +254,13 @@ come with the Double Ratchet in phase 2 (PLAN.md).
 - `heads` gossips the device-list heads the sender knows (its own and the recipient's). A recipient that sees a head
   it does not have fetches the list from the server; a head that does not extend the pinned list is a **fork** and
   the conversation is blocked with a warning. Contacts thereby act as witnesses for each other.
+- A fork blocks both directions. The forked list is never cached (it is only shown, for the safety code), and while a
+  contact is marked as forked nothing from that account is taken: its messages do not verify, not even from a device
+  of the pinned list, and its file chunks are not stored. They are dropped (quarantined), not kept for later.
+- The account's own list is pinned the same way, as `{ head, length }` in the device's encrypted store (TOFU on the
+  first list that holds this device). A device refuses an own list that does not extend the pinned one or that no
+  longer holds the device itself, and does not cache it: a server cannot serve an older, validly signed list that still
+  holds a removed device and so give that device a copy of every message, or take its history, sync or names.
 
 ## 6. Conversations and message requests
 
