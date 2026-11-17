@@ -1226,7 +1226,10 @@ back up. It is published in `/api/v1/info` as `federation.key`. The receiving se
   nonces it has seen;
 - fetches the sender's key from `{from}/api/v1/info` (that origin must list itself in `origins`), over https: TLS is
   what ties the key to the name. Keys are cached for an hour and fetched again once when a signature does not verify
-  (a new host key);
+  (a new host key), but at most once a minute per origin; a fetch that fails is remembered for a minute as well
+  (answered `server_unreachable` without trying again). An address whose signed requests fail verification after a
+  fetch (a bad signature, an unreachable or keyless sender) more than 10 times a minute is refused (`rate_limited`)
+  before anything is fetched;
 - limits envelopes per sending server (6 000 a minute), per receiving device (600 a minute) and requests per address;
 - queues each envelope for a device it knows, with the same limits as its own (`MAX_QUEUE`, `MAILBOX_TTL`, `ttl`), and
   remembers the sending server with it (`mailbox.origin`). The device gets `{ t: "msg", id, env, server }`, and is

@@ -75,7 +75,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       what `Ipv4Addr` parses; `127.1`, `10.1`, `0x7f.0.0.1`, `localhost.` pass and resolve internally, and
       `/federation/deliver` fetches `{from}/api/v1/info` before any signature check. Resolve and refuse private,
       loopback and link-local addresses (or pin the checked IP); require a host name with a letter (T23, T40)
-- [ ] **Unthrottled key refetch.** A bad signature always forces a fresh fetch (`federation.rs:395-399`), failed
+- [x] **Unthrottled key refetch.** A bad signature always forces a fresh fetch (`federation.rs:395-399`), failed
       fetches are not cached (`:281`), each takes up to 10 s on the shared blocking pool, at 1200 req/min per address.
       Negative cache, at most one forced refetch per origin a minute, a low per-address budget for failed verifications
 

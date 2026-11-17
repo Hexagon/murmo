@@ -9,6 +9,7 @@ import "fake-indexeddb/auto";
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,12 +17,29 @@ import { DatabaseSync } from "node:sqlite";
 import { Api, ApiError } from "../client/js/api.js";
 import * as id from "../client/js/identity.js";
 import { Messenger, Store, setupDevice } from "../client/js/core.js";
+import * as p from "../client/js/protocol.js";
 
 const PORT = 21000 + Math.floor(Math.random() * 1000);
 const A = `http://127.0.0.1:${PORT}`;
 const B = `http://127.0.0.1:${PORT + 1000}`;
 const C = `http://127.0.0.1:${PORT + 2000}`; // a server that A does not federate with
 const D = `http://127.0.0.1:${PORT + 3000}`; // a server with federation turned off (like one from before federation)
+// Stand-ins on B's list that count how often B asks them for their key: E publishes a key that signs nothing it is
+// sent with, F drops every connection (an unreachable server).
+const E = `http://127.0.0.1:${PORT + 4000}`;
+const F = `http://127.0.0.1:${PORT + 5000}`;
+const asked = { E: 0, F: 0 };
+const standIns = [
+  createServer((req, res) => {
+    asked.E++;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ origins: [E], federation: { key: "A".repeat(43) } }));
+  }),
+  createServer((req) => {
+    asked.F++;
+    req.socket.destroy();
+  }),
+];
 const dir = mkdtempSync(join(tmpdir(), "murmo-fed-"));
 const apiA = new Api(A);
 const apiB = new Api(B);
@@ -61,7 +79,9 @@ before(async () => {
   // Plain http on loopback is only possible with an explicit list of origins (an open server needs public https).
   start(A, PORT, "a", { MURMO_FEDERATION: `${B},${C},${D}`, MURMO_FEDERATION_BLOCK: C });
   // B keeps less in its file queue than A: at most 1 MiB per device.
-  start(B, PORT + 1000, "b", { MURMO_FEDERATION: A, MURMO_FILE_QUEUE_MB: "1" });
+  start(B, PORT + 1000, "b", { MURMO_FEDERATION: `${A},${E},${F}`, MURMO_FILE_QUEUE_MB: "1" });
+  await new Promise((r) => standIns[0].listen(PORT + 4000, "127.0.0.1", r));
+  await new Promise((r) => standIns[1].listen(PORT + 5000, "127.0.0.1", r));
   start(C, PORT + 2000, "c", { MURMO_FEDERATION: A });
   start(D, PORT + 3000, "d", { MURMO_FEDERATION: "off" });
   await Promise.all([up(apiA), up(apiB), up(apiC), up(apiD)]);
@@ -71,6 +91,7 @@ before(async () => {
 after(() => {
   for (const m of running) m.stop();
   for (const s of servers) s.kill();
+  for (const s of standIns) s.close();
 });
 
 function waitFor(target, type, pred = () => true, ms = 15000) {
@@ -274,4 +295,32 @@ test("nothing stays on either server once delivered", async () => {
     }
     return true;
   });
+});
+
+/** A delivery to B that claims to come from `from`, with a signature that verifies against no key. */
+function forged(from) {
+  return fetch(`${B}/api/v1/federation/deliver`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      req: { v: 1, kind: "deliver", from, to: B, time: Math.floor(Date.now() / 1000), nonce: p.b64(p.random(16)), msgs: [{ device: "x", env: "AA" }] },
+      sig: "A".repeat(86),
+    }),
+  });
+}
+
+// Last: it uses up the budget of failed verifications of 127.0.0.1 at B, which every server here shares.
+test("bad signatures cannot make a server fetch keys over and over", async () => {
+  // A bad signature forces a fresh fetch of the sender's key at most once a minute per origin.
+  for (let i = 0; i < 5; i++) assert.equal((await forged(E)).status, 401);
+  assert.equal(asked.E, 1);
+  // A sender that cannot be reached is remembered as such: not tried again for a minute.
+  for (let i = 0; i < 5; i++) assert.equal((await forged(F)).status, 502);
+  assert.equal(asked.F, 1);
+  // An address whose requests keep failing is soon refused before anything is fetched (10 a minute, here scaled by 10).
+  let status;
+  for (let i = 0; i < 100 && status !== 429; i++) status = (await forged(E)).status;
+  assert.equal(status, 429);
+  assert.equal((await forged(F)).status, 429);
+  assert.equal(asked.E + asked.F, 2);
 });
