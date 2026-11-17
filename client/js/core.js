@@ -275,6 +275,7 @@ export class Messenger extends EventTarget {
       this.prekeys.set(s.id, { privateKey: await p.importPrivate("X25519", s.pkcs8), publicRaw: s.publicRaw, time: s.time, pkcs8: s.pkcs8 });
     }
     for (const c of await this.store.contacts()) this.contacts.set(c.account, c);
+    this.ownPinned = (await this.store.secret("ownPinned")) ?? null;
     this.pendingFiles = (await this.store.secret("pendingFiles")) ?? [];
     this.wantedFiles = (await this.store.secret("wantedFiles")) ?? [];
     this.freed = new Set((await this.store.secret("freedFiles")) ?? []);
@@ -397,22 +398,44 @@ export class Messenger extends EventTarget {
     }
     // What the other server takes from accounts elsewhere (its relay and file queue limits), for files to it.
     const limits = server && r.limits && typeof r.limits === "object" ? r.limits : null;
+    // The own list is checked before it is cached: one that is refused is never used, not even for a minute.
+    if (account === this.me.account) await this.checkOwnPinned(list);
     const entry = { state, list, prekeys, home: r.home, server, limits, at: Date.now() };
-    this.lists.set(account, entry);
-    if (account !== this.me.account) await this.checkPinned(account, list);
+    // A forked list is returned (the safety code is computed from it) but never cached, so nothing is verified or
+    // encrypted against it; a list cached before the fork showed stays until it expires.
+    if (account === this.me.account || (await this.checkPinned(account, list))) this.lists.set(account, entry);
     return entry;
   }
 
-  /** Pinned heads: a list must extend what we saw before (TOFU), otherwise it is a fork (DESIGN.md §5.3). */
+  /**
+   * The account's own list is pinned like a contact's, in the encrypted store: it must extend the head this device
+   * saw before and must still hold this device. Otherwise the server serves an older (validly signed) list, say one
+   * that still has a removed device, which would then get a copy of every message and could push history and sync.
+   */
+  async checkOwnPinned(list) {
+    if (!list.present.some((d) => d.id === this.me.device)) throw new Error("own_list_without_device");
+    const pin = this.ownPinned;
+    if (pin && !(await p.extendsPinned(list, pin.head, pin.length))) throw new Error("own_list_fork");
+    if (!pin || pin.head !== list.head) {
+      this.ownPinned = { head: list.head, length: list.entries.length };
+      await this.store.setSecret("ownPinned", this.ownPinned);
+    }
+  }
+
+  /**
+   * Pinned heads: a list must extend what we saw before (TOFU), otherwise it is a fork (DESIGN.md §5.3). Returns
+   * whether the account may be trusted: false for a list that forks and for a contact already marked as forked.
+   */
   async checkPinned(account, list) {
     const c = this.contacts.get(account);
-    if (!c) return;
+    if (!c) return true;
     if (c.pinned && !(await p.extendsPinned(list, c.pinned.head, c.pinned.length))) {
       if (!c.fork) {
         c.fork = true;
         await this.saveContact(c);
+        this.lists.delete(account);
       }
-      return;
+      return false;
     }
     if (!c.pinned || c.pinned.head !== list.head) {
       const changed = !!c.pinned && list.head !== c.pinned.head;
@@ -420,6 +443,7 @@ export class Messenger extends EventTarget {
       if (changed) c.devicesChanged = p.now();
       await this.saveContact(c);
     }
+    return !c.fork;
   }
 
   /**
@@ -429,6 +453,7 @@ export class Messenger extends EventTarget {
   async lookupDeviceVia(account, id, via) {
     if (account === this.me.account) return via ? undefined : this.lookupDevice(account, id);
     const c = this.contacts.get(account);
+    if (c?.fork) return undefined; // quarantined: nothing from a forked account is taken (DESIGN.md §5.3)
     if (c && (isServerOrigin(c.server) ? c.server : null) !== via) return undefined;
     if (!c) {
       if (via) this.servers.set(account, via);
@@ -444,7 +469,8 @@ export class Messenger extends EventTarget {
       l = await this.list(account, true);
       d = l.list.present.find((x) => x.id === id);
     }
-    return d;
+    // The lookup itself may have shown a fork: then no device of the account is trusted, not even one in that list.
+    return this.contacts.get(account)?.fork ? undefined : d;
   }
 
   async ownList(fresh = false) {
@@ -885,21 +911,31 @@ export class Messenger extends EventTarget {
     this.queue = this.queue.then(() => this.handleEnvelope(f)).catch((err) => this.fail(err));
   }
 
+  /**
+   * Only final results are acknowledged: a message that was handled, or one that can never be (undecryptable, not
+   * for this device, forged). One that failed for a reason that may pass (the sender's device list could not be
+   * fetched, the local store refused a write) stays in the mailbox and comes again on the next connection.
+   */
   async handleEnvelope(f) {
     let m;
+    let lookupFailed = false;
     try {
       const plain = await p.open(this.me.device, this.prekeys, f.env);
       const via = isServerOrigin(f.server) ? f.server : null;
-      m = await p.verifyMessage(plain, this.me, (a, d) => this.lookupDeviceVia(a, d, via));
+      m = await p.verifyMessage(plain, this.me, async (a, d) => {
+        try {
+          return await this.lookupDeviceVia(a, d, via);
+        } catch (err) {
+          lookupFailed = true;
+          throw err;
+        }
+      });
     } catch {
-      this.ws.ack([f.id]); // undecryptable or forged: drop it
+      if (!lookupFailed) this.ws.ack([f.id]); // undecryptable or forged: drop it
       return;
     }
-    try {
-      await this.handleMessage(m);
-    } finally {
-      this.ws.ack([f.id]);
-    }
+    await this.handleMessage(m); // a throw leaves the envelope unacknowledged (and is reported)
+    this.ws.ack([f.id]);
   }
 
   async handleMessage(m) {
@@ -911,7 +947,7 @@ export class Messenger extends EventTarget {
     if (m.from.account === this.me.account) return this.handleOwn(m);
     const peer = m.from.account;
     let c = this.contacts.get(peer);
-    if (c?.state === "blocked") return;
+    if (c?.state === "blocked" || c?.fork) return;
     switch (m.kind) {
       case "request": {
         // One pending request per sender; nothing changes for accepted or pending contacts. An accepted contact that
@@ -1722,7 +1758,8 @@ export class Messenger extends EventTarget {
   /** Whether a relay frame comes from an own device or from a contact this account talks to. */
   mayRelay(f) {
     if (f.account === this.me.account) return true;
-    return ["accepted", "outgoing"].includes(this.contacts.get(f.account)?.state);
+    const c = this.contacts.get(f.account);
+    return !c?.fork && ["accepted", "outgoing"].includes(c?.state);
   }
 
   /** Forget chunks whose file message has not come within EARLY_KEEP. */
