@@ -45,6 +45,12 @@ const MAX_ANSWER: usize = 4 * 1024 * 1024;
 const SKEW: i64 = 300;
 /// How long a peer's federation key is trusted before it is fetched again (seconds).
 const KEY_TTL: i64 = 3600;
+/// A peer's `/api/v1/info` is fetched at most this often (seconds): a forced refetch (after a bad signature) and a
+/// fetch that failed are both remembered for this long, so neither can be repeated faster.
+const REFETCH_EVERY: i64 = 60;
+/// Signed requests per minute from one network address that fail verification in a way that cost a fetch (a bad
+/// signature, an unreachable or keyless sender). Checked before any work, so an address over it is refused at once.
+const FAILED_PER_ADDR: u32 = 10;
 /// Envelopes per minute from one server.
 const PER_SERVER: u32 = 6000;
 /// How long a device list fetched from another server is reused for other requests (seconds). All of this server's
@@ -86,12 +92,18 @@ impl Policy {
 }
 
 /// What this server knows of another one from its `/api/v1/info`: its federation key (None: it publishes none), the
-/// limits it puts on what it takes from other servers, and when that was fetched.
+/// limits it puts on what it takes from other servers, and when that was fetched. A fetch that failed is remembered as
+/// well (`unreachable`), so it is not tried again for [`REFETCH_EVERY`] seconds.
 #[derive(Clone)]
 struct Peer {
     key: Option<[u8; 32]>,
     limits: Option<Value>,
+    /// When this answer was fetched.
     at: i64,
+    /// When a fetch was last tried, whether it worked or not.
+    tried: i64,
+    /// The last fetch failed and nothing usable was known before it.
+    unreachable: bool,
 }
 
 /// This server's federation key and what it remembers about other servers.
@@ -265,22 +277,50 @@ async fn post(app: &App, url: String, body: Vec<u8>) -> Result<(u16, Value), Api
     .map_err(ApiError::internal)?
 }
 
-/// What this server knows of another one, from its `/api/v1/info` (cached; `fresh` fetches it again).
+/// What this server knows of another one, from its `/api/v1/info` (cached; `fresh` fetches it again, but never more
+/// than once in [`REFETCH_EVERY`] seconds; a failed fetch is cached for as long).
 async fn peer(app: &Arc<App>, origin: &str, fresh: bool) -> Result<Peer, ApiError> {
     let t = now();
-    if !fresh
-        && let Some(p) = app
-            .fed
-            .keys
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(origin)
-            .cloned()
-        && t - p.at < if p.key.is_some() { KEY_TTL } else { 60 }
-    {
-        return Ok(p);
+    let cached = app
+        .fed
+        .keys
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(origin)
+        .cloned();
+    if let Some(p) = &cached {
+        let valid = t - p.at < if p.key.is_some() { KEY_TTL } else { 60 };
+        if (valid && !fresh) || t - p.tried < REFETCH_EVERY {
+            return if p.unreachable || !valid {
+                Err(ApiError::new(502, "server_unreachable"))
+            } else {
+                Ok(p.clone())
+            };
+        }
     }
-    let (status, info) = get(app, format!("{origin}/api/v1/info")).await?;
+    let (status, info) = match get(app, format!("{origin}/api/v1/info")).await {
+        Ok(a) => a,
+        Err(e) => {
+            // Remembered, so that the next request does not try again at once. What was known before stays usable
+            // while it is still valid.
+            let mut p = cached
+                .filter(|p| !p.unreachable && t - p.at < KEY_TTL)
+                .unwrap_or(Peer {
+                    key: None,
+                    limits: None,
+                    at: t,
+                    tried: t,
+                    unreachable: true,
+                });
+            p.tried = t;
+            app.fed
+                .keys
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(origin.to_string(), p);
+            return Err(e);
+        }
+    };
     // The peer must say it is this origin, and publish a key.
     let info = info.as_object().filter(|m| {
         status == 200
@@ -303,7 +343,13 @@ async fn peer(app: &Arc<App>, origin: &str, fresh: bool) -> Result<Peer, ApiErro
         }
         l.into()
     });
-    let p = Peer { key, limits, at: t };
+    let p = Peer {
+        key,
+        limits,
+        at: t,
+        tried: t,
+        unreachable: false,
+    };
     app.fed
         .keys
         .lock()
@@ -355,6 +401,7 @@ async fn call(app: &Arc<App>, server: &str, path: &str, kind: &str, fields: Map)
 /// sender publishes, the kind and that it is not a replay. Returns the sender's origin and the request.
 async fn verify(
     app: &Arc<App>,
+    addr: std::net::IpAddr,
     body: &[u8],
     kind: &str,
     limit: usize,
@@ -393,12 +440,22 @@ async fn verify(
     if !allowed(app, from) {
         return Err(ApiError::new(403, "federation_refused"));
     }
+    // An address whose requests keep failing verification is refused before anything is fetched for it.
+    let failures = format!("federation-failed:{}", crate::app::limit_net(addr));
+    app.limits.spent(&failures, FAILED_PER_ADDR, 60)?;
     let signed = frame(LABEL, &canonical(req));
-    let mut key = peer_key(app, from, false).await?;
-    if ed25519_verify(&key, &signed, &sig).is_err() {
-        // The peer may have a new key (a new host key): ask once more.
-        key = peer_key(app, from, true).await?;
-        ed25519_verify(&key, &signed, &sig).map_err(|_| ApiError::new(401, "bad_signature"))?;
+    let checked = async {
+        let mut key = peer_key(app, from, false).await?;
+        if ed25519_verify(&key, &signed, &sig).is_err() {
+            // The peer may have a new key (a new host key): ask once more (at most once a minute per origin).
+            key = peer_key(app, from, true).await?;
+            ed25519_verify(&key, &signed, &sig).map_err(|_| ApiError::new(401, "bad_signature"))?;
+        }
+        Ok::<(), ApiError>(())
+    };
+    if let Err(e) = checked.await {
+        let _ = app.limits.check(failures, FAILED_PER_ADDR, 60);
+        return Err(e);
     }
     if !app.fed.fresh(from, nonce, t) {
         return Err(ApiError::new(409, "replay"));
@@ -467,7 +524,7 @@ pub async fn post_deliver(
 ) -> Response {
     let run = async {
         app.limits.by_addr("federation", addr, 1200, 60)?;
-        let (from, r) = verify(&app, &body, "deliver", MAX_DELIVER_BODY).await?;
+        let (from, r) = verify(&app, addr, &body, "deliver", MAX_DELIVER_BODY).await?;
         let from = from.as_str();
         let bad = || ApiError::new(400, "bad_field");
         let msgs = r.get("msgs").and_then(Value::as_array).ok_or_else(bad)?;
@@ -833,7 +890,7 @@ pub async fn post_relay(
     let run = async {
         app.limits
             .by_addr("federation-relay", addr, RELAY_PER_SERVER, 60)?;
-        let (from, r) = verify(&app, &body, "relay", MAX_RELAY_BODY).await?;
+        let (from, r) = verify(&app, addr, &body, "relay", MAX_RELAY_BODY).await?;
         let bad = || ApiError::new(400, "bad_field");
         let sender = r.get("sender").and_then(Value::as_object).ok_or_else(bad)?;
         let account = sender
@@ -958,7 +1015,7 @@ pub async fn post_presence(
 ) -> Response {
     let run = async {
         app.limits.by_addr("federation", addr, 1200, 60)?;
-        let (from, r) = verify(&app, &body, "presence", crate::api::MAX_BODY).await?;
+        let (from, r) = verify(&app, addr, &body, "presence", crate::api::MAX_BODY).await?;
         app.limits
             .check(format!("federation-presence:{from}"), 6000, 60)?;
         let online: Vec<Value> = device_list(&r, MAX_PRESENCE)?
@@ -983,7 +1040,7 @@ pub async fn post_space(
 ) -> Response {
     let run = async {
         app.limits.by_addr("federation", addr, 1200, 60)?;
-        let (from, r) = verify(&app, &body, "space", crate::api::MAX_BODY).await?;
+        let (from, r) = verify(&app, addr, &body, "space", crate::api::MAX_BODY).await?;
         app.limits
             .check(format!("federation-space:{from}"), 6000, 60)?;
         let bad = || ApiError::new(400, "bad_field");
