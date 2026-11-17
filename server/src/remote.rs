@@ -145,6 +145,8 @@ pub async fn refresh(
 pub async fn refresh_if_remote(app: &Arc<App>, account: &str, max_age: i64) {
     if app.db.remote(account).ok().flatten().is_some() {
         let _ = refresh(app, account, None, max_age).await;
+        // The home may have a new instance of it: devices of the old one lose their connections.
+        app.disconnect_stale(account);
     }
 }
 

@@ -119,7 +119,9 @@ canonical JSON object (rootcard's canonical JSON, [CJ-9]):
 - **Entry n > 0** is signed by a device that is present after entry n-1. A device may remove itself.
 - The list is valid only if `instance` equals the account key of the **current** instance in the verified rootcard
   log. A new instance (reset, restore, move: all need the recovery key) invalidates the list, and the account starts a
-  new one. Contacts see that as a key change made by the owner with the recovery card.
+  new one. Contacts see that as a key change made by the owner with the recovery card. The server closes the
+  connections of the old instance's devices as soon as it learns of the new instance (a log change at this home, a
+  refreshed log from another home, or the new list's entry 0), as it does for removed devices.
 - At most 32 entries live per list in v0; at most 8 devices present.
 
 The server verifies every appended entry against the stored rootcard log and refuses anything that does not extend the

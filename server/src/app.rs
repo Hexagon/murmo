@@ -897,6 +897,20 @@ impl App {
             stale,
         })
     }
+
+    /// Close the connections of an account's devices that belong to an earlier instance (after a reset, restore or
+    /// move with the recovery card): they can no longer authenticate, and must not keep sending or receiving on a
+    /// connection made before. Devices present in the current list are left alone.
+    pub fn disconnect_stale(&self, account: &str) {
+        let Ok(cur) = self.current(account) else {
+            return;
+        };
+        for d in &cur.stale {
+            if cur.device(d).is_none() {
+                self.hub.disconnect(d);
+            }
+        }
+    }
 }
 
 /// Device ids named in a list of an earlier instance (not verified: only used to delete).
