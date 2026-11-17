@@ -139,20 +139,25 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 
 ### P2: robustness and federation details
 
-- [ ] A refused login (`unknown_device`, `bad_signature`) reconnects forever, without jitter (`net.js:237-251`);
-      unhandled rejection when `auth()` fails (`net.js:189-193`)
-- [ ] One user can rate-limit the whole server at a remote one (lookups and `fresh` lists share one IP's budget,
+- [x] A refused login (`unknown_device`, `bad_signature`) reconnects forever, without jitter (`net.js:237-251`);
+      unhandled rejection when `auth()` fails (`net.js:189-193`). Refusals for good are retried every few minutes
+      and shown; a device wipes itself only when its signed list confirms the removal
+- [x] One user can rate-limit the whole server at a remote one (lookups and `fresh` lists share one IP's budget,
       `ws.rs:541-545`); per-server budget on the sending side, dedupe `fresh`
-- [ ] Presence is open to any federated server at 6000 req/min (`federation.rs:952-973`); limit to contacts or lower
-- [ ] A declined contact comes back with a replayed `request` (`core.js:916-925`); require a newer `time`
-- [ ] Check that a remote lookup answers for the requested `Name#TAG` (`identity.js:149-152`)
-- [ ] Log push failures and `fork` in `refresh_if_remote` (`push.rs:180-235`, `remote.rs:140-144`); scheduled pushes
-      are lost on restart
-- [ ] Poisoned mutexes disable the database and hub for good (`db.rs:180-184`, `app.rs:171`): recover with
-      `into_inner` as `federation.rs` does
-- [ ] Spec: §14.3 `req` lacks `kind`; "fetched again once" is unbounded; replay nonces are lost on restart
-- [ ] Federation tests: open mode, replay, stale time, wrong `to`/`kind`, key rotation, block-list variants, a peer that
-      is down or slow, spoofed relay account, mailbox flooding, IDN addresses
+- [x] Presence is open to any federated server at 6000 req/min (`federation.rs:952-973`); limit to contacts or lower.
+      Lowered: 1 200 questions and 4 000 devices a minute per server, 120 a minute about one device
+- [x] A declined contact comes back with a replayed `request` (`core.js:916-925`); require a newer `time`
+- [x] Check that a remote lookup answers for the requested `Name#TAG` (`identity.js:149-152`); every lookup does
+- [x] Log push failures and `fork` in `refresh_if_remote` (`push.rs:180-235`, `remote.rs:140-144`); scheduled pushes
+      are lost on restart. Logged at most every 10 minutes per push service and hourly per fork; pushes due at a stop
+      are sent after the restart
+- [x] Poisoned mutexes disable the database and hub for good (`db.rs:180-184`, `app.rs:171`): recover with
+      `into_inner` as `federation.rs` does (`Locked::locked` in `app.rs`, used for every server mutex)
+- [x] Spec: §14.3 `req` lacks `kind`; "fetched again once" is unbounded; replay nonces are lost on restart (requests
+      signed before the server started are refused as `stale`)
+- [x] Federation tests: replay (also across a restart), stale time, wrong `to`/`kind`, a signature by another key,
+      block-list variants, a peer that is down, spoofed relay account, mailbox flooding, IDN addresses
+- [ ] Federation tests still missing: open mode (needs public addresses), key rotation of a peer, a slow peer
 
 ### P3: polish
 

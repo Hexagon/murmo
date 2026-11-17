@@ -11,6 +11,12 @@ const HEARTBEAT = 25_000;
 const PONG_WAIT = 8_000;
 const CONNECT_WAIT = 15_000;
 const SEND_WAIT = 12_000;
+const BACKOFF_MAX = 30_000;
+// A login the server refused for good (this device or account is not known there, or the signature does not match):
+// asked again only this seldom, or at once when the person asks for it (`wake(true)`). Not never: a server can come
+// back with a newer list of this account's devices (a remote home, a restored backup).
+const REFUSED_RETRY = 5 * 60_000;
+const REFUSALS = new Set(["unknown_device", "bad_signature", "unknown_account", "account_retired", "not_home"]);
 // The server's relay budgets per minute (sent again in "ready", server/src/ws.rs), in bytes of chunks as sent (text,
 // or the payload of binary frames):
 // - live, to connected devices: `bytes` per sending device (once per recipient), `peer` per recipient device for
@@ -54,6 +60,7 @@ export class Socket extends EventTarget {
     this.readyWaiters = new Set();
     this.backoff = 1000;
     this.retry = null;
+    this.refused = null; // the code of a final refusal of the login, until a login succeeds
     this.beat = null;
     this.lastFrame = 0;
     this.relayLimits = RELAY_DEFAULT;
@@ -79,8 +86,11 @@ export class Socket extends EventTarget {
     ws.binaryType = "arraybuffer";
     ws.onmessage = (ev) => {
       if (this.ws !== ws) return;
-      if (typeof ev.data === "string") this.onFrame(ev.data);
-      else this.onBinary(ev.data);
+      if (typeof ev.data === "string") {
+        this.onFrame(ev.data).catch(() => {
+          if (this.ws === ws && !this.ready) this.dropped(ws); // signing the login failed: try again later
+        });
+      } else this.onBinary(ev.data);
     };
     ws.onclose = () => this.dropped(ws);
     ws.onerror = () => {};
@@ -92,11 +102,13 @@ export class Socket extends EventTarget {
 
   schedule() {
     if (this.closed || this.retry) return;
+    const base = this.refused ? REFUSED_RETRY : this.backoff;
+    // Jitter: the devices that lost the same server do not all come back in the same second.
     this.retry = setTimeout(() => {
       this.retry = null;
       this.connect();
-    }, this.backoff);
-    this.backoff = Math.min(this.backoff * 2, 30000);
+    }, base / 2 + Math.random() * (base / 2));
+    if (!this.refused) this.backoff = Math.min(this.backoff * 2, BACKOFF_MAX);
   }
 
   /** The connection `ws` is gone (closed, or declared dead): clean up and connect again. */
@@ -137,10 +149,12 @@ export class Socket extends EventTarget {
 
   /**
    * The page is visible again, or the network came back: connect now instead of waiting for the backoff, and make
-   * sure a socket that looks open really is.
+   * sure a socket that looks open really is. A login refused for good is only tried again when `force`d (the person
+   * asks for it), not on every focus.
    */
-  wake() {
+  wake(force = false) {
     if (this.closed) return;
+    if (this.refused && !force) return;
     if (!this.ws) {
       this.backoff = 1000;
       this.connect();
@@ -201,6 +215,7 @@ export class Socket extends EventTarget {
       }
       case "ready":
         this.ready = true;
+        this.refused = null;
         this.relayLimits = relayLimits(f.relay);
         this.textOnly.clear();
         this.backoff = 1000;
@@ -254,6 +269,11 @@ export class Socket extends EventTarget {
           clearTimeout(w.timer);
           w.reject(new Error(f.error));
           return;
+        }
+        if (!this.ready && REFUSALS.has(f.error)) {
+          // Refused for good: connecting again at once would only be refused again, so not before REFUSED_RETRY.
+          this.refused = f.error;
+          this.dispatchEvent(new CustomEvent("refused", { detail: f.error }));
         }
         this.dispatchEvent(new CustomEvent("server-error", { detail: f.error }));
         if (!this.ready) this.dropped(this.ws); // refused before "ready" (the server closes too)

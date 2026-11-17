@@ -2,6 +2,7 @@
 //! mailbox. One connection behind a mutex: every change is atomic, which is the compare-and-swap rootcard needs
 //! ([HST-19]). `secure_delete` overwrites deleted rows, so delivered ciphertext does not linger in free pages.
 
+use crate::app::Locked;
 use rootcard::json::{Value, canonical, parse_json};
 use rootcard::log::LogState;
 use rootcard_host::store::{Expected, HandleKey, IdentityStore, Insert, StoreError, Stored};
@@ -211,14 +212,25 @@ impl Db {
         if !has_relay_origin {
             conn.execute_batch("ALTER TABLE relay_queue ADD COLUMN origin TEXT")?;
         }
+        // The newest envelope a device was woken for, so that a push due when the server stopped is sent after a
+        // restart. Existing subscriptions start at what is queued now: no push for envelopes that were waiting already.
+        let has_pushed: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('push_subs') WHERE name = 'pushed'",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has_pushed {
+            conn.execute_batch(
+                "ALTER TABLE push_subs ADD COLUMN pushed INTEGER NOT NULL DEFAULT 0;
+                 UPDATE push_subs SET pushed = (SELECT COALESCE(MAX(id), 0) FROM mailbox);",
+            )?;
+        }
         Ok(Db(Arc::new(Mutex::new(conn))))
     }
 
-    /// The connection.
+    /// The connection. Kept usable after a panic while it was held (see [`Locked`]).
     pub fn conn(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
-        self.0
-            .lock()
-            .map_err(|_| StoreError("lock poisoned".into()))
+        Ok(self.0.locked())
     }
 
     // ── device lists ────────────────────────────────────────────────────────────────────────────────────────────
@@ -811,6 +823,33 @@ impl Db {
             .map_err(store_err)
     }
 
+    /// Remember that `device` was woken for everything queued for it up to now.
+    pub fn mark_pushed(&self, device: &str) -> Result<(), StoreError> {
+        self.conn()?
+            .execute(
+                "UPDATE push_subs SET pushed = MAX(pushed,
+                   (SELECT COALESCE(MAX(id), 0) FROM mailbox WHERE device = ?1)) WHERE device = ?1",
+                params![device],
+            )
+            .map(|_| ())
+            .map_err(store_err)
+    }
+
+    /// Devices with a push endpoint and envelopes they were not woken for yet: `(device, first such envelope id)`.
+    pub fn unpushed(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        let c = self.conn()?;
+        let mut st = c
+            .prepare(
+                "SELECT p.device, MIN(m.id) FROM push_subs p JOIN mailbox m ON m.device = p.device
+                 WHERE m.id > p.pushed GROUP BY p.device",
+            )
+            .map_err(store_err)?;
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(store_err)?
+            .collect::<Result<_, _>>()
+            .map_err(store_err)
+    }
+
     /// Set (`Some`) or remove (`None`) the push endpoint of a device.
     pub fn set_push_sub(&self, device: &str, endpoint: Option<&str>) -> Result<(), StoreError> {
         let c = self.conn()?;
@@ -1197,6 +1236,30 @@ mod tests {
         account: 70,
         total: 150,
     };
+
+    #[test]
+    fn pushes_due_at_a_stop_are_found_after_it() {
+        let db = Db::open(":memory:").expect("database");
+        let q = |d: &str| {
+            db.enqueue(d, "e", i64::MAX, 10, None, None)
+                .expect("enqueue")
+                .expect("room")
+        };
+        db.set_push_sub("p1", Some("https://push.example/1"))
+            .expect("sub");
+        db.set_push_sub("p2", Some("https://push.example/2"))
+            .expect("sub");
+        let first = q("p1");
+        q("p1");
+        q("nopush");
+        // Not woken yet: due, from its first waiting envelope; devices without push are not.
+        assert_eq!(db.unpushed().expect("due"), vec![("p1".to_string(), first)]);
+        db.mark_pushed("p1").expect("mark");
+        assert!(db.unpushed().expect("due").is_empty());
+        // A later envelope is due again.
+        let later = q("p1");
+        assert_eq!(db.unpushed().expect("due"), vec![("p1".to_string(), later)]);
+    }
 
     #[test]
     fn largest_file_is_the_smallest_limit() {

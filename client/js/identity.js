@@ -131,6 +131,21 @@ export function checkHandle(handle) {
  * connection.
  */
 export async function lookup(api, realms, handle, remote = null) {
+  const found = await findIdentity(api, realms, handle, remote);
+  // Whoever answered (this server, a home, another Murmo server) must answer for the identifier that was asked for:
+  // the verified log's username and account must match `Name#TAG`, or a server could hand out another identity.
+  const [name] = checkHandle(handle).split("@");
+  let wanted;
+  try {
+    wanted = rc.parseHandle(name);
+  } catch {
+    throw new ApiError(400, "bad_handle");
+  }
+  if (!rc.handleMatches(wanted, found.state.username, found.state.account)) throw new ApiError(502, "wrong_identity");
+  return found;
+}
+
+async function findIdentity(api, realms, handle, remote) {
   const h = checkHandle(handle);
   const at = h.indexOf("@");
   if (at < 0) {

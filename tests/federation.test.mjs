@@ -291,6 +291,11 @@ test("a server is no relay: only its own accounts send, only its own devices rec
 test("envelopes for a server that is down wait on the sender's server and go when it is back", async () => {
   // Alice's client knows Bob's devices already (a list fetched a moment ago), so it can write while B is down.
   await alice.list(bob.me.account, true);
+  // A request A signed before B stops, taken by B once.
+  const before = await signedBy("a", A, B, "presence", { devices: [bob.me.device] });
+  const toB = (body) => fetch(`${B}/api/v1/federation/presence`, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+  assert.equal((await toB(before)).status, 200);
+  await new Promise((r) => setTimeout(r, 1100)); // B starts in a later second than it was signed
   const b = servers[1];
   const gone = new Promise((r) => b.once("exit", r));
   b.kill();
@@ -308,6 +313,10 @@ test("envelopes for a server that is down wait on the sender's server and go whe
   // B comes back. As soon as it talks to A (Bob writes to Alice), A hands over what waited for it.
   servers[1] = start(B, PORT + 1000, "b", { MURMO_FEDERATION: `${A},${E},${F}`, MURMO_FILE_QUEUE_MB: "1" });
   await up(apiB);
+  // B forgot the nonces it saw, but not that it restarted: the old request is not taken again.
+  const replayed = await toB(before);
+  assert.equal(replayed.status, 401);
+  assert.equal((await replayed.json()).error, "stale");
   await until(() => bob.status === "online", 60000);
   await bob.sendText(alice.me.account, "B är tillbaka");
   await until(async () => (await bob.messages(alice.me.account)).some((m) => m.id === "while-down"), 30000);
@@ -340,6 +349,61 @@ test("another server cannot speak for an account served here", async () => {
   // The same request in the name of B's own account is taken (the signature and everything else were fine).
   res = await post("relay", await relay(bob.me.account));
   assert.equal(res.status, 200);
+});
+
+test("another server asks about one device no more often than a local device may", async () => {
+  const ask = async (devices) =>
+    fetch(`${A}/api/v1/federation/presence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: await signedBy("b", B, A, "presence", { devices }),
+    });
+  // 120 a minute for one device (scaled by 10 here); other devices are still answered after that.
+  let res;
+  let n = 0;
+  for (; n < 1300; n++) {
+    res = await ask([alice.me.device]);
+    if (res.status !== 200) break;
+  }
+  assert.equal(res.status, 429);
+  assert.equal(n, 1200);
+  res = await ask(["some-other-device"]);
+  assert.equal(res.status, 200);
+  assert.deepEqual((await res.json()).online, []);
+});
+
+test("signed requests: the wrong kind or recipient, a stale time and a replay are refused", async () => {
+  const toA = (path, body) => fetch(`${A}/api/v1/federation/${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+  const presence = (fields = {}) => signedBy("b", B, A, "presence", { devices: ["c2lnLXRlc3Q"], ...fields });
+  // Signed for presence, posted to space: the kind is part of what is signed and must match the endpoint.
+  let res = await toA("space", await presence());
+  assert.equal(res.status, 400);
+  // Signed for another server.
+  res = await toA("presence", await signedBy("b", B, E, "presence", { devices: ["c2lnLXRlc3Q"] }));
+  assert.equal(res.status, 400);
+  // More than five minutes off, either way.
+  for (const off of [-301, 301]) {
+    res = await toA("presence", await presence({ time: Math.floor(Date.now() / 1000) + off }));
+    assert.equal(res.status, 401);
+    assert.equal((await res.json()).error, "stale");
+  }
+  // Taken once, then refused as a replay.
+  const once = await presence();
+  assert.equal((await toA("presence", once)).status, 200);
+  res = await toA("presence", once);
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).error, "replay");
+  // A signature by another key (C's) in B's name.
+  res = await toA("presence", await signedBy("c", B, A, "presence", { devices: ["c2lnLXRlc3Q"] }));
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, "bad_signature");
+});
+
+test("internationalised server names are used in their ASCII form", () => {
+  assert.equal(id.serverOrigin("bücher.example"), "https://xn--bcher-kva.example");
+  assert.equal(id.serverOrigin("BÜCHER.example:8443"), "https://xn--bcher-kva.example:8443");
+  assert.ok(id.isServerOrigin(id.serverOrigin("bücher.example")));
+  assert.throws(() => id.serverOrigin("bücher.example/path"), (e) => e.code === "bad_server");
 });
 
 test("nothing stays on either server once delivered", async () => {

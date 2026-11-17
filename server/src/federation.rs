@@ -16,7 +16,7 @@
 //! `MURMO_FEDERATION_BLOCK`). An open server talks only to public https origins with a domain name.
 
 use crate::api::check_account;
-use crate::app::{App, Push, now, random, text};
+use crate::app::{App, Locked, Push, now, random, text};
 use crate::db::{ChunkData, OutboxItem};
 use crate::devices::{MAX_DEVICES, MAX_ENTRIES};
 use crate::egress;
@@ -55,9 +55,22 @@ const REFETCH_EVERY: i64 = 60;
 const FAILED_PER_ADDR: u32 = 10;
 /// Envelopes per minute from one server.
 const PER_SERVER: u32 = 6000;
+/// Presence questions per minute from one server, and devices asked about in them.
+const PRESENCE_PER_SERVER: u32 = 1200;
+const PRESENCE_DEVICES_PER_SERVER: u32 = 4000;
 /// How long a device list fetched from another server is reused for other requests (seconds). All of this server's
 /// users share its network address at the other server, and so its rate limits there.
 const LIST_CACHE: i64 = 20;
+/// What this server asks of one other server per minute on its users' behalf (`remote-lookup`, `remote-devices`). The
+/// other server counts lookups (20) and device lists (120, each with a log) per network address, and all of this
+/// server's users share one: the total stays below that, and each local account gets only a part of it, so one user
+/// cannot use up the budget of everyone else here.
+pub(crate) const LOOKUPS_TO_SERVER: u32 = 16;
+pub(crate) const LOOKUPS_PER_ACCOUNT: u32 = 4;
+const LISTS_TO_SERVER: u32 = 100;
+const LISTS_PER_ACCOUNT: u32 = 30;
+/// A `fresh` device list asked for within this many seconds of the last fetch of it is answered from that fetch.
+const FRESH_AGAIN: i64 = 5;
 /// How long a learned route (a device of a contact on another server) is kept without being used (seconds).
 const ROUTE_TTL: i64 = 7 * 24 * 3600;
 /// Chunk frames per minute from one server, and bytes.
@@ -140,6 +153,9 @@ pub struct Federation {
     public_agent: ureq::Agent,
     /// Whether [`flush_outbox`] is running.
     flushing: AtomicBool,
+    /// When this process started. Seen nonces are kept in memory only, so a request signed before then could be a
+    /// replay of one taken before the restart: refused as `stale` (deliveries are signed again when retried).
+    started: i64,
 }
 
 impl Federation {
@@ -157,6 +173,7 @@ impl Federation {
             agent: egress::agent(false),
             public_agent: egress::agent(true),
             flushing: AtomicBool::new(false),
+            started: now(),
         }
     }
 
@@ -166,7 +183,7 @@ impl Federation {
 
     /// Remember a delivery; false if it was seen before.
     fn fresh(&self, origin: &str, nonce: &str, t: i64) -> bool {
-        let mut n = self.nonces.lock().unwrap_or_else(|e| e.into_inner());
+        let mut n = self.nonces.locked();
         n.retain(|_, seen| t - *seen < 2 * SKEW);
         match n.entry(format!("{origin} {nonce}")) {
             std::collections::hash_map::Entry::Occupied(_) => false,
@@ -181,7 +198,7 @@ impl Federation {
     /// [`MAX_ROUTES`] devices forgets the one it used least recently.
     pub fn learn(&self, account: &str, device: &str, origin: &str) {
         let t = now();
-        let mut routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut routes = self.routes.locked();
         let mine = routes.entry(account.to_string()).or_default();
         if !mine.contains_key(device) && mine.len() >= MAX_ROUTES {
             evict_oldest(mine, |(_, at)| *at);
@@ -192,8 +209,7 @@ impl Federation {
     /// The server a device is on, as `account` knows it; None for a device of this server (or one it never named).
     pub fn route(&self, account: &str, device: &str) -> Option<String> {
         self.routes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .locked()
             .get(account)
             .and_then(|m| m.get(device))
             .map(|(o, _)| o.clone())
@@ -205,7 +221,7 @@ impl Federation {
         if size > MAX_LISTS_BYTES / 4 {
             return;
         }
-        let mut lists = self.lists.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lists = self.lists.locked();
         lists.remove(&key);
         lists.retain(|_, (_, _, at)| t - *at < LIST_CACHE);
         while !lists.is_empty()
@@ -219,7 +235,7 @@ impl Federation {
 
     /// Keep what this server knows of a peer, within [`MAX_PEERS`].
     fn keep_peer(&self, origin: &str, p: Peer) {
-        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        let mut keys = self.keys.locked();
         if !keys.contains_key(origin) && keys.len() >= MAX_PEERS {
             evict_oldest(&mut keys, |p| p.at);
         }
@@ -229,19 +245,15 @@ impl Federation {
     /// Forget peers' keys fetched long ago.
     pub fn sweep(&self) {
         let t = now();
-        self.keys
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, p| t - p.at < KEY_TTL);
-        let mut routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
+        self.keys.locked().retain(|_, p| t - p.at < KEY_TTL);
+        let mut routes = self.routes.locked();
         for mine in routes.values_mut() {
             mine.retain(|_, (_, at)| t - *at < ROUTE_TTL);
         }
         routes.retain(|_, mine| !mine.is_empty());
         drop(routes);
         self.lists
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .locked()
             .retain(|_, (_, _, at)| t - *at < LIST_CACHE);
     }
 }
@@ -404,13 +416,7 @@ async fn post(app: &App, url: String, body: Vec<u8>) -> Result<(u16, Value), Api
 /// than once in [`REFETCH_EVERY`] seconds; a failed fetch is cached for as long).
 async fn peer(app: &Arc<App>, origin: &str, fresh: bool) -> Result<Peer, ApiError> {
     let t = now();
-    let cached = app
-        .fed
-        .keys
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(origin)
-        .cloned();
+    let cached = app.fed.keys.locked().get(origin).cloned();
     if let Some(p) = &cached {
         let valid = t - p.at < if p.key.is_some() { KEY_TTL } else { 60 };
         if (valid && !fresh) || t - p.tried < REFETCH_EVERY {
@@ -549,7 +555,7 @@ async fn verify(
         return Err(bad());
     }
     let t = now();
-    if (t - time).abs() > SKEW {
+    if (t - time).abs() > SKEW || time < app.fed.started {
         return Err(ApiError::new(401, "stale"));
     }
     if !allowed(app, from) {
@@ -866,11 +872,24 @@ fn passed_on(status: u16, v: &Value) -> ApiError {
 
 /// An exact identifier on another server, looked up there for one of this server's users (the client never contacts
 /// other servers itself): `{ account, home, handle, server }`.
-pub async fn lookup(app: &Arc<App>, server: &str, handle: &str) -> Result<Value, ApiError> {
+pub async fn lookup(
+    app: &Arc<App>,
+    me: &str,
+    server: &str,
+    handle: &str,
+) -> Result<Value, ApiError> {
     let server = server_param(app, server)?;
     if handle.is_empty() || handle.len() > 128 {
         return Err(ApiError::new(400, "bad_handle"));
     }
+    asking(
+        app,
+        "lookup",
+        me,
+        &server,
+        LOOKUPS_PER_ACCOUNT,
+        LOOKUPS_TO_SERVER,
+    )?;
     // Only a Murmo server that takes part in federation (an older one, or another kind of host, does not).
     peer_key(app, &server, false).await?;
     let (status, v) = get(
@@ -903,12 +922,30 @@ pub async fn lookup(app: &Arc<App>, server: &str, handle: &str) -> Result<Value,
 /// (a device the client does not know yet, a changed list) always asks the other server.
 pub async fn devices(
     app: &Arc<App>,
+    me: &str,
     server: &str,
     account: &str,
     fresh: bool,
 ) -> Result<Value, ApiError> {
-    let v = devices_of(app, server, account, fresh).await?;
-    Ok(v)
+    devices_of(app, me, server, account, fresh).await
+}
+
+/// Count one request that `me` (a local account) makes of `server`, against its own part and the server's total.
+pub(crate) fn asking(
+    app: &App,
+    what: &str,
+    me: &str,
+    server: &str,
+    per_account: u32,
+    per_server: u32,
+) -> Result<(), ApiError> {
+    app.limits.charge(
+        &[
+            (format!("fed-{what}:{server} {me}"), 1, per_account),
+            (format!("fed-{what}:{server}"), 1, per_server),
+        ],
+        60,
+    )
 }
 
 /// The routes to an account's devices on another server, learned for the local account `me` that asked.
@@ -937,6 +974,7 @@ pub fn learn_list(app: &App, me: &str, v: &Value) {
 
 async fn devices_of(
     app: &Arc<App>,
+    me: &str,
     server: &str,
     account: &str,
     fresh: bool,
@@ -944,18 +982,22 @@ async fn devices_of(
     let server = server_param(app, server)?;
     check_account(account)?;
     let key = format!("{server} {account}");
-    if !fresh
-        && let Some((v, _, at)) = app
-            .fed
-            .lists
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .cloned()
-        && now() - at < LIST_CACHE
+    // A list fetched a moment ago is fresh enough for anyone: devices that ask together (a sender's own devices, all
+    // the contacts of a changed account) cost the other server one fetch.
+    let reuse = if fresh { FRESH_AGAIN } else { LIST_CACHE };
+    if let Some((v, _, at)) = app.fed.lists.locked().get(&key).cloned()
+        && now() - at < reuse
     {
         return Ok(v);
     }
+    asking(
+        app,
+        "devices",
+        me,
+        &server,
+        LISTS_PER_ACCOUNT,
+        LISTS_TO_SERVER,
+    )?;
     let (status, devices) = get(app, format!("{server}/api/v1/accounts/{account}/devices")).await?;
     if status != 200 {
         return Err(passed_on(status, &devices));
@@ -1280,12 +1322,27 @@ pub async fn post_presence(
     let run = async {
         app.limits.by_addr("federation", addr, 1200, 60)?;
         let (from, r) = verify(&app, addr, &body, "presence", crate::api::MAX_BODY).await?;
-        app.limits.check(
-            format!("federation-presence:{}", budget_key(&from)),
-            6000,
-            60,
-        )?;
-        let online: Vec<Value> = device_list(&r, MAX_PRESENCE)?
+        let devices = device_list(&r, MAX_PRESENCE)?;
+        // Presence answers anyone who knows device ids (THREAT_MODEL T21), but another server gets no more than its
+        // users plausibly need: requests and devices asked about in all, and about one device no more often than a
+        // local device may ask (120 a minute).
+        let key = budget_key(&from);
+        let n = u32::try_from(devices.len()).unwrap_or(u32::MAX);
+        let mut items = vec![
+            (format!("federation-presence:{key}"), 1, PRESENCE_PER_SERVER),
+            (
+                format!("federation-presence-devices:{key}"),
+                n,
+                PRESENCE_DEVICES_PER_SERVER,
+            ),
+        ];
+        items.extend(
+            devices
+                .iter()
+                .map(|d| (format!("federation-presence-of:{key} {d}"), 1, 120)),
+        );
+        app.limits.charge(&items, 60)?;
+        let online: Vec<Value> = devices
             .into_iter()
             .filter(|d| app.hub.is_connected(d))
             .map(Value::from)

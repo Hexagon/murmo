@@ -282,8 +282,9 @@ prekey, which it does as soon as it connects.
 A conversation starts only from an exact identifier `Name#TAG` (or `Name#TAG@host` to pick the home). The client asks
 the Murmo server (`GET /api/v1/lookup?handle=…`), which answers only for identities it knows: its own and identities
 from other homes that have connected (§3.1). The full handle is required and lookups are rate limited. The client
-then fetches and verifies the identity's log from its home, verifies the device list, pins the account id and the
-head, and sends a `request` message with an optional short note (at most 500 characters).
+then fetches and verifies the identity's log from its home, checks that it is the identity asked for (the log's
+username and account id match `Name#TAG`, whichever server answered; `wrong_identity` otherwise), verifies the device
+list, pins the account id and the head, and sends a `request` message with an optional short note (at most 500 characters).
 
 ### 6.2 Receiving
 
@@ -291,8 +292,9 @@ head, and sends a `request` message with an optional short note (at most 500 cha
   shown or stored until the user accepts.
 - **Accept** sends `accept` and opens the conversation on both sides. A `request` from a contact that is already
   accepted means the sender has lost its data (a new device after a paper key, §4.5): it is answered with `accept` and
-  changes nothing else. **Decline** deletes it locally; **Block**
-  remembers the account id and drops everything from it.
+  changes nothing else. **Decline** deletes it locally and remembers when (synced to own devices): only a `request`
+  signed later brings the sender back, not an earlier one delivered again. **Block** remembers the account id and
+  drops everything from it.
 - Blocking, and *Ta bort konversationen* (which deletes the conversation's history on all own devices), ask first in a
   dialog that says what happens; Cancel has the focus. So does removing a device or the paper key (§4.4).
 - Acceptance is a client-side decision. The server cannot tell requests from other messages, which is deliberate: it
@@ -967,7 +969,7 @@ on the live budgets.
 | relay frames (file chunks) | live transfer | not stored when the recipient device is connected |
 | queued file chunks (ciphertext) | files for devices that are away (sender's choice) | until acknowledged, at most 14 days (a disappearing picture's: its unread limit) |
 | relay grants (receiving device, sending device, bytes left), in memory | a faster transfer of a file the receiving device asked for (§10.2) | used up, taken back, 30 minutes, or a restart |
-| push endpoint per device | notifications (the user's choice) | until turned off, logged out, or reported gone |
+| push endpoint per device, with the id of the newest envelope it was woken for (so a push due at a restart is sent after it) | notifications (the user's choice) | until turned off, logged out, or reported gone |
 | VAPID key | signing push requests | while the server exists |
 | network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
 | the sending server of an envelope from another server (§14) | the recipient looks the sender up there | with the envelope |
@@ -1035,9 +1037,11 @@ stores no more than it does now, unless an idea says otherwise and that is accep
 
 ### 13.1 Recovery and identity
 
-**Remote wipe.** Partly there: a removed device that starts and connects finds itself missing from the list
-(`unknown_device`), deletes its local store and forgets the account on the login screen (`logout(true)` in `app.js`),
-and contacts stop encrypting to it (§4.4). What is missing:
+**Remote wipe.** Partly there: a removed device that starts and connects is refused (`unknown_device`), checks the
+removal itself (its account's signed list, fetched afresh, extends the pinned one and no longer holds it), deletes its
+local store and forgets the account on the login screen (`logout(true)` in `app.js`), and contacts stop encrypting
+to it (§4.4). A refusal it cannot verify (a server that lost or rolled back the account) only shows a banner and is
+tried again every few minutes, so a server cannot make a device forget its history. What is missing:
 - The owner learns nothing. The device could, before deleting, send a last message signed with its device key to the
   own devices ("wiped at …"); the server would have to let a just-removed device send this one message, or the
   device signs it and the server keeps it with the removal. Shown in the device list.
@@ -1264,7 +1268,10 @@ The client verifies the log (`stateFromEvents`: self-certifying, so it does not 
 list against the account key the log names, and pins the head, exactly as for an account on its own server (§4, §5.3).
 A server in the middle can withhold or delay a list, never forge one. Answers of `remote-devices` are reused for 20
 seconds for other requests, since all users of a server share its address, and so its rate limits, at the other
-server; `fresh` (a device not seen yet, a list that changed) always asks.
+server; `fresh` (a device not seen yet, a list that changed) asks again unless the list was fetched in the last 5
+seconds. For the same reason the server spends at most 16 lookups and 100 list fetches a minute at one other server
+(below what that server allows one address), and each local account at most 4 and 30 of them, so one user cannot use
+up the others' budget (`rate_limited` otherwise).
 
 Every server answers for its own accounts with what it already published: `/api/v1/lookup`,
 `/api/v1/accounts/{account}/devices`, and now `GET /api/v1/accounts/{account}/log` (the newest log it has, its own or
@@ -1277,14 +1284,18 @@ POSTs to each:
 
 ```
 POST {server}/api/v1/federation/deliver
-{ req: { v: 1, from, to, time, nonce, msgs: [{ device, env, ttl?, notify? }] }, sig }
+{ req: { v: 1, kind: "deliver", from, to, time, nonce, msgs: [{ device, env, ttl?, notify? }] }, sig }
 ```
+
+Every signed request between servers has this shape: `kind` names the endpoint (`deliver`, `relay`, `presence`,
+`space`) and must match the one it is posted to, so a request signed for one cannot be used at another.
 
 `sig` is Ed25519 over `frame("murmo/federation/v1", canonical(req))` by the sending server's **federation key**,
 derived from its host key (`HKDF(host seed, "murmo", "murmo/federation-key/v1")`), so there is nothing new to keep or
 back up. It is published in `/api/v1/info` as `federation.key`. The receiving server:
 - refuses servers outside its policy (§14.4), deliveries not addressed `to` itself, times more than 5 minutes off and
-  nonces it has seen;
+  nonces it has seen. Seen nonces are kept in memory, so a request signed before the server last started is refused
+  too (`stale`): it could be a replay of one it took before the restart. A sender signs again when it retries;
 - fetches the sender's key from `{from}/api/v1/info` (that origin must list itself in `origins`), over https: TLS is
   what ties the key to the name. Keys are cached for an hour and fetched again once when a signature does not verify
   (a new host key), but at most once a minute per origin; a fetch that fails is remembered for a minute as well
@@ -1346,7 +1357,7 @@ servers to those servers, signed like a delivery (`kind` binds each request to i
 | Endpoint | Request | Answer |
 |---|---|---|
 | `POST /api/v1/federation/relay` | `sender: { account, device }, devices, store, ttl?, data, bin` (one chunk; `bin`: the payload of a binary frame, base64url) | `{ missed, text }` |
-| `POST /api/v1/federation/presence` | `devices` | `{ online }` |
+| `POST /api/v1/federation/presence` | `devices` | `{ online }`; per sending server at most 1 200 questions and 4 000 devices a minute, and 120 a minute about one device (as for a local device) |
 | `POST /api/v1/federation/space` | `account, devices, bytes` | `{ ok }` |
 
 The server knows which devices are elsewhere from what its own account told it: the `server` of envelopes in `send`

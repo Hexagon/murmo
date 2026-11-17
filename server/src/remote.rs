@@ -144,7 +144,18 @@ pub async fn refresh(
 /// Refresh a remote identity if it is one (errors are ignored: the cached log is used).
 pub async fn refresh_if_remote(app: &Arc<App>, account: &str, max_age: i64) {
     if app.db.remote(account).ok().flatten().is_some() {
-        let _ = refresh(app, account, None, max_age).await;
+        match refresh(app, account, None, max_age).await {
+            // The home serves a log that forks from the one kept here: someone holds a second history of the
+            // identity. The kept one stays in use; the operator should know.
+            Err(e) if e.code == "fork" => crate::app::log_every(
+                &format!("fork {account}"),
+                3600,
+                &format!(
+                    "remote identity {account}: its home serves a log that forks from the one kept here"
+                ),
+            ),
+            _ => {}
+        }
         // The home may have a new instance of it: devices of the old one lose their connections.
         app.disconnect_stale(account);
     }

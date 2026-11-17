@@ -1,7 +1,7 @@
 //! `/api/v1`: server info, exact-identifier lookup, connecting identities from other homes, device lists, prekeys and
 //! link requests (DESIGN.md §3, §4, §10).
 
-use crate::app::{App, LINK_TTL, LinkRequest, Push, now, text};
+use crate::app::{App, LINK_TTL, LinkRequest, Locked, Push, now, text};
 use crate::devices::{DeviceList, parse_device, verify_list, verify_prekey};
 use crate::error::{ApiError, json};
 use crate::remote;
@@ -188,9 +188,7 @@ fn client_build(dir: &str) -> Option<String> {
     if dir.is_empty() {
         return None;
     }
-    let mut cache = CACHE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cache = CACHE.locked();
     if let Some((at, build)) = cache.as_ref()
         && at.elapsed() < Duration::from_secs(30)
     {
