@@ -795,6 +795,7 @@ WebSocket frames (JSON):
 | client → server | `{ t: "push-sub", endpoint?, ref }` → `{ t: "ok", ref }`: set or remove this device's push endpoint |
 | client → server | `{ t: "ping" }` → `{ t: "pong" }` (the client's heartbeat; browsers drop sockets of background pages silently) |
 | server → client | `{ t: "link", request }`, `{ t: "devices", account, head }` |
+| server → client | a WebSocket ping every 30 s; a connection that sends nothing back (no pong, no other frame) for two pings in a row is taken for half-open and closed, so presence, push and live relay never act on it |
 
 `to[].ttl` (seconds) is optional and shortens how long the server keeps that envelope (used for disappearing messages); the server learns that the envelope is short-lived, never its content.
 

@@ -105,7 +105,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       private key it obtained. Refuse prekeys older than rotation + keep, or older than one already seen (T13, G8)
 - [ ] **Client HTTP without timeout.** `api.js:25`; one hanging `list()` stalls the serial envelope queue. Add
       `AbortSignal.timeout` and map network errors to a readable `ApiError`
-- [ ] **Dead connections stay registered.** Pings without pong check (`ws.rs:259`): presence, push and live relay act
+- [x] **Dead connections stay registered.** Pings without pong check (`ws.rs:259`): presence, push and live relay act
       on half-open sockets. Close after about two missed pongs
 
 ### P1: usability and accessibility
