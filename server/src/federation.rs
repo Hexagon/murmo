@@ -474,8 +474,11 @@ pub async fn post_deliver(
         }
         app.limits
             .check(format!("federation:{from}"), PER_SERVER, 60)?;
+        // Every envelope is checked before any is queued, so that a bad one cannot fail the delivery after others went
+        // in (the sending server would then report them all as failed, and a resend would duplicate them). What fails
+        // for one device only (unknown, its limit, a full mailbox) is reported in `failed`.
         let t = now();
-        let mut failed: Vec<Value> = Vec::new();
+        let mut items: Vec<(&Map, &str, &str, i64)> = Vec::with_capacity(msgs.len());
         for item in msgs {
             let o = item.as_object().ok_or_else(bad)?;
             let device = o.get("device").and_then(Value::as_str).ok_or_else(bad)?;
@@ -485,12 +488,22 @@ pub async fn post_deliver(
                 None => MAILBOX_TTL,
                 Some(v) => v.as_int().filter(|t| *t > 0).ok_or_else(bad)?,
             };
+            items.push((o, device, env, ttl));
+        }
+        let mut failed: Vec<Value> = Vec::new();
+        for (o, device, env, ttl) in items {
             if device.len() > 64 || !app.db.device_known(device).map_err(ApiError::internal)? {
                 failed.push(device.into());
                 continue;
             }
-            app.limits
-                .check(format!("federation-device:{device}"), 600, 60)?;
+            if app
+                .limits
+                .check(format!("federation-device:{device}"), 600, 60)
+                .is_err()
+            {
+                failed.push(device.into());
+                continue;
+            }
             let expires = t + ttl.clamp(1, MAILBOX_TTL);
             match app
                 .db

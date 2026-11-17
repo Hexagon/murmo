@@ -428,9 +428,11 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
     if to.is_empty() || to.len() > MAX_RECIPIENTS {
         return Err(ApiError::new(400, "bad_field"));
     }
-    let mut failed: Vec<Value> = Vec::new();
-    let mut remote: HashMap<String, Vec<Outgoing>> = HashMap::new();
+    // Every recipient is checked before anything is queued: a bad one fails the whole frame and nothing was sent, so
+    // that a resend does not give the others a second copy. What can only fail for one device (unknown here, a full
+    // mailbox, a server that does not take it) is reported for that device in `failed`.
     let now = now();
+    let mut targets: Vec<(&Map, &str, &str, i64)> = Vec::with_capacity(to.len());
     for r in to {
         let o = r.as_object().ok_or(ApiError::new(400, "bad_field"))?;
         // An optional shorter lifetime for this envelope (disappearing messages): absent means the mailbox TTL.
@@ -441,7 +443,6 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
                 .filter(|t| *t > 0)
                 .ok_or(ApiError::new(400, "bad_field"))?,
         };
-        let expires = now + ttl.clamp(1, MAILBOX_TTL);
         let device = o
             .get("device")
             .and_then(Value::as_str)
@@ -451,6 +452,12 @@ fn send(app: &Arc<App>, me: &Authed, m: &Map) -> Result<Option<Message>, ApiErro
             .and_then(Value::as_str)
             .ok_or(ApiError::new(400, "bad_field"))?;
         check_envelope(env)?;
+        targets.push((o, device, env, ttl));
+    }
+    let mut failed: Vec<Value> = Vec::new();
+    let mut remote: HashMap<String, Vec<Outgoing>> = HashMap::new();
+    for (o, device, env, ttl) in targets {
+        let expires = now + ttl.clamp(1, MAILBOX_TTL);
         // A device on another Murmo server (federation): handed to that server below.
         if let Some(server) = o.get("server").and_then(Value::as_str)
             && !app.is_origin(server)
@@ -1750,6 +1757,57 @@ mod tests {
             .put_prekey("B", "b1", &Value::from("p"))
             .expect("prekey");
         (app, me("A", "a1"))
+    }
+
+    fn mailbox_len(app: &Arc<App>) -> i64 {
+        app.db
+            .conn()
+            .expect("conn")
+            .query_row("SELECT COUNT(*) FROM mailbox", [], |r| r.get(0))
+            .expect("count")
+    }
+
+    fn send_to(app: &Arc<App>, me: &Authed, to: Vec<Value>) -> Map {
+        let f = Map::new()
+            .with("t", "send")
+            .with("id", "s")
+            .with("to", Value::Array(to));
+        object(handle(app, me, &f))
+    }
+
+    #[test]
+    fn a_bad_recipient_fails_the_frame_before_anything_is_queued() {
+        let (app, a) = sender_with_known_device();
+        let good = Map::new().with("device", "b1").with("env", "e");
+        for bad in [
+            Map::new()
+                .with("device", "b1")
+                .with("env", "not base64url!"),
+            Map::new()
+                .with("device", "b1")
+                .with("env", "e")
+                .with("ttl", 0i64),
+            Map::new().with("env", "e"),
+        ] {
+            let r = send_to(&app, &a, vec![good.clone().into(), bad.into()]);
+            assert_eq!(r.get("t").and_then(Value::as_str), Some("error"));
+            assert_eq!(mailbox_len(&app), 0, "nothing queued for the good one");
+        }
+        // Per device failures are reported per device, and the others are queued.
+        let r = send_to(
+            &app,
+            &a,
+            vec![
+                good.clone().into(),
+                Map::new().with("device", "nobody").with("env", "e").into(),
+            ],
+        );
+        assert_eq!(r.get("t").and_then(Value::as_str), Some("sent"));
+        assert_eq!(
+            r.get("failed").and_then(Value::as_array).map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(mailbox_len(&app), 1);
     }
 
     #[test]
