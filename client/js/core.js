@@ -253,6 +253,7 @@ export class Messenger extends EventTarget {
     };
     this.prekeys = new Map(); // id → { privateKey, publicRaw, time }
     this.outbox = []; // [{ id, conv, kind, body, ttl, time }] written while there was no connection, oldest first
+    this.seenPrekeys = new Map(); // `${account} ${device}` → newest verified prekey of another device (never go back)
     this.files = new Map(); // f → transfer state, see fileState()
     this.freed = new Set(); // files removed from this device to free room, not to be taken again unasked (§13.9)
     this.serving = new Set(); // `${f}:${device}` of files streamed now to a contact's device that asked for them
@@ -275,7 +276,9 @@ export class Messenger extends EventTarget {
     for (const s of (await this.store.secret("prekeys")) ?? []) {
       this.prekeys.set(s.id, { privateKey: await p.importPrivate("X25519", s.pkcs8), publicRaw: s.publicRaw, time: s.time, pkcs8: s.pkcs8 });
     }
+    for (const [k, v] of (await this.store.secret("seenPrekeys")) ?? []) this.seenPrekeys.set(k, v);
     for (const c of await this.store.contacts()) this.contacts.set(c.account, c);
+    this.ownPinned = (await this.store.secret("ownPinned")) ?? null;
     this.pendingFiles = (await this.store.secret("pendingFiles")) ?? [];
     this.outbox = (await this.store.secret("outbox")) ?? [];
     this.wantedFiles = (await this.store.secret("wantedFiles")) ?? [];
@@ -387,34 +390,94 @@ export class Messenger extends EventTarget {
     const list = r.entries.length
       ? await p.verifyDevices(account, state.instance.account_key, r.entries)
       : { entries: [], present: [], head: "" };
-    const prekeys = new Map();
+    const served = new Map();
     for (const pk of r.prekeys ?? []) {
       const d = list.present.find((x) => x.id === pk.device);
       if (!d) continue;
       try {
-        prekeys.set(d.id, await p.verifyPrekey(account, d, pk));
+        served.set(d.id, await p.verifyPrekey(account, d, pk));
       } catch {
-        // a prekey that does not verify is ignored
+        // a prekey that does not verify, or is too old (stale_prekey), is ignored
       }
     }
+    const prekeys = await this.freshPrekeys(account, list, served);
     // What the other server takes from accounts elsewhere (its relay and file queue limits), for files to it.
     const limits = server && r.limits && typeof r.limits === "object" ? r.limits : null;
+    // The own list is checked before it is cached: one that is refused is never used, not even for a minute.
+    if (account === this.me.account) await this.checkOwnPinned(list);
     const entry = { state, list, prekeys, home: r.home, server, limits, at: Date.now() };
-    this.lists.set(account, entry);
-    if (account !== this.me.account) await this.checkPinned(account, list);
+    // A forked list is returned (the safety code is computed from it) but never cached, so nothing is verified or
+    // encrypted against it; a list cached before the fork showed stays until it expires.
+    if (account === this.me.account || (await this.checkPinned(account, list))) this.lists.set(account, entry);
     return entry;
   }
 
-  /** Pinned heads: a list must extend what we saw before (TOFU), otherwise it is a fork (DESIGN.md §5.3). */
+  /**
+   * The prekeys to use for an account's present devices: what the server served, unless a newer one was seen before
+   * (a server must not go back to an older prekey, DESIGN.md §5.2). The newest of each is remembered; devices no longer
+   * on the list are forgotten.
+   */
+  async freshPrekeys(account, list, served) {
+    const prekeys = new Map();
+    let changed = false;
+    for (const k of this.seenPrekeys.keys()) {
+      const [a, d] = k.split(" ");
+      if (a === account && !list.present.some((x) => x.id === d)) {
+        this.seenPrekeys.delete(k);
+        changed = true;
+      }
+    }
+    for (const d of list.present) {
+      const k = `${account} ${d.id}`;
+      let seen = this.seenPrekeys.get(k);
+      if (seen && seen !== served.get(d.id)) {
+        try {
+          seen = await p.verifyPrekey(account, d, seen); // it ages too: a device away too long gets nothing
+        } catch {
+          seen = undefined;
+        }
+      }
+      const pk = p.newerPrekey(served.get(d.id), seen);
+      if (pk) prekeys.set(d.id, pk);
+      if (pk && pk !== this.seenPrekeys.get(k)) {
+        this.seenPrekeys.set(k, pk);
+        changed = true;
+      }
+    }
+    // Kept for the next start too; a store that is closed (a stopped messenger) only loses that.
+    if (changed) await this.store?.setSecret("seenPrekeys", [...this.seenPrekeys]).catch(() => {});
+    return prekeys;
+  }
+
+  /**
+   * The account's own list is pinned like a contact's, in the encrypted store: it must extend the head this device
+   * saw before and must still hold this device. Otherwise the server serves an older (validly signed) list, say one
+   * that still has a removed device, which would then get a copy of every message and could push history and sync.
+   */
+  async checkOwnPinned(list) {
+    if (!list.present.some((d) => d.id === this.me.device)) throw new Error("own_list_without_device");
+    const pin = this.ownPinned;
+    if (pin && !(await p.extendsPinned(list, pin.head, pin.length))) throw new Error("own_list_fork");
+    if (!pin || pin.head !== list.head) {
+      this.ownPinned = { head: list.head, length: list.entries.length };
+      await this.store.setSecret("ownPinned", this.ownPinned);
+    }
+  }
+
+  /**
+   * Pinned heads: a list must extend what we saw before (TOFU), otherwise it is a fork (DESIGN.md §5.3). Returns
+   * whether the account may be trusted: false for a list that forks and for a contact already marked as forked.
+   */
   async checkPinned(account, list) {
     const c = this.contacts.get(account);
-    if (!c) return;
+    if (!c) return true;
     if (c.pinned && !(await p.extendsPinned(list, c.pinned.head, c.pinned.length))) {
       if (!c.fork) {
         c.fork = true;
         await this.saveContact(c);
+        this.lists.delete(account);
       }
-      return;
+      return false;
     }
     if (!c.pinned || c.pinned.head !== list.head) {
       const changed = !!c.pinned && list.head !== c.pinned.head;
@@ -422,6 +485,7 @@ export class Messenger extends EventTarget {
       if (changed) c.devicesChanged = p.now();
       await this.saveContact(c);
     }
+    return !c.fork;
   }
 
   /**
@@ -431,6 +495,7 @@ export class Messenger extends EventTarget {
   async lookupDeviceVia(account, id, via) {
     if (account === this.me.account) return via ? undefined : this.lookupDevice(account, id);
     const c = this.contacts.get(account);
+    if (c?.fork) return undefined; // quarantined: nothing from a forked account is taken (DESIGN.md §5.3)
     if (c && (isServerOrigin(c.server) ? c.server : null) !== via) return undefined;
     if (!c) {
       if (via) this.servers.set(account, via);
@@ -446,7 +511,8 @@ export class Messenger extends EventTarget {
       l = await this.list(account, true);
       d = l.list.present.find((x) => x.id === id);
     }
-    return d;
+    // The lookup itself may have shown a fork: then no device of the account is trusted, not even one in that list.
+    return this.contacts.get(account)?.fork ? undefined : d;
   }
 
   async ownList(fresh = false) {
@@ -631,7 +697,12 @@ export class Messenger extends EventTarget {
         // The connection broke on the way (a page that was in the background): once more on the new connection.
         // Recipients ignore a message id they already have.
         if (!OFFLINE.includes(e?.message) || !(await this.ws.whenReady())) throw e;
-        r = await this.ws.sendEnvelopes(to);
+        try {
+          r = await this.ws.sendEnvelopes(to);
+        } catch (again) {
+          if (e.partial && again instanceof Error) again.partial = true;
+          throw again;
+        }
       }
     }
     return { id, time, failed: r?.failed ?? [], queued: r?.queued ?? [] };
@@ -670,20 +741,52 @@ export class Messenger extends EventTarget {
   // could not deliver to any device of the other party, or to some of them, is marked with those devices (`failed`)
   // and can be sent to them again; recipients ignore an id they already have.
 
-  /** Send an outgoing text or disappearing text, or keep it in the outbox when there is no connection. */
+  /**
+   * Send an outgoing text or disappearing text. It is stored first, marked `unsent`, so that it is never lost from this
+   * device. Without a connection it goes into the outbox instead. If sending fails before any device got it, the record
+   * goes again and the error is thrown (the text goes back to the composer); if it fails after some devices got it
+   * (`e.partial`), the record stays, marked `unsent`, and is not sent again under a new id.
+   */
   async sendOrKeep(m, body, ttl) {
+    await this.record({ ...m, unsent: true });
     let r;
     try {
       r = await this.send(m.conv, m.kind, body, { id: m.id, ttl, time: m.time });
     } catch (e) {
-      if (!OFFLINE.includes(e?.message)) throw e;
-      await this.record({ ...m, outbox: true });
-      this.outbox = [...this.outbox.filter((x) => x.id !== m.id), { id: m.id, conv: m.conv, kind: m.kind, body, ttl, time: m.time }];
-      await this.store.setSecret("outbox", this.outbox);
-      return { id: m.id, time: m.time, outbox: true };
+      if (OFFLINE.includes(e?.message)) {
+        this.outbox = [...this.outbox.filter((x) => x.id !== m.id), { id: m.id, conv: m.conv, kind: m.kind, body, ttl, time: m.time }];
+        await this.store.setSecret("outbox", this.outbox);
+        await this.patchMessage(m.id, (x) => {
+          delete x.unsent;
+          x.outbox = true;
+        });
+        return { id: m.id, time: m.time, outbox: true };
+      }
+      if (e?.partial) {
+        // Marked as not delivered too, so that it can be sent again under its id ("Send again").
+        await this.patchMessage(m.id, (x) => {
+          x.failed = ["*"];
+        });
+      } else {
+        await this.store.deleteMessage(m.id);
+        this.emit("messages", { conv: m.conv });
+      }
+      throw e;
     }
-    await this.record(r.peerFailed.length ? { ...m, failed: r.peerFailed } : m);
+    await this.patchMessage(m.id, (x) => {
+      delete x.unsent;
+      if (r.peerFailed.length) x.failed = r.peerFailed;
+    });
     return { id: m.id, time: m.time, failed: r.peerFailed };
+  }
+
+  /** Change a stored message in place (a receipt may have changed it since it was recorded). */
+  async patchMessage(id, change) {
+    const x = await this.store.message(id);
+    if (!x) return;
+    change(x);
+    await this.store.putMessage(x);
+    this.emit("messages", { conv: x.conv });
   }
 
   /** Send what waits in the outbox, oldest first; stops at the first that finds no connection. */
@@ -713,6 +816,7 @@ export class Messenger extends EventTarget {
     const m = await this.store.message(id);
     if (!m) return;
     delete m.outbox;
+    delete m.unsent;
     if (failed.length) m.failed = failed;
     else delete m.failed;
     await this.store.putMessage(m);
@@ -959,21 +1063,31 @@ export class Messenger extends EventTarget {
     this.queue = this.queue.then(() => this.handleEnvelope(f)).catch((err) => this.fail(err));
   }
 
+  /**
+   * Only final results are acknowledged: a message that was handled, or one that can never be (undecryptable, not
+   * for this device, forged). One that failed for a reason that may pass (the sender's device list could not be
+   * fetched, the local store refused a write) stays in the mailbox and comes again on the next connection.
+   */
   async handleEnvelope(f) {
     let m;
+    let lookupFailed = false;
     try {
       const plain = await p.open(this.me.device, this.prekeys, f.env);
       const via = isServerOrigin(f.server) ? f.server : null;
-      m = await p.verifyMessage(plain, this.me, (a, d) => this.lookupDeviceVia(a, d, via));
+      m = await p.verifyMessage(plain, this.me, async (a, d) => {
+        try {
+          return await this.lookupDeviceVia(a, d, via);
+        } catch (err) {
+          lookupFailed = true;
+          throw err;
+        }
+      });
     } catch {
-      this.ws.ack([f.id]); // undecryptable or forged: drop it
+      if (!lookupFailed) this.ws.ack([f.id]); // undecryptable or forged: drop it
       return;
     }
-    try {
-      await this.handleMessage(m);
-    } finally {
-      this.ws.ack([f.id]);
-    }
+    await this.handleMessage(m); // a throw leaves the envelope unacknowledged (and is reported)
+    this.ws.ack([f.id]);
   }
 
   async handleMessage(m) {
@@ -985,7 +1099,7 @@ export class Messenger extends EventTarget {
     if (m.from.account === this.me.account) return this.handleOwn(m);
     const peer = m.from.account;
     let c = this.contacts.get(peer);
-    if (c?.state === "blocked") return;
+    if (c?.state === "blocked" || c?.fork) return;
     switch (m.kind) {
       case "request": {
         // One pending request per sender; nothing changes for accepted or pending contacts. An accepted contact that
@@ -1796,7 +1910,8 @@ export class Messenger extends EventTarget {
   /** Whether a relay frame comes from an own device or from a contact this account talks to. */
   mayRelay(f) {
     if (f.account === this.me.account) return true;
-    return ["accepted", "outgoing"].includes(this.contacts.get(f.account)?.state);
+    const c = this.contacts.get(f.account);
+    return !c?.fork && ["accepted", "outgoing"].includes(c?.state);
   }
 
   /** Forget chunks whose file message has not come within EARLY_KEEP. */

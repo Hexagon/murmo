@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS fed_outbox (
 );
 CREATE INDEX IF NOT EXISTS fed_outbox_due ON fed_outbox (next_try);
 CREATE INDEX IF NOT EXISTS fed_outbox_server ON fed_outbox (server, id);
+CREATE TABLE IF NOT EXISTS writes (
+  pair  BLOB PRIMARY KEY, -- keyed hash of: writer account > recipient account (or @server)
+  until INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS remote_ids (
   account     TEXT PRIMARY KEY,
   home        TEXT NOT NULL,
@@ -184,6 +188,28 @@ impl Db {
         )?;
         if !has_origin {
             conn.execute_batch("ALTER TABLE mailbox ADD COLUMN origin TEXT")?;
+        }
+        // Who sent each envelope, as a keyed hash, for the senders' shares of a mailbox; databases from before have
+        // no column (their envelopes count for nobody's share).
+        let has_sender: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mailbox') WHERE name = 'sender'",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has_sender {
+            conn.execute_batch("ALTER TABLE mailbox ADD COLUMN sender BLOB")?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS mailbox_sender ON mailbox (device, sender)",
+        )?;
+        // Chunks from accounts on other servers count against the sending server and account together.
+        let has_relay_origin: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('relay_queue') WHERE name = 'origin'",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has_relay_origin {
+            conn.execute_batch("ALTER TABLE relay_queue ADD COLUMN origin TEXT")?;
         }
         Ok(Db(Arc::new(Mutex::new(conn))))
     }
@@ -414,6 +440,42 @@ impl Db {
     }
 
     /// Whether a device can receive envelopes (it has a prekey).
+    /// The account a device on this server belongs to; `None` for a device it does not know.
+    pub fn device_owner(&self, device: &str) -> Result<Option<String>, StoreError> {
+        self.conn()?
+            .query_row(
+                "SELECT account FROM prekeys WHERE device = ?1",
+                params![device],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(store_err)
+    }
+
+    /// Remember until `until` that an account wrote to another (the pair as a keyed hash, see [`Share`]).
+    pub fn note_write(&self, pair: &[u8], until: i64) -> Result<(), StoreError> {
+        self.conn()?
+            .execute(
+                "INSERT INTO writes (pair, until) VALUES (?1, ?2) ON CONFLICT(pair) DO UPDATE SET until = MAX(until, excluded.until)",
+                params![pair, until],
+            )
+            .map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Whether an account wrote to another (the pair as a keyed hash) and that has not expired at `now`.
+    pub fn wrote(&self, pair: &[u8], now: i64) -> Result<bool, StoreError> {
+        let n: i64 = self
+            .conn()?
+            .query_row(
+                "SELECT COUNT(*) FROM writes WHERE pair = ?1 AND until >= ?2",
+                params![pair, now],
+                |r| r.get(0),
+            )
+            .map_err(store_err)?;
+        Ok(n > 0)
+    }
+
     pub fn device_known(&self, device: &str) -> Result<bool, StoreError> {
         let n: i64 = self
             .conn()?
@@ -430,6 +492,9 @@ impl Db {
 
     /// Queue an envelope; `None` if the device's queue is full. `origin` is the server it came from when that is not
     /// this one (federation).
+    ///
+    /// With `share`, the envelope also counts against its sender's share of the device's mailbox: `None` too when the
+    /// sender already has `share.max` envelopes queued there.
     pub fn enqueue(
         &self,
         device: &str,
@@ -437,6 +502,7 @@ impl Db {
         expires: i64,
         max_queue: i64,
         origin: Option<&str>,
+        share: Option<&Share>,
     ) -> Result<Option<i64>, StoreError> {
         let mut c = self.conn()?;
         let tx = c.transaction().map_err(store_err)?;
@@ -450,9 +516,21 @@ impl Db {
         if n >= max_queue {
             return Ok(None);
         }
+        if let Some(sh) = share {
+            let mine: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM mailbox WHERE device = ?1 AND sender = ?2",
+                    params![device, &sh.sender[..]],
+                    |r| r.get(0),
+                )
+                .map_err(store_err)?;
+            if mine >= sh.max {
+                return Ok(None);
+            }
+        }
         tx.execute(
-            "INSERT INTO mailbox (device, env, expires, origin) VALUES (?1, ?2, ?3, ?4)",
-            params![device, env, expires, origin],
+            "INSERT INTO mailbox (device, env, expires, origin, sender) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![device, env, expires, origin, share.map(|sh| &sh.sender[..])],
         )
         .map_err(store_err)?;
         let id = tx.last_insert_rowid();
@@ -520,6 +598,8 @@ impl Db {
             .execute("DELETE FROM relay_queue WHERE expires < ?1", params![now])
             .map_err(store_err)?;
         c.execute("DELETE FROM fed_outbox WHERE expires < ?1", params![now])
+            .map_err(store_err)?;
+        c.execute("DELETE FROM writes WHERE until < ?1", params![now])
             .map_err(store_err)?;
         Ok(n + m)
     }
@@ -624,22 +704,27 @@ impl Db {
     // ── queued file chunks (ciphertext for devices that were not connected) ─────────────────────────────────────
 
     /// What a sender account has queued for a device, and the totals its limits are checked against; `None` if
-    /// the device is unknown.
+    /// the device is unknown. `origin` is the server the account sent from when that is another server
+    /// (federation): what an account named there has queued is counted apart from what the same account name has
+    /// queued from anywhere else, so that a server cannot use up the share of an account it does not serve.
     pub fn relay_usage(
         &self,
         device: &str,
         account: &str,
+        origin: Option<&str>,
     ) -> Result<Option<QueueUsage>, StoreError> {
-        usage(&*self.conn()?, device, account)
+        usage(&*self.conn()?, device, account, origin)
     }
 
     /// Queue a chunk for a device unless that would exceed one of `limits`. A binary chunk is stored as a `BLOB`,
     /// a text chunk (from a client that sends text frames) as `TEXT`; [`Db::relay_queued`] tells them apart.
+    #[allow(clippy::too_many_arguments)]
     pub fn relay_enqueue(
         &self,
         device: &str,
         sender: &str,
         account: &str,
+        origin: Option<&str>,
         data: ChunkData<'_>,
         expires: i64,
         limits: &QueueLimits,
@@ -647,18 +732,20 @@ impl Db {
         let size = i64::try_from(data.len()).unwrap_or(i64::MAX);
         let mut c = self.conn()?;
         let tx = c.transaction().map_err(store_err)?;
-        match usage(&tx, device, account)? {
+        match usage(&tx, device, account, origin)? {
             Some(u) if u.room(limits) >= size => {}
             _ => return Ok(false),
         }
-        let sql = "INSERT INTO relay_queue (device, sender, account, size, expires, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+        let sql = "INSERT INTO relay_queue (device, sender, account, size, expires, data, origin) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
         match data {
-            ChunkData::Text(t) => {
-                tx.execute(sql, params![device, sender, account, size, expires, t])
-            }
-            ChunkData::Binary(b) => {
-                tx.execute(sql, params![device, sender, account, size, expires, b])
-            }
+            ChunkData::Text(t) => tx.execute(
+                sql,
+                params![device, sender, account, size, expires, t, origin],
+            ),
+            ChunkData::Binary(b) => tx.execute(
+                sql,
+                params![device, sender, account, size, expires, b, origin],
+            ),
         }
         .map_err(store_err)?;
         tx.commit().map_err(store_err)?;
@@ -998,6 +1085,14 @@ pub struct OutboxItem {
     pub attempts: i64,
 }
 
+/// A sender's share of one device's mailbox: who it is, as a keyed hash (of its account, or of its server for
+/// envelopes from another server), and how many of its envelopes may wait there at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Share {
+    pub sender: [u8; 16],
+    pub max: i64,
+}
+
 /// Byte limits of the file queue.
 #[derive(Debug, Clone, Copy)]
 pub struct QueueLimits {
@@ -1053,7 +1148,12 @@ impl QueueUsage {
     }
 }
 
-fn usage(c: &Connection, device: &str, account: &str) -> Result<Option<QueueUsage>, StoreError> {
+fn usage(
+    c: &Connection,
+    device: &str,
+    account: &str,
+    origin: Option<&str>,
+) -> Result<Option<QueueUsage>, StoreError> {
     let owner: Option<String> = c
         .query_row(
             "SELECT account FROM prekeys WHERE device = ?1",
@@ -1074,15 +1174,16 @@ fn usage(c: &Connection, device: &str, account: &str) -> Result<Option<QueueUsag
             &[&device],
         )?,
         pair: sum(
-            "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE account = ?1 AND device = ?2",
-            &[&account, &device],
+            "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE account = ?1 AND origin IS ?3 AND device = ?2",
+            &[&account, &device, &origin],
         )?,
         account: sum(
-            "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE account = ?1",
-            &[&account],
+            "SELECT COALESCE(SUM(size), 0) FROM relay_queue WHERE account = ?1 AND origin IS ?2",
+            &[&account, &origin],
         )?,
         total: sum("SELECT COALESCE(SUM(size), 0) FROM relay_queue", &[])?,
-        own: owner == account,
+        // Only a device's own account on this server: a remote server naming it is somebody else.
+        own: owner == account && origin.is_none(),
     }))
 }
 
@@ -1128,10 +1229,15 @@ mod tests {
     }
 
     fn put(db: &Db, to: &str, from_account: &str, n: usize) -> bool {
+        put_from(db, to, from_account, None, n)
+    }
+
+    fn put_from(db: &Db, to: &str, from_account: &str, origin: Option<&str>, n: usize) -> bool {
         db.relay_enqueue(
             to,
             "dev",
             from_account,
+            origin,
             ChunkData::Text(&"x".repeat(n)),
             10,
             &LIMITS,
@@ -1181,19 +1287,55 @@ mod tests {
         let db = db();
         assert!(put(&db, "b2", "B", 70));
         assert!(!put(&db, "b2", "B", 1), "the account limit still applies");
-        let u = db.relay_usage("b2", "B").expect("usage").expect("known");
+        let u = db
+            .relay_usage("b2", "B", None)
+            .expect("usage")
+            .expect("known");
         assert!(u.own);
         assert_eq!(u.room(&LIMITS), 0);
-        let u = db.relay_usage("b2", "A").expect("usage").expect("known");
+        let u = db
+            .relay_usage("b2", "A", None)
+            .expect("usage")
+            .expect("known");
         assert_eq!((u.own, u.device, u.pair), (false, 70, 0));
         assert_eq!(u.room(&LIMITS), 30);
+    }
+
+    #[test]
+    fn a_remote_server_has_its_own_share_of_an_account_name() {
+        let db = db();
+        // A server naming the local account B is not B: it gets no own-device exemption on B's devices…
+        assert!(put_from(&db, "b2", "B", Some("https://x.example"), 40));
+        assert!(
+            !put_from(&db, "b2", "B", Some("https://x.example"), 1),
+            "pair limit"
+        );
+        let u = db
+            .relay_usage("b2", "B", Some("https://x.example"))
+            .expect("usage")
+            .expect("known");
+        assert!(!u.own);
+        // …and what it queued does not count against B itself, nor against the same name from another server.
+        let u = db
+            .relay_usage("b2", "B", None)
+            .expect("usage")
+            .expect("known");
+        assert_eq!((u.own, u.pair, u.account), (true, 0, 0));
+        assert!(put(&db, "c1", "A", 40));
+        assert!(put_from(&db, "c1", "A", Some("https://x.example"), 40));
+        assert!(put_from(&db, "c1", "A", Some("https://y.example"), 20));
+        let u = db
+            .relay_usage("c1", "A", Some("https://y.example"))
+            .expect("usage")
+            .expect("known");
+        assert_eq!((u.pair, u.account, u.device), (20, 20, 100));
     }
 
     #[test]
     fn binary_and_text_chunks_keep_their_kind() {
         let db = db();
         assert!(
-            db.relay_enqueue("b1", "a1", "A", ChunkData::Text("abc"), 10, &LIMITS)
+            db.relay_enqueue("b1", "a1", "A", None, ChunkData::Text("abc"), 10, &LIMITS)
                 .expect("enqueue")
         );
         assert!(
@@ -1201,6 +1343,7 @@ mod tests {
                 "b1",
                 "a1",
                 "A",
+                None,
                 ChunkData::Binary(&[0, 1, 2, 255]),
                 10,
                 &LIMITS
@@ -1213,7 +1356,10 @@ mod tests {
         assert_eq!(q[1].data, QueuedData::Binary(vec![0, 1, 2, 255]));
         assert_eq!((q[1].sender.as_str(), q[1].account.as_str()), ("a1", "A"));
         // Both count by their length.
-        let u = db.relay_usage("b1", "A").expect("usage").expect("known");
+        let u = db
+            .relay_usage("b1", "A", None)
+            .expect("usage")
+            .expect("known");
         assert_eq!(u.pair, 7);
     }
 
@@ -1221,14 +1367,20 @@ mod tests {
     fn unknown_devices_get_nothing() {
         let db = db();
         assert!(!put(&db, "nobody", "A", 1));
-        assert!(db.relay_usage("nobody", "A").expect("usage").is_none());
+        assert!(
+            db.relay_usage("nobody", "A", None)
+                .expect("usage")
+                .is_none()
+        );
     }
 
     #[test]
     fn queued_hides_expired_envelopes() {
         let db = db();
-        db.enqueue("b1", "old", 100, 10, None).expect("enqueue");
-        db.enqueue("b1", "new", 200, 10, None).expect("enqueue");
+        db.enqueue("b1", "old", 100, 10, None, None)
+            .expect("enqueue");
+        db.enqueue("b1", "new", 200, 10, None, None)
+            .expect("enqueue");
         // Before the purge sweep runs, the expired envelope is still stored but not handed out.
         let queued = db.queued("b1", 0, 10, 150).expect("queued");
         assert_eq!(
