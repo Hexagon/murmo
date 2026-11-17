@@ -1054,6 +1054,44 @@ test("a paper key brings back an account whose only device is lost", async () =>
   assert.equal(db2count("mailbox"), 0);
 });
 
+test("a fork also stops receiving: the forked list is not cached and the account's messages are quarantined", async () => {
+  const fiaHandle = await register("Fia", PW);
+  const gusHandle = await register("Gus", PW);
+  const fia = await device(fiaHandle, PW, "fia1");
+  const gus = await device(gusHandle, PW, "gus1");
+  const account = fia.me.account;
+  await fia.request(gusHandle, "Hej Gus");
+  await until(async () => gus.contacts.get(account)?.state === "incoming");
+  await gus.accept(account);
+  await until(async () => fia.contacts.get(gus.me.account)?.state === "accepted");
+  const before = await api.devices(account); // validly signed, one device
+  await device(fiaHandle, PW, "fia2", async () => fia.approveLink((await waitFor(fia, "link")).request));
+  gus.lists.clear();
+  assert.equal((await gus.list(account, true)).list.present.length, 2);
+  assert.equal(gus.contacts.get(account).pinned.length, 2);
+  await fia.sendText(gus.me.account, "före");
+  await until(async () => (await gus.messages(account)).some((m) => m.text === "före"));
+
+  // The server rolls Fia's list back: it does not extend the pinned one.
+  const real = gus.api;
+  gus.api = Object.assign(Object.create(real), { devices: async (a) => (a === account ? before : real.devices(a)) });
+  gus.lists.clear();
+  const forked = await gus.list(account, true);
+  assert.equal(forked.list.present.length, 1); // still returned, for the safety code
+  assert.ok(gus.contacts.get(account).fork);
+  assert.ok(!gus.lists.has(account)); // but never cached
+  gus.api = real;
+
+  // Nothing from the forked account is taken, not even from a device in the pinned list; sending stays blocked.
+  fia.lists.clear();
+  await fia.sendText(gus.me.account, "under gaffeln");
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.ok(!(await gus.messages(account)).some((m) => m.text === "under gaffeln"));
+  assert.equal(await gus.lookupDeviceVia(account, fia.me.device, null), undefined);
+  assert.ok(!gus.mayRelay({ account }));
+  await assert.rejects(gus.sendText(account, "svar"), (e) => e.code === "fork");
+});
+
 test("the own device list is pinned: an older list that still holds a removed device is refused", async () => {
   const erikHandle = await register("Erik", PW);
   const erik1 = await device(erikHandle, PW, "erik1");

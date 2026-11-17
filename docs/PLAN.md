@@ -65,7 +65,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       serve an older, validly signed own list that still holds a removed (stolen) device, which then gets a copy of every
       message and can push `history`/`sync`/`names`. Keep `{head, length}` for the own list in the encrypted store,
       refuse lists that do not extend it or that lack this device (T3, G1, G3)
-- [ ] **A fork must also stop receiving.** A list that fails `extendsPinned` is still cached (`core.js:400`) and
+- [x] **A fork must also stop receiving.** A list that fails `extendsPinned` is still cached (`core.js:400`) and
       incoming messages never check `c.fork`; only sending is blocked. Do not cache a forked list, verify against the
       pinned one, quarantine messages from a forked account (G2, T24)
 - [ ] **Do not ack envelopes on temporary failures.** `handleEnvelope` (`core.js:888-902`) acks when a device-list
