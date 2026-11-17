@@ -82,7 +82,7 @@ service.
 | T43 | A contact asks for a file again and again, to make the sender's device send it over and over | X2 | A file is streamed on request only to a verified device of the contact it was sent to, one stream per file and device at a time and at most once a minute; large files only on *Ta emot* | One file a minute per device of the contact, within the relay budgets |
 | T44 | Two pages of one device take the connection from each other, losing messages and chunks between them | – (an ordinary user) | One connection per device; the older page is told `replaced` and stops, saying so | A page from before this release keeps reconnecting until it is reloaded (DESIGN.md §12) |
 | T45 | Forged deliveries with bad signatures make a server fetch the claimed sender's key again and again, tying up its blocking pool for up to 10 s each | X2 | A forced refetch at most once a minute per origin; failed fetches cached for a minute; at most 10 failed verifications a minute per address, checked before any fetch | Requests from an address that shares a network with an attacker are refused for up to a minute |
-| T18 | Quantum adversary records traffic | future | – (X25519 and Ed25519 only) | Hybrid ML-KEM prekeys in a later phase |
+| T18 | Quantum adversary records traffic | future | – (X25519 and Ed25519 only) | Hybrid ML-KEM prekeys planned (DESIGN.md §15.2, PLAN.md phase 2 item 4); signatures later (§15.1 step C) |
 
 ## 4. Accepted risks
 

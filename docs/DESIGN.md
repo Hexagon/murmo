@@ -233,7 +233,7 @@ The server stores `envelope` as an opaque string addressed to `to`.
 prekey every 7 days and deletes prekey private keys 21 days after replacing them; mailbox entries expire after 14 days.
 This gives **forward secrecy with a window of about three weeks**: once a prekey's private key is deleted, recorded
 ciphertext to it cannot be decrypted even with the device. Per-message forward secrecy and post-compromise security
-come with the Double Ratchet in phase 2 (PLAN.md).
+come with the Double Ratchet in phase 2 (draft in §15).
 
 A sender checks a prekey's `time` as well as its signature: it uses no prekey older than rotation + keep (28 days),
 whose private key the device may have deleted or a server may have obtained (T13), and none older than the newest one
@@ -1389,3 +1389,127 @@ Not across servers yet: the `devices` notice (a change of a contact's list on an
 heads in its next message, §5.3, as T3 already allows). A receiving client takes chunks from its contacts' devices by
 account and device as before; it does not check which server a chunk came through, and a server could inject chunks
 in a contact's name, which fail the file's key and hash and are dropped.
+
+## 15. Protocol phase 2 (draft, not built)
+
+A draft for the protocol items of phase 2 in [PLAN.md](PLAN.md): a hybrid post-quantum envelope first, the Double
+Ratchet after it. Nothing here is built; it is written down so that the order in the plan can be judged and so that
+the two steps share one envelope design instead of changing it twice.
+
+### 15.1 Order, and why
+
+| Step | Protects against | Work | Seen by the user |
+|---|---|---|---|
+| **A. Hybrid envelope** (X25519 + ML-KEM-768, §15.2) | recorded traffic read later with a quantum computer (T18) | small: one signed field in the prekey, one envelope version, a vendored ML-KEM | nothing, except about 1.5 KB more per envelope |
+| **B. Double Ratchet** (§15.3) | a stolen device key or prekey reading weeks of recorded traffic (T13); an attacker who once had a device's keys reading on (post-compromise) | large: sessions per device pair, stored state, recovery from lost state | nothing |
+| C. Later: one-time prekeys, a post-quantum step in the ratchet, ML-DSA signatures in rootcard | the first message's window; quantum-safe post-compromise; forged signatures once a quantum computer exists | large, the last with rootcard | nothing |
+
+A comes first because it is small and its benefit cannot be had later: traffic recorded before it stays exposed. B
+reuses A's handshake. Neither protects against a server that serves modified client code (AR1); that is the
+installable client in the plan, which has its own place there.
+
+### 15.2 Step A: hybrid envelope (`v: 2`)
+
+**Prekey.** A device that supports it adds an ML-KEM-768 encapsulation key (FIPS 203) to its signed prekey:
+
+```json
+{ "v": 1, "account": "…", "device": "…", "id": "…", "key": "x25519:<public>",
+  "kem": "mlkem768:<1184 bytes, base64url>", "time": 1763150000, "sig": "…" }
+```
+
+`kem` is inside the signature, rotated and deleted with the X25519 key (§5.2). The server's `verify_prekey` accepts
+the optional `kem` (and checks its length); clients before this ignore it.
+
+**Envelope.** To a prekey with `kem`, a sender encapsulates once per envelope, `(kct, kss) = ML-KEM.Encaps(kem)`, and:
+
+```
+shared  = X25519(e, SPK)
+key     = HKDF-SHA256(ikm  = kss ‖ shared,
+                      salt = SHA-256(E ‖ SPK ‖ kct ‖ kem),
+                      info = "mesg/box/v2")                 → AES-256-GCM key
+aad     = canonical({ v: 2, to, spk, epk: "x25519:<E>", kct: <base64url> })
+envelope = { v: 2, to, spk, epk, kct, n, ct }
+```
+
+Both secrets go into the key, so the envelope is as strong as the stronger of X25519 and ML-KEM; the KEM ciphertext
+and key are bound in the salt (as in X-Wing), so neither can be swapped.
+
+**No downgrade, almost for free.** A sender uses `v: 2` whenever the prekey has `kem`. A server cannot strip `kem`
+(it is signed), and cannot serve an older prekey without it, since a sender never goes back to an older prekey than
+it has seen (§5.2, `newerPrekey`). Once a device has published a prekey with `kem`, every sender that saw it seals to
+it with ML-KEM. A device that never published one gets `v: 1`, as today.
+
+**Mixed versions.** Only updated devices publish `kem`, so only they receive `v: 2`; an older device never gets an
+envelope it cannot open (§12).
+
+**Implementation.**
+- No browser offers ML-KEM in WebCrypto yet. Vendor one small, pinned, pure-JS ML-KEM-768 (as the rootcard core is
+  vendored), checked against the FIPS 203 known-answer vectors in `tests/`. Switch to WebCrypto once it is in all
+  supported browsers.
+- The decapsulation key is then bytes in page memory, not a non-extractable `CryptoKey`. It is stored encrypted under
+  the local key like the other private keys (§8) and wiped when the prekey is deleted. Script in the page can read it
+  (T5, AR1 already cover that); the X25519 half stays non-extractable, so nothing is weaker than today.
+- Size: `kct` is 1 088 bytes (about 1.45 KB as text) per envelope, well inside `MAX_ENVELOPE` (96 KiB). A text to a
+  contact with 3 devices and 2 own devices grows by about 7 KB. File chunks are not affected: they are encrypted with
+  the file's key, which travels in an envelope.
+
+**Threat model.** T18 becomes "recorded envelopes to updated devices are safe against a quantum computer; signatures
+are not (step C)".
+
+### 15.3 Step B: Double Ratchet (`v: 3`)
+
+One session per **pair of devices** (sender device, recipient device), as Signal does, so every existing rule that
+works per device (fan-out, own devices, history hand-over, federation) stays as it is.
+
+**Starting a session.** The first envelope to a device carries the handshake of step A:
+`init = { spk, epk, kct }`, and the root key is the `v: 2` key material (`HKDF(…, info = "mesg/ratchet/init/v1")`).
+Authentication needs nothing new: the plaintext inside is signed by the sender's device key and names `to` (§5.3), so
+the recipient knows which device it shares the session with. A sender keeps sending `init` until it has received
+anything in the session (the recipient may have been away), as Signal's PreKeySignalMessage.
+
+**Ratchet.** The Double Ratchet as specified by Signal: X25519 DH ratchet, HKDF-SHA256 root chain, HMAC-SHA256 symmetric
+chains, AES-256-GCM message keys. The header `{ dh, pn, n }` is in the AAD, not encrypted: it reveals only counters,
+and the server already sees when and to whom.
+
+```
+envelope = { v: 3, to, sid, init?, dh, pn, n, nonce, ct }
+```
+
+`sid` (16 random bytes, chosen by the device that starts the session) lets the recipient find the session without
+trying all of them. It lets the server link envelopes of one device pair in storage, which it can already do at the
+time of sending (AR3); this goes into T9.
+
+**Several sessions per pair.** Two devices may start a session to each other at the same time, or one may have lost
+its state. A device keeps up to 4 sessions per peer device, takes messages on any of them, and sends on the one it
+last received on (at a tie, the lower `sid`). Sessions not used for 30 days are deleted.
+
+**Messages out of order or twice.** Mailboxes, the outbox and federation can deliver out of order and again. Skipped
+message keys are kept, encrypted at rest, at most 1 000 per session and 5 000 per device, for 14 days (the mailbox
+lifetime), and deleted when used. A message seen twice is already dropped by its id (T7).
+
+**Lost state.** A device that gets a `v: 3` envelope for a `sid` it does not know, or cannot decrypt, cannot answer in
+that session. It sends `{ kind: "resync", sid }` in a `v: 2` envelope; the sender drops that session and starts a new
+one with the next message. The message that failed is lost on that device (its other devices and the history hand-over
+still have it), and the sender's interface marks it as not delivered to that device (§10.3).
+
+**State.** Sessions live in IndexedDB, encrypted under the local key, and are updated in the same transaction that
+stores the message, before the envelope is acknowledged, so that a crash never leaves a message acknowledged and its
+key lost. One connection per device (§12) and a Web Lock keep two pages of one device from advancing a session at
+once.
+
+**Mixed versions.** A device that supports sessions says so in its signed prekey: `caps: ["ratchet1"]`. Senders use
+`v: 3` only to such devices, `v: 2` or `v: 1` otherwise. Downgrade is prevented as in step A: a prekey with `caps` is
+never replaced by an older one without.
+
+**What does not change.** File chunks (their own key), the server (it stores `v: 3` envelopes as opaque strings, and
+accepts `caps` in prekeys), federation, safety codes, device lists.
+
+**Limits that stay.**
+- The first message of a session is protected only for the prekey's window (§5.2) until step C adds one-time prekeys.
+- Post-compromise security needs the other device to answer: a device that only receives does not heal its
+  receiving chain.
+- Everything still depends on the client code (AR1).
+
+**Threat model.** T13 becomes "messages are safe once their message key is used and deleted; the first message of a
+session within the prekey window"; a new entry covers stored skipped keys and forced `resync` (an attacker who can
+make a device lose state gets messages lost, not read).
