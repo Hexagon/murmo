@@ -36,6 +36,44 @@ const msgNodes = new Map();
 const imgNodes = new Map();
 /** The size of pictures seen (file id → { width, height }), to give an <img> its place before it has loaded. */
 const imgSizes = new Map();
+/**
+ * Pictures put together this session (file id → { url, bytes, conv }), oldest first, kept when another conversation is
+ * opened: going back to a conversation shows its pictures at once instead of reading and decrypting them again.
+ * At most PICTURES_BYTES; disappearing pictures are not kept. Emptied at logout.
+ */
+const pictures = new Map();
+const PICTURES_BYTES = 96 * 1024 * 1024;
+let picturesBytes = 0;
+
+function keepPicture(f, url, bytes, conv) {
+  const old = pictures.get(f);
+  if (old) {
+    pictures.delete(f);
+    picturesBytes -= old.bytes;
+    if (old.url !== url) URL.revokeObjectURL(old.url);
+  }
+  pictures.set(f, { url, bytes, conv });
+  picturesBytes += bytes;
+  for (const [g, e] of pictures) {
+    if (picturesBytes <= PICTURES_BYTES) break;
+    if (imgNodes.has(g)) continue; // on the screen (or the viewer may open it): kept
+    dropPicture(g);
+  }
+}
+
+function dropPicture(f) {
+  const e = pictures.get(f);
+  if (!e) return;
+  pictures.delete(f);
+  picturesBytes -= e.bytes;
+  URL.revokeObjectURL(e.url);
+}
+
+/** Revoke the object URLs of the view, but not those of the kept pictures. */
+function revokeViewUrls() {
+  for (const [f, u] of objectUrls) if (pictures.get(f)?.url !== u) URL.revokeObjectURL(u);
+  objectUrls.clear();
+}
 /** Outgoing files on their way: message id → share sent (0…1). */
 const sending = new Map();
 // Texts waiting for "Ångra" (DESIGN.md §6.6), by the message id they will be sent with: `{ m, fire, undo }`. They
@@ -1617,8 +1655,7 @@ function refreshConversation() {
 function openConversation(account, form = false) {
   closeFiles();
   current = account && messenger.contacts.has(account) ? account : null;
-  for (const u of objectUrls.values()) URL.revokeObjectURL(u);
-  objectUrls.clear();
+  revokeViewUrls();
   msgNodes.clear();
   imgNodes.clear();
   const covering = !!current || form;
@@ -2420,9 +2457,11 @@ async function renderThread() {
     if (files.has(f)) continue;
     imgNodes.delete(f);
     const u = objectUrls.get(f);
-    if (u) URL.revokeObjectURL(u);
+    if (u && pictures.get(f)?.url !== u) URL.revokeObjectURL(u);
     objectUrls.delete(f);
+    dropPicture(f);
   }
+  for (const [f, e] of pictures) if (e.conv === conv && !files.has(f)) dropPicture(f);
   for (const d of document.querySelectorAll("dialog.viewer[data-f]")) if (!files.has(d.dataset.f)) d.close();
   if (!msgs.length) out.push(h("div", { class: "day", text: tr("conv.empty") }));
   reconcile(ui.thread, out);
@@ -2924,15 +2963,35 @@ function fileView(m) {
     const made = imgNodes.get(f.f);
     if (made) return made;
     // The dimensions are read from the header first: a small file can decode to gigabytes and freeze the tab.
-    const img = h("img", { class: "inline", alt: f.name });
+    // No alt text until it has its picture: an <img> with alt text and no picture is drawn as a broken one.
+    const img = h("img", { class: "inline", alt: "" });
     if (m.kind === "ephemeral") {
       // Not offered for saving: no "Spara", no dragging out, no "Save image as". (A screenshot cannot be stopped.)
       img.draggable = false;
       img.addEventListener("contextmenu", (e) => e.preventDefault());
     }
     imgNodes.set(f.f, img);
+    const conv = current;
+    const show = (url) => {
+      img.addEventListener("load", () => {
+        img.classList.add("loaded");
+        if (ui.scroll && ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < img.height + 160) ui.scroll.scrollTop = ui.scroll.scrollHeight;
+      }, { once: true });
+      img.alt = f.name;
+      img.src = url;
+      const gif = f.mime === "image/gif" && m.kind === "file" ? () => messenger.fileBlob(f.f, "image/gif") : null;
+      img.addEventListener("click", () => showImage(url, f.name, gif, f.f, m.kind === "ephemeral"));
+    };
     const known = imgSizes.get(f.f);
     if (known) placeImage(img, known);
+    const kept = pictures.get(f.f);
+    if (known && kept) {
+      // Seen before this session: its size was checked then, and the picture is still here.
+      keepPicture(f.f, kept.url, kept.bytes, kept.conv); // the newest again
+      objectUrls.set(f.f, kept.url);
+      show(kept.url);
+      return img;
+    }
     messenger.imageSize(f.f).then(async (size) => {
       if (!p.imageFits(size)) {
         const why = size ? tr("msg.tooBig", { w: i18n.num(size.width), h: i18n.num(size.height) }) : tr("msg.cannotShow");
@@ -2947,14 +3006,13 @@ function fileView(m) {
       await nearScreen(img);
       const b = await messenger.fileBlob(f.f, f.mime);
       if (!b) throw new Error("no_file");
-      const url = objectUrls.get(f.f) ?? URL.createObjectURL(b);
-      objectUrls.set(f.f, url);
-      img.addEventListener("load", () => {
-        if (ui.scroll && ui.scroll.scrollHeight - ui.scroll.scrollTop - ui.scroll.clientHeight < img.height + 160) ui.scroll.scrollTop = ui.scroll.scrollHeight;
-      });
-      img.src = url;
-      const gif = f.mime === "image/gif" && m.kind === "file" ? () => messenger.fileBlob(f.f, "image/gif") : null;
-      img.addEventListener("click", () => showImage(url, f.name, gif, f.f, m.kind === "ephemeral"));
+      let url = objectUrls.get(f.f);
+      if (!url) {
+        url = URL.createObjectURL(b);
+        objectUrls.set(f.f, url);
+        if (m.kind !== "ephemeral" && conv) keepPicture(f.f, url, b.size, conv);
+      }
+      show(url);
     }).catch(() => {
       // Not cached: the next drawing tries the picture again (its parts may not all be readable yet).
       const card = fileCard(m);
@@ -3171,8 +3229,7 @@ function filesSettings() {
 /** Open the files view: of all conversations, or of one (`conv`), with `back` the conversation to go back to. */
 function openFiles(conv = null, back = null) {
   current = null;
-  for (const u of objectUrls.values()) URL.revokeObjectURL(u);
-  objectUrls.clear();
+  revokeViewUrls();
   msgNodes.clear();
   imgNodes.clear();
   ui.thread = null;
@@ -4070,6 +4127,8 @@ async function logout(forget) {
   messenger?.stop();
   messenger = null;
   current = null;
+  for (const f of [...pictures.keys()]) dropPicture(f);
+  imgSizes.clear();
   ui.sideList = null;
   unread.clear();
   updateTitle();
