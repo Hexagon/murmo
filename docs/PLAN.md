@@ -126,7 +126,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
       (`federation.rs:54,110,180`): missing from §11 stored data (and so the terms), and at odds with G5, T9, AR3
 - [ ] **Threat model claims unbuilt protections**: T6 lists reproducible client and published hashes (still open above)
 - [ ] **Host key compromise** is not a threat entry; `retired_keys` is always empty (`lib.rs:358`), so no rotation
-- [ ] **Operator guide in HOSTING.md**: backups and restore of the live SQLite file and `murmo-host.key`; reverse proxy
+- [ ] **Operator guide in HOSTING.md** (done by A4 and A6): backups and restore of the live SQLite file and `murmo-host.key`; reverse proxy
       (WebSocket upgrade, bodies up to 3 MiB, `MURMO_TRUST_PROXY`); service example, health, what is printed; upgrades;
       Unix only
 - [ ] Facts that disagree with the code: envelope limit is 96 KiB, not 64 (`DESIGN.md:790,1132`); `MURMO_LOG` does not
@@ -163,22 +163,121 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [ ] `aria-live` on all of `#app` (`index.html:80`); toasts and form errors without `role="status"`/`"alert"`
 - [ ] Safety code button unnamed on mobile (`app.js:1534`, `style.css:637`); consider a "verified" state
 - [ ] Contrast: focus ring 1.75:1 (`--focus`), `--faint` text 2.7–3:1 (`style.css:15,23,44`)
-- [ ] Mobile empty state hides "share your identifier" and the paper-key warning
+- [ ] (A1) Mobile empty state hides "share your identifier" and the paper-key warning
 - [ ] Dialogs without `aria-labelledby` (`app.js:217`), nested `main`, tablist without `role="tab"` (`app.js:578`)
 - [ ] Recovery card screen has no back; registration never offers "remember"; toasts drawn under modal backdrops
 - [ ] PWA: offline screen, maskable icon, manifest description in English; spinner ignores `prefers-reduced-motion`
 - [ ] Per-account settings in plain `localStorage` (`app.js:299,307`), against T12
 
+## Adoption: setup, updates and invites
+
+Murmo works, but every new user starts alone and every new server starts with a Rust toolchain. Contacts are only
+reachable by exact identifier, and the only way to pass one on is "Kopiera identifierare" (`app.js:233`). A server
+needs Rust 1.95+, a build, a `client/` directory next to the working directory, and a hand-made TLS proxy. murmo.org is
+a demo that may be wiped (`MURMO_DEMO`), so lasting use needs servers people can run. Items A1–A6 are ordered by
+benefit for the work. They use no new protocol, and they run alongside phase 2 items 1–2. A5 does phase 2 item 3. A4
+and A6 do the operator guide in review P2. A1 does the P3 item on the mobile empty state.
+
+1. [ ] **A1 Invite links** (S, client only). The largest effect: every user, nothing to deploy
+   - Format: `https://<MURMO_ORIGIN>/#add=<encodeURIComponent(Name#TAG@host)>`, with the full federated address
+     (the same text `fullAddress()` copies). It goes in the fragment, so the server never sees whom a link points to,
+     and nothing new is stored (§11 unchanged). No token, no expiry: the link carries an address, not trust
+   - "Invite someone" is the main button of the welcome card (`renderWelcome`, `app.js:1724`) and of the mobile empty
+     state, next to "Copy". It opens `navigator.share()` where the browser has it, otherwise a dialog with the link,
+     "Copy link" and the QR code (A3). A suggested text in the four languages: "Write to me on Murmo: <link>"
+   - Opening a link: the hash router (today only `#villkor`, `app.js:627`) reads `#add=`, keeps the address in
+     `sessionStorage`, and takes it out of the address bar with `history.replaceState`
+     - Logged out: login and register say "You opened a link to write to Alice#3F9C@host". They never say "Alice
+       invited you", because the link is not signed and anyone can make one. The address is shown exactly, as text and
+       bidi-isolated, as in requests. Registration does not change; after it, go on as below
+     - Logged in: an existing contact opens its conversation. Otherwise the new-conversation form is filled in, with
+       the note "Hi, it's <my name>" ready to edit. **Nothing is sent without a tap**: a link must not make a request
+       on someone's behalf
+     - A user whose account is on another server (or an iOS user whose installed app keeps its storage apart from
+       Safari) gets "Have an account elsewhere? Copy the address" to paste where they use Murmo
+   - Tests: `tests/ui-smoke.mjs` opens an `#add=` link logged out, registers, and checks the filled-in form;
+     logged in with an existing contact; a link to an invalid or self address; the fragment is gone afterwards
+   - Docs: a paragraph in DESIGN §6.1 (format, no server involvement, no trust conveyed). THREAT_MODEL: links are
+     attacker-made input (lookalike names, a fake "from"); the request flow and the safety code still decide.
+     README features: "Invite by link or QR code"
+2. [ ] **A2 Container image and a compose file with automatic TLS** (S). Running a server becomes three steps:
+   point DNS, set the domain, `docker compose up -d`. Operators bring their whole group, so this is worth more than
+   another feature
+   - `Dockerfile` in the repo root: a multi-stage build (`rust:1.95` → distroless, non-root), the client at
+     `/app/client`, data in the volume `/data` (`MURMO_DB=/data/murmo.sqlite`,
+     `MURMO_HOST_KEY_FILE=/data/murmo-host.key`), `MURMO_BIND=0.0.0.0:8080`, and `MURMO_COMMIT` passed as a build
+     argument so the app shows the commit
+   - `deploy/compose.yaml` + `deploy/Caddyfile` + `deploy/.env.example` (`MURMO_DOMAIN=chat.example.org`).
+     `MURMO_ORIGIN=https://${MURMO_DOMAIN}` and `MURMO_TRUST_PROXY=1`. Caddy gets the certificate and passes the
+     WebSocket through. Bodies up to 3 MiB are allowed by default
+   - Published by a release workflow on each `v*` tag: `ghcr.io/hexagon/murmo:0.2.3`, `:0.2`, `:latest`, amd64 and
+     arm64 (a Raspberry Pi is a likely home server). The compose file pins `:0.2`: patches come with a pull, and a minor
+     version waits until its notes are read
+   - Updating: `docker compose pull && docker compose up -d`. Open pages already offer a reload when the build
+     changes (`app.js:1257`)
+   - Docs: README "Run your own server" leads with these three steps; "From source" stays below. HOSTING.md gets
+     "Quick start" at the top
+   - CI: build the image on pull requests (no push); start it and fetch `/api/v1/info` once
+3. [ ] **A3 QR code for the invite link** (S, client only). In person, in a group chat on another app, or on paper
+   - Encoder: vendor qrcode-generator (Kazuhiko Arase, MIT, one file, no dependencies), unmodified, in
+     `client/vendor/qrcode/`, with version and hash noted, as for rootcard. Or write a small byte-mode encoder,
+     ECC M, versions 1–10, if a review prefers less vendored code. Drawn as inline SVG with the DOM, which CSP allows,
+     always dark on light with a quiet zone, whatever the theme
+   - Shown in the invite dialog (A1), large enough to scan from a phone held at arm's length, with "Print" (a print
+     stylesheet with only the code, the address and one line of text)
+   - Scanning needs nothing in the app: the phone's camera opens the link, and A1 handles the rest. An in-app scanner
+     (`BarcodeDetector`, not in Safari or Firefox) is left for later
+   - README: "no dependencies besides the vendored rootcard core" becomes "…rootcard core and a QR encoder"
+4. [ ] **A4 Safe updates and a readable first start** (S, server)
+   - `murmo-server --version`; `murmo-server backup <file>` takes a consistent copy of the live database
+     (`VACUUM INTO`) next to the key file. This is the backup half of the operator guide
+   - Before a start that changes the schema (`db.rs:191-224` adds columns), write `<db>.before-<version>` with
+     `VACUUM INTO`, keep the last two, and print that it did. An update then always has a way back
+   - Print one summary at start: the address it listens on, the origin, database and key paths ("back up these two
+     files"), federation mode, the client directory and its build. Add warnings: an `http://` origin outside
+     loopback, a missing client directory, and `X-Forwarded-For` seen while `MURMO_TRUST_PROXY=0`
+   - `MURMO_CLIENT_DIR` (default `client`) also looks next to the executable when the working directory has none, so
+     the release archive (A5) runs from anywhere
+   - No automatic update check: the server does not phone home. Operators watch GitHub releases (documented)
+5. [ ] **A5 Release archives with checksums, and systemd** (S). For servers without containers. Does phase 2 item 3
+   - The same workflow as A2 builds `murmo-<version>-x86_64-linux-musl.tar.gz` and `…-aarch64-…`: the binary,
+     `client/`, the licences and `deploy/`. It also builds a client-only archive made reproducibly (`tar --sort=name
+     --mtime=@0 --owner=0 --group=0 --numeric-owner`, `gzip -n`) and one `SHA256SUMS` for all of them, in the release
+     notes. "Säkerhet och integritet" links them next to the commit
+   - `deploy/murmo.service`: `DynamicUser`, `StateDirectory=murmo`, `EnvironmentFile=/etc/murmo/murmo.env`,
+     `NoNewPrivileges`, `ProtectSystem=strict`. HOSTING.md gives the steps: download, `sha256sum -c`, extract to
+     `/opt/murmo`, edit the env file, `systemctl enable --now murmo`. To update, replace `/opt/murmo` and restart
+   - No `curl | sh` installer: the people this is for rightly distrust one, and the steps above are short
+6. [ ] **A6 The rest of the documentation** (S). Mostly moving and shortening, with little new text
+   - HOSTING.md in the order an operator needs it: Quick start (A2), Updating, Backups and restore (A4: stop or
+     `backup`, both files, restore = put them back), Without containers (A5), Reverse proxy without Caddy (WebSocket
+     upgrade, 3 MiB bodies, `MURMO_TRUST_PROXY`), then Configuration, Federation, Terms, Moving to a new domain
+   - `CHANGELOG.md`, with an "Operators: anything to do?" line for every release. "Upgrading to the federation
+     release" moves there from HOSTING.md
+   - In the app's help: "Invite someone" (A1), in de/en/es/sv
+   - Out of these items' scope: the P2 corrections of facts, which stay where they are
+
+Later, not before A1–A6 have been used:
+
+- **Signed invites** (M, protocol): the inviter's device signs `{address, invite id, expiry}` into the link. A first
+  message that carries it skips the request queue, and the inviter can revoke unused ones. It needs a DESIGN section
+  and federation support, so it comes only when people ask for it after using A1
+- **QR verification**: scanning a contact's code compares the safety code (DESIGN §13), and combined with A3, adding
+  and verifying become one step
+- **In-app scanner** with `BarcodeDetector` where it exists
+- **A list of public servers** at murmo.org that operators can ask to be on, linked from the demo notice
+
 ## Phase 2: next, in order
 
 Ordered by benefit for the work, and so that what users notice is never held back by protocol work: a feature that is
-ready goes out, whatever its place below. Items 1–2 run alongside the rest. Effort: S days, M one to three weeks,
+ready goes out, whatever its place below. Items 1–2 run alongside the rest, and so does adoption (A1–A6 above), which
+comes first among new work. Effort: S days, M one to three weeks,
 L longer.
 
 1. [ ] **What the documents promise** (S, review P2): §14.5 and the route map in §11, T6 claiming unbuilt protections,
        host key compromise as a threat. Users and operators decide on these texts; they must be true first
 2. [ ] **Accessibility and polish** (S each, review P3): direct benefit for every user, no protocol risk
-3. [ ] **Published release hashes** (S): every release a reproducible client archive and its SHA-256 list in the release
+3. [ ] **Published release hashes** (S, done by A5): every release a reproducible client archive and its SHA-256 list in the release
        notes; the "Säkerhet och integritet" view links them next to the commit it already shows. The first, cheap half
        of T6: anyone can check what a server serves
 4. [ ] **Hybrid post-quantum envelope** (M, `DESIGN.md` §15.2): ML-KEM-768 next to X25519 in signed prekeys,
