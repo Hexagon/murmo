@@ -239,6 +239,170 @@ function addressHint() {
   return a ? h("div", { class: "hint", text: tr("fed.address", { address: a }) }) : null;
 }
 
+// ── invite links (DESIGN.md §6.1) ───────────────────────────────────────────────────────────────────────────────
+// `https://<server>/#add=<Name#TAG@host>`: an address in the fragment, so the server never sees whom a link points to,
+// and nothing is stored for it. The link is not signed and conveys no trust: anyone can make one. Opening it fills in
+// the new-conversation form; nothing is sent without a tap.
+
+const INVITE_KEY = "murmo-invite";
+
+/** This account's invite link. */
+function inviteLink() {
+  return `${location.origin}/#add=${encodeURIComponent(fullAddress() ?? messenger.handle)}`;
+}
+
+/**
+ * Take an `#add=` link out of the address bar and keep its address for this tab (`sessionStorage`), so it survives
+ * login and registration. Returns false for a link that holds no valid address (it is dropped).
+ */
+function takeInvite() {
+  const m = /^#add=(.*)$/s.exec(location.hash);
+  if (!m) return true;
+  history.replaceState(history.state, "", location.pathname + location.search);
+  let addr;
+  try {
+    addr = id.checkHandle(decodeURIComponent(m[1]));
+    const at = addr.indexOf("@");
+    if (at >= 0) id.serverOrigin(addr.slice(at + 1));
+    rc.parseHandle(addr.split("@")[0]);
+  } catch {
+    sessionStorage.removeItem(INVITE_KEY);
+    return false;
+  }
+  sessionStorage.setItem(INVITE_KEY, addr);
+  return true;
+}
+
+function pendingInvite() {
+  return sessionStorage.getItem(INVITE_KEY);
+}
+
+function forgetInvite() {
+  sessionStorage.removeItem(INVITE_KEY);
+}
+
+/**
+ * Whom an address names, compared with an account known here (`handle` as shown, `server` the other Murmo server or
+ * null). The tag may be given longer or shorter than it is shown, so the account id decides, as in a lookup.
+ */
+function addressMatches(addr, account, handle, server) {
+  if (addr.toLowerCase() === handle.toLowerCase()) return true;
+  const at = addr.indexOf("@");
+  let wantedServer = null;
+  if (at >= 0) {
+    try {
+      wantedServer = id.serverOrigin(addr.slice(at + 1));
+    } catch {
+      return false;
+    }
+    if (wantedServer === location.origin) wantedServer = null;
+  }
+  if (wantedServer !== (server ?? null)) return false;
+  try {
+    const username = splitHandle(handle.split("@")[0])[0];
+    return rc.handleMatches(rc.parseHandle(addr.split("@")[0]), username, account);
+  } catch {
+    return false;
+  }
+}
+
+/** Logged in with an invite waiting: open the contact's conversation, or fill in the form for a new one. */
+function applyInvite() {
+  const addr = pendingInvite();
+  if (!addr || !messenger || !ui.shell) return;
+  forgetInvite();
+  if (addressMatches(addr, messenger.me.account, messenger.handle, null)) return toast(tr("invite.self"));
+  const known = messenger.contactList().find((c) => c.state !== "blocked" && addressMatches(addr, c.account, c.handle, c.server));
+  if (known) return openConversation(known.account);
+  openConversation(null, true);
+  const input = ui.main.querySelector("#new-handle");
+  const note = ui.main.querySelector("#new-note");
+  if (!input || !note) return;
+  input.value = addr;
+  note.value = tr("invite.greeting", { name: splitHandle(messenger.handle.split("@")[0])[0] });
+  note.focus({ preventScroll: true });
+}
+
+/** Logged out with an invite waiting: say whom the link is to (never "X invited you": anyone can make a link). */
+function inviteNote() {
+  const addr = pendingInvite();
+  if (!addr) return null;
+  const note = h(
+    "div",
+    { class: "invite-note", role: "status" },
+    h("p", { text: tr("invite.opened") }),
+    h("strong", { class: "addr", dir: "ltr", text: addr }),
+    h("p", { class: "hint", text: tr("invite.openedHint") }),
+    h("p", { class: "hint", text: tr("invite.elsewhere") }),
+    h(
+      "div",
+      { class: "btns" },
+      h("button", { type: "button", class: "btn small", text: tr("invite.copyAddress"), onclick: () => navigator.clipboard?.writeText(addr).then(() => toast(tr("invite.addressCopied"))) }),
+      h("button", { type: "button", class: "link", text: tr("invite.forget"), onclick: () => { forgetInvite(); note.remove(); } }),
+    ),
+  );
+  return note;
+}
+
+/** A link opened while the page is already open (the same tab): taken at once. */
+addEventListener("hashchange", () => {
+  if (!location.hash.startsWith("#add=")) return;
+  if (!takeInvite()) return toast(tr("invite.bad"));
+  if (messenger && ui.shell) applyInvite();
+  else if (root.querySelector(".auth .tabs")) showAuth(root.querySelector(".auth .tabs .on")?.dataset.tab ?? "login");
+});
+
+/** "Invite someone": the link, to copy or share (the QR code comes here too). */
+function showInvite() {
+  const link = inviteLink();
+  const message = tr("invite.message", { link });
+  const field_ = h("input", { class: "input", readonly: true, value: link, spellcheck: "false", onfocus: (e) => e.target.select() });
+  const copy = (text, done) => navigator.clipboard?.writeText(text).then(() => toast(tr(done)), () => toast(tr("err.unknown", { code: "clipboard" })));
+  const share = typeof navigator.share === "function"
+    ? h("button", {
+        class: "btn primary",
+        text: tr("invite.share"),
+        onclick: async () => {
+          try {
+            await navigator.share({ title: "Murmo", text: message });
+            d.close();
+          } catch (x) {
+            if (x?.name !== "AbortError") toast(say(x));
+          }
+        },
+      })
+    : null;
+  const d = dialog(
+    h("h2", { text: tr("invite.title") }),
+    h("p", { class: "hint", text: tr("invite.text") }),
+    field(tr("invite.linkLabel"), field_),
+    h(
+      "div",
+      { class: "actions" },
+      h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() }),
+      h("button", { class: "btn", text: tr("invite.copyMessage"), onclick: () => copy(message, "invite.messageCopied") }),
+      h("button", { class: `btn${share ? "" : " primary"}`, text: tr("invite.copyLink"), onclick: () => copy(link, "invite.copied") }),
+      share,
+    ),
+  );
+  d.classList.add("invite");
+}
+
+/** Your identifier, to copy, and "Invite someone": on the start, and in the empty list on a narrow screen. */
+function mineCard() {
+  return h(
+    "div",
+    { class: "card mine" },
+    h("div", {}, h("div", { class: "hint", text: tr("new.mine") }), h("strong", { text: messenger.handle }), addressHint()),
+    h(
+      "div",
+      { class: "btns" },
+      h("button", { class: "btn small", text: tr("common.copy"), onclick: copyHandle }),
+      h("button", { class: "btn small primary invite-btn", text: tr("invite.button"), onclick: showInvite }),
+    ),
+  );
+}
+
 function say(err) {
   const code = err instanceof ApiError ? err.code : (err?.code ?? err?.message ?? String(err));
   return has(`err.${code}`) ? tr(`err.${code}`, { max: GIF_MAX_COUNT }) : tr("err.unknown", { code });
@@ -642,6 +806,7 @@ function inApp(on) {
 
 async function boot() {
   i18n.translatePage();
+  const goodInvite = takeInvite();
   try {
     await rc.checkSupport(); // throws unsupported_browser
   } catch {
@@ -650,6 +815,7 @@ async function boot() {
   }
   info = await api.info();
   wirePage();
+  if (!goodInvite) toast(tr("invite.bad"));
   const origins = info.origins ?? (info.origin ? [info.origin] : []);
   if (origins.length && !origins.includes(location.origin)) {
     // The server signs and checks everything for its configured origin (MURMO_ORIGIN): proofs to it and the
@@ -685,14 +851,15 @@ function showAuth(tab = "login", prefill = "") {
   const tabs = h(
     "div",
     { class: "tabs", role: "tablist" },
-    h("button", { class: tab === "login" ? "on" : "", text: tr("auth.login"), onclick: () => showAuth("login") }),
-    h("button", { class: tab === "register" ? "on" : "", text: tr("auth.register"), onclick: () => showAuth("register") }),
+    h("button", { class: tab === "login" ? "on" : "", "data-tab": "login", text: tr("auth.login"), onclick: () => showAuth("login") }),
+    h("button", { class: tab === "register" ? "on" : "", "data-tab": "register", text: tr("auth.register"), onclick: () => showAuth("register") }),
   );
   inApp(false);
   root.replaceChildren(
     h(
       "div",
       { class: "auth" },
+      inviteNote(),
       h("div", { class: "card" }, tabs, body, err),
       h(
         "div",
@@ -1340,6 +1507,7 @@ async function switchNotifications(on) {
 const ui = {};
 
 function renderShell() {
+  ui.empty = null;
   ui.sideList = h("nav", { class: "side-list", "aria-label": tr("side.conversations") });
   ui.search = h("input", {
     class: "input", type: "search", placeholder: tr("search.placeholder"), "aria-label": tr("search.label"),
@@ -1407,6 +1575,7 @@ function renderShell() {
   updateNet();
   renderSidebar();
   openConversation(current);
+  applyInvite();
 }
 
 /** A conversation in the sidebar. */
@@ -1442,10 +1611,27 @@ function renderSidebar() {
     h("div", { class: "side-head", text: tr("side.conversations") }),
     ...(convs.length
       ? convs.map(item)
-      : [h("div", { class: "empty" }, h("p", { class: "hint", text: tr("side.none") }), h("button", { class: "btn primary", text: tr("side.newConversation"), onclick: () => openConversation(null, true) }), about())]),
+      : [emptyList()]),
     blocked.length ? h("div", { class: "side-head", text: tr("side.blocked") }) : null,
     ...blocked.map(item),
   );
+}
+
+/**
+ * The list without conversations. On a narrow screen it is the start page, so it also has what the start beside it
+ * shows on a wide one: your identifier with "Invite someone", and the reminder while this is the only device. Made
+ * once per shell, since the list is drawn again often.
+ */
+function emptyList() {
+  ui.empty ??= h(
+    "div",
+    { class: "empty" },
+    h("p", { class: "hint", text: tr("side.none") }),
+    h("button", { class: "btn primary", text: tr("side.newConversation"), onclick: () => openConversation(null, true) }),
+    h("div", { class: "narrow-only" }, mineCard(), singleDeviceReminder()),
+    about(),
+  );
+  return ui.empty;
 }
 
 // ── search (DESIGN.md §6.9) ──────────────────────────────────────────────────────────────────────────────────────
@@ -1612,6 +1798,7 @@ function closeConversation() {
   else openConversation(null);
 }
 addEventListener("popstate", () => {
+  if (location.hash.startsWith("#add=")) return; // an invite link opened in this tab: "hashchange" takes it
   // Back with a dialog open (a picture, a menu) closes the dialog and stays where it was.
   const open = document.querySelector("dialog[open]");
   if (open) {
@@ -1772,7 +1959,7 @@ function renderWelcome() {
         "div",
         { class: "welcome-inner" },
         form,
-        h("div", { class: "card mine" }, h("div", {}, h("div", { class: "hint", text: tr("new.mine") }), h("strong", { text: messenger.handle }), addressHint()), h("button", { class: "btn small", text: tr("common.copy"), onclick: copyHandle })),
+        mineCard(),
         offer,
         singleDeviceReminder(),
         about(),

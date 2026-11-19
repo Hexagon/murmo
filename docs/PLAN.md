@@ -163,7 +163,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [ ] `aria-live` on all of `#app` (`index.html:80`); toasts and form errors without `role="status"`/`"alert"`
 - [ ] Safety code button unnamed on mobile (`app.js:1534`, `style.css:637`); consider a "verified" state
 - [ ] Contrast: focus ring 1.75:1 (`--focus`), `--faint` text 2.7–3:1 (`style.css:15,23,44`)
-- [ ] (A1) Mobile empty state hides "share your identifier" and the paper-key warning
+- [x] (A1) Mobile empty state hides "share your identifier" and the paper-key warning
 - [ ] Dialogs without `aria-labelledby` (`app.js:217`), nested `main`, tablist without `role="tab"` (`app.js:578`)
 - [ ] Recovery card screen has no back; registration never offers "remember"; toasts drawn under modal backdrops
 - [ ] PWA: offline screen, maskable icon, manifest description in English; spinner ignores `prefers-reduced-motion`
@@ -178,7 +178,9 @@ a demo that may be wiped (`MURMO_DEMO`), so lasting use needs servers people can
 benefit for the work. They use no new protocol, and they run alongside phase 2 items 1–2. A5 does phase 2 item 3. A4
 and A6 do the operator guide in review P2. A1 does the P3 item on the mobile empty state.
 
-1. [ ] **A1 Invite links** (S, client only). The largest effect: every user, nothing to deploy
+1. [x] **A1 Invite links** (S, client only). The largest effect: every user, nothing to deploy. Done, with one change:
+   "Invite someone" always opens the dialog (with "Share…" in it where `navigator.share()` exists), so the QR code (A3)
+   has a place on phones too. README says "Invite by link" until A3 adds the QR code
    - Format: `https://<MURMO_ORIGIN>/#add=<encodeURIComponent(Name#TAG@host)>`, with the full federated address
      (the same text `fullAddress()` copies). It goes in the fragment, so the server never sees whom a link points to,
      and nothing new is stored (§11 unchanged). No token, no expiry: the link carries an address, not trust
