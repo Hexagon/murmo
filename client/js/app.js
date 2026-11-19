@@ -6,6 +6,7 @@ import * as id from "./identity.js";
 import { displayName, EPHEMERAL_TTLS, GIF_MAX_BYTES, GIF_MAX_COUNT, isStorageFull, Messenger, NAME_MAX, Store, setupDevice, validRetention } from "./core.js";
 import * as emoji from "./emoji.js";
 import * as code from "./code.js";
+import * as qr from "./qr.js";
 import * as giphy from "./giphy.js";
 import { accounts } from "./store.js";
 import * as notify from "./notify.js";
@@ -352,7 +353,7 @@ addEventListener("hashchange", () => {
   else if (root.querySelector(".auth .tabs")) showAuth(root.querySelector(".auth .tabs .on")?.dataset.tab ?? "login");
 });
 
-/** "Invite someone": the link, to copy or share (the QR code comes here too). */
+/** "Invite someone": the link, to copy or share, and as a QR code to scan or print. */
 function showInvite() {
   const link = inviteLink();
   const message = tr("invite.message", { link });
@@ -374,18 +375,23 @@ function showInvite() {
     : null;
   const d = dialog(
     h("h2", { text: tr("invite.title") }),
-    h("p", { class: "hint", text: tr("invite.text") }),
-    field(tr("invite.linkLabel"), field_),
+    h("p", { class: "hint screen-only", text: tr("invite.text") }),
+    h("div", { class: "qr-box" }, qr.svg(link, tr("invite.qrLabel"))),
+    h("p", { class: "hint screen-only qr-hint", text: tr("invite.scan") }),
+    h("p", { class: "print-only", text: tr("invite.printLine") }),
+    h("p", { class: "print-only addr", dir: "ltr", text: fullAddress() ?? messenger.handle }),
+    h("div", { class: "screen-only" }, field(tr("invite.linkLabel"), field_)),
     h(
       "div",
       { class: "actions" },
       h("button", { class: "btn", text: tr("common.close"), onclick: () => d.close() }),
+      h("button", { class: "btn", text: tr("common.print"), onclick: () => print() }),
       h("button", { class: "btn", text: tr("invite.copyMessage"), onclick: () => copy(message, "invite.messageCopied") }),
       h("button", { class: `btn${share ? "" : " primary"}`, text: tr("invite.copyLink"), onclick: () => copy(link, "invite.copied") }),
       share,
     ),
   );
-  d.classList.add("invite");
+  d.classList.add("invite", "printable");
 }
 
 /** Your identifier, to copy, and "Invite someone": on the start, and in the empty list on a narrow screen. */

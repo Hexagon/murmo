@@ -8,6 +8,7 @@
 // they are answered here (after the page's CSP has allowed them), and they are recorded to check what was sent.
 
 import puppeteer from "puppeteer-core";
+import jsQR from "jsqr";
 const BASE = process.env.MURMO_URL ?? "http://127.0.0.1:18100/";
 const shots = process.env.SHOTS ?? "/tmp/murmo-shots";
 (await import("node:fs")).mkdirSync(shots, { recursive: true });
@@ -121,6 +122,31 @@ try {
   // The full address (federation is on): the same text "Kopiera" copies.
   const aliceAddr = `${aliceHandle}@${new URL(BASE).host}`;
   if (aliceLink !== `${new URL(BASE).origin}/#add=${encodeURIComponent(aliceAddr)}`) throw new Error(`invite link: ${aliceLink}`);
+  // The QR code, as the page draws it (rendered to pixels in the page), reads back as the link.
+  const qrPixels = await a.evaluate(async () => {
+    const svg = document.querySelector("dialog.invite svg.qr");
+    const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], { type: "image/svg+xml" }));
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const c = Object.assign(document.createElement("canvas"), { width: 400, height: 400 });
+    const g = c.getContext("2d");
+    g.imageSmoothingEnabled = false;
+    g.drawImage(img, 0, 0, 400, 400);
+    URL.revokeObjectURL(url);
+    return Array.from(g.getImageData(0, 0, 400, 400).data);
+  });
+  const qrRead = jsQR(Uint8ClampedArray.from(qrPixels), 400, 400);
+  if (qrRead?.data !== aliceLink) throw new Error(`QR code reads ${qrRead?.data}`);
+  // Printed: the code and the address, without the buttons, the field and the explanation.
+  await a.emulateMediaType("print");
+  const printed = await a.evaluate(() => {
+    const shown = (s) => { const e = document.querySelector(s); return !!e && getComputedStyle(e).display !== "none" && e.getBoundingClientRect().width > 0; };
+    return { qr: shown("dialog.invite svg.qr"), addr: shown("dialog.invite .print-only.addr"), actions: shown("dialog.invite .actions"), field: shown("dialog.invite input"), app: shown(".shell") };
+  });
+  await a.screenshot({ path: `${shots}/a-4b-invite-print.png` });
+  await a.emulateMediaType(null);
+  if (!printed.qr || !printed.addr || printed.actions || printed.field || printed.app) throw new Error(`printed invite: ${JSON.stringify(printed)}`);
   await a.keyboard.press("Escape");
   await a.waitForFunction(() => !document.querySelector("dialog.invite"), { timeout: 5000 });
   // On a narrow screen the empty list is the start page: the identifier and "Bjud in någon" are there too.

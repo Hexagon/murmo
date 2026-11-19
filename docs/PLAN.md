@@ -180,7 +180,7 @@ and A6 do the operator guide in review P2. A1 does the P3 item on the mobile emp
 
 1. [x] **A1 Invite links** (S, client only). The largest effect: every user, nothing to deploy. Done, with one change:
    "Invite someone" always opens the dialog (with "Share…" in it where `navigator.share()` exists), so the QR code (A3)
-   has a place on phones too. README says "Invite by link" until A3 adds the QR code
+   has a place on phones too
    - Format: `https://<MURMO_ORIGIN>/#add=<encodeURIComponent(Name#TAG@host)>`, with the full federated address
      (the same text `fullAddress()` copies). It goes in the fragment, so the server never sees whom a link points to,
      and nothing new is stored (§11 unchanged). No token, no expiry: the link carries an address, not trust
@@ -220,7 +220,9 @@ and A6 do the operator guide in review P2. A1 does the P3 item on the mobile emp
    - Docs: README "Run your own server" leads with these three steps; "From source" stays below. HOSTING.md gets
      "Quick start" at the top
    - CI: build the image on pull requests (no push); start it and fetch `/api/v1/info` once
-3. [ ] **A3 QR code for the invite link** (S, client only). In person, in a group chat on another app, or on paper
+3. [x] **A3 QR code for the invite link** (S, client only). In person, in a group chat on another app, or on paper.
+   Done with the vendored qrcode-generator 2.0.4; `tests/qr.test.mjs` reads the drawn codes back with jsQR (a dev
+   dependency only), and the smoke test reads the code the page draws and checks the printed page
    - Encoder: vendor qrcode-generator (Kazuhiko Arase, MIT, one file, no dependencies), unmodified, in
      `client/vendor/qrcode/`, with version and hash noted, as for rootcard. Or write a small byte-mode encoder,
      ECC M, versions 1–10, if a review prefers less vendored code. Drawn as inline SVG with the DOM, which CSP allows,

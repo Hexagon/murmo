@@ -32,7 +32,8 @@ as little as possible.
 - **No phone number, no search.** Log in with a rootcard identity, created here or at another home such as
   rootcard.org. The password never leaves the browser.
 - **Message requests.** A stranger's first message is a request; block and decline are local decisions.
-- **Invite by link.** Send a link with your address; the person who opens it gets the form filled in, ready to send.
+- **Invite by link or QR code.** Send a link with your address, show its code, or print it; the person who opens it
+  gets the form filled in, ready to send.
 - **Several devices.** A new device is approved on an existing one (compare a code), and gets the history from it.
   A paper key replaces a lost last device.
 - **Safety codes** to compare in person; changes to a contact's devices are detected and forks refused.
@@ -62,8 +63,9 @@ private with `MURMO_FEDERATION=off` or a list of servers. All settings, and how 
 
 ## Development
 
-The client is plain ES modules with no build step and no dependencies besides the vendored rootcard core: edit and
-reload. `client/vendor/rootcard` is rootcard 0.3.5 from npm, unmodified.
+The client is plain ES modules with no build step and no dependencies besides the vendored rootcard core and a QR
+encoder: edit and reload. `client/vendor/rootcard` is rootcard 0.3.5 from npm, unmodified; `client/vendor/qrcode` is
+qrcode-generator 2.0.4 from npm, unmodified (version and hashes in its README).
 
 ```
 server/   the Rust server: rootcard home, device lists, WebSocket mailbox, file relay

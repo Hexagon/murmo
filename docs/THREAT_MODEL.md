@@ -88,7 +88,7 @@ service.
 ## 4. Accepted risks
 
 - **AR1: Web delivery.** Whoever serves the page can change it. The client is static, has no build step and no
-  dependencies outside the vendored rootcard core, so it can be reviewed and pinned. A later phase adds a signed
+  dependencies outside the vendored rootcard core and QR encoder, so it can be reviewed and pinned. A later phase adds a signed
   release and an installable copy that is not served by the Murmo server.
 - **AR2: TOFU without comparison.** Users who never compare safety codes get protection only against later changes.
 - **AR3: Metadata at send time.** The server sees which device sends to which devices when it happens. It does not

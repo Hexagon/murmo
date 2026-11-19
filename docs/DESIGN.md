@@ -290,9 +290,12 @@ list, pins the account id and the head, and sends a `request` message with an op
 that "Copy" copies (the full federated address when the server exchanges messages with others, otherwise `Name#TAG`).
 The address is in the fragment, so the server never sees whom a link points to, and nothing is stored for it (§11
 unchanged). There is no token and no expiry: the link carries an address, not trust, and anyone can make one. The dialog
-offers the link, the link with a suggested text ("Write to me on Murmo: …"), and the system share sheet where the
+shows the link as a QR code (error correction M, always dark on light with a four-module quiet zone, drawn as SVG with
+the DOM by `qr.js` from the vendored, unmodified qrcode-generator; "Print" prints only the code, the address and one
+line), and offers the link, the link with a suggested text ("Write to me on Murmo: …"), and the system share sheet where the
 browser has `navigator.share()`. Opening a link (on load, or as a `hashchange` in an open page) takes the fragment out of
-the address bar with `history.replaceState` and keeps a valid address in `sessionStorage` for that tab only; one that
+the address bar with `history.replaceState` (a scanned code opens the link in the phone's browser, so scanning needs
+nothing in the app) and keeps a valid address in `sessionStorage` for that tab only; one that
 does not parse as `Name#TAG[@host]` is dropped with a notice. Logged out, the login and registration card says
 "You opened a link to write to this address:" and shows the address exactly (never "X invited you"), with a way to copy
 it for an account elsewhere (another server, or an installed app whose storage is apart from the browser's). Logged in,
