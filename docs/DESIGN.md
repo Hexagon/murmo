@@ -286,6 +286,23 @@ then fetches and verifies the identity's log from its home, checks that it is th
 username and account id match `Name#TAG`, whichever server answered; `wrong_identity` otherwise), verifies the device
 list, pins the account id and the head, and sends a `request` message with an optional short note (at most 500 characters).
 
+**Invite links.** "Invite someone" gives `https://<origin>/#add=<Name#TAG@host>`, URL-encoded, with the same address
+that "Copy" copies (the full federated address when the server exchanges messages with others, otherwise `Name#TAG`).
+The address is in the fragment, so the server never sees whom a link points to, and nothing is stored for it (§11
+unchanged). There is no token and no expiry: the link carries an address, not trust, and anyone can make one. The dialog
+shows the link as a QR code (error correction M, always dark on light with a four-module quiet zone, drawn as SVG with
+the DOM by `qr.js` from the vendored, unmodified qrcode-generator; "Print" prints only the code, the address and one
+line), and offers the link, the link with a suggested text ("Write to me on Murmo: …"), and the system share sheet where the
+browser has `navigator.share()`. Opening a link (on load, or as a `hashchange` in an open page) takes the fragment out of
+the address bar with `history.replaceState` (a scanned code opens the link in the phone's browser, so scanning needs
+nothing in the app) and keeps a valid address in `sessionStorage` for that tab only; one that
+does not parse as `Name#TAG[@host]` is dropped with a notice. Logged out, the login and registration card says
+"You opened a link to write to this address:" and shows the address exactly (never "X invited you"), with a way to copy
+it for an account elsewhere (another server, or an installed app whose storage is apart from the browser's). Logged in,
+a link to an existing contact opens its conversation (the account id decides, as in a lookup); a link to oneself says
+so; otherwise the new-conversation form is filled in with the address and an editable greeting. Nothing is sent
+without a tap: the request is the ordinary one above, with all its checks.
+
 ### 6.2 Receiving
 
 - A `request` from an unknown account goes to **Requests**, at most one per sender. Nothing else from that account is

@@ -170,6 +170,24 @@ pre.cardtext {
 .auth-foot .theme, .auth-foot .lang { width: 240px; }
 .auth .card > .link { display: block; margin: 14px auto 0; }
 .auth .about { margin-top: 18px; }
+/* An opened invite link (#add=): whom it is to, shown exactly; the link is not signed, so it never says who sent it. */
+.invite-note { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; background: var(--panel); }
+.invite-note p { margin: 0 0 6px; }
+.invite-note .addr { display: block; margin-bottom: 8px; overflow-wrap: anywhere; unicode-bidi: isolate; font-family: var(--mono); }
+.invite-note .btns { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+dialog.invite .input { font-family: var(--mono); font-size: 13px; }
+/* The code is always dark on light, with its quiet zone, in any theme: large enough to scan from arm's length. */
+dialog.invite .qr-box { display: grid; place-items: center; margin: 4px 0 6px; }
+dialog.invite svg.qr { width: min(240px, 70vw); height: auto; border-radius: 6px; background: #fff; }
+dialog.invite .qr-hint { text-align: center; margin-top: 0; }
+.print-only { display: none; }
+@media print {
+  dialog.invite .screen-only { display: none; }
+  dialog.invite .print-only { display: block; text-align: center; }
+  dialog.invite .print-only.addr { font-family: var(--mono); font-size: 18px; overflow-wrap: anywhere; }
+  dialog.invite h2 { display: none; }
+  dialog.invite svg.qr { width: 8cm; }
+}
 .recover { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
 .recover[hidden] { display: none; }
 .recover ol { padding-left: 20px; margin: 8px 0 14px; }
@@ -181,7 +199,8 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .paperbox { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .paperbox h3 { font-size: 15px; margin: 0 0 6px; }
 @media print {
-  body:has(dialog.printable[open]) > :not(dialog.printable) { display: none; }
+  /* !important: the in-app layout (`body.in-app #top`, an id) would otherwise print the app behind the dialog. */
+  body:has(dialog.printable[open]) > :not(dialog.printable) { display: none !important; }
   dialog.printable { position: static; border: 0; box-shadow: none; width: auto; }
   dialog.printable button, dialog.printable label, dialog.printable .actions { display: none; }
 }
@@ -223,6 +242,8 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .empty .about { padding: 6px 0 0; }
 /* beside the new-conversation form, which says the same; the list is the whole start page only on a phone */
 @media (min-width: 761px) { .empty .about { display: none; } }
+.empty .narrow-only { display: flex; flex-direction: column; gap: 10px; align-self: stretch; }
+@media (min-width: 761px) { .empty .narrow-only { display: none; } }
 .side-foot { border-top: 1px solid var(--line); padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px)); display: flex; align-items: center; gap: 8px; }
 .me { flex: 1; min-width: 0; }
 .me .h { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; cursor: copy; }
@@ -491,6 +512,9 @@ pre.paperkey { font-size: 16px; text-align: center; letter-spacing: .5px; word-b
 .newconv .btn { width: 100%; }
 .card.mine, .card.offer { display: flex; align-items: center; gap: 10px; padding: 14px 16px; box-shadow: none; }
 .card.mine > div, .card.offer > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.card.mine { flex-wrap: wrap; }
+.card.mine > div:first-child { flex: 1 1 200px; }
+.card.mine > div.btns { flex: 0 0 auto; display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
 .card.offer { flex-wrap: wrap; }
 .card.offer > div:first-child { flex: 1 1 240px; } /* the text keeps room to read; the buttons go under it instead */
 .card.offer > div.btns { flex: 0 0 auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }

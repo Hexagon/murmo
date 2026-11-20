@@ -8,6 +8,7 @@
 // they are answered here (after the page's CSP has allowed them), and they are recorded to check what was sent.
 
 import puppeteer from "puppeteer-core";
+import jsQR from "jsqr";
 const BASE = process.env.MURMO_URL ?? "http://127.0.0.1:18100/";
 const shots = process.env.SHOTS ?? "/tmp/murmo-shots";
 (await import("node:fs")).mkdirSync(shots, { recursive: true });
@@ -29,7 +30,7 @@ function giphy(req) {
 /** Whether the app sees a mouse (`hover: hover`) or a touch screen. Headless Chrome reports no hover, and CDP cannot
  * emulate it, so the page's matchMedia answers that one query from a flag (set up in `page`). */
 const hover = (pg, on) => pg.evaluate((v) => { window.__hover = v; }, on);
-async function page(name, languages = null) {
+async function page(name, languages = null, url = BASE) {
   const ctx = await browser.createBrowserContext();
   const pg = await ctx.newPage();
   // The flow below looks for the Swedish texts; `languages` instead lets the browser's own list choose.
@@ -46,7 +47,7 @@ async function page(name, languages = null) {
   pg.on("request", (req) => (/\.giphy\.com$/.test(new URL(req.url()).hostname) ? giphy(req) : req.continue()));
   pg.on("console", (m) => { if (["error", "warning"].includes(m.type())) problems.push(`${name} console ${m.type()}: ${m.text()}`); });
   pg.on("pageerror", (e) => problems.push(`${name} pageerror: ${e.message}`));
-  await pg.goto(BASE, { waitUntil: "networkidle0" });
+  await pg.goto(url, { waitUntil: "networkidle0" });
   return pg;
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -112,8 +113,59 @@ try {
   }
   const a = await page("alice");
   const aliceHandle = await register(a, "Alice", "a");
-  const b = await page("bob");
+  // Invite link (DESIGN.md §6.1): "Bjud in någon" gives a link with the address in the fragment.
+  await a.click(".welcome .invite-btn");
+  await a.waitForSelector("dialog.invite input", { visible: true, timeout: 5000 });
+  await named(a, "invite");
+  await a.screenshot({ path: `${shots}/a-4b-invite.png` });
+  const aliceLink = await a.$eval("dialog.invite input", (i) => i.value);
+  // The full address (federation is on): the same text "Kopiera" copies.
+  const aliceAddr = `${aliceHandle}@${new URL(BASE).host}`;
+  if (aliceLink !== `${new URL(BASE).origin}/#add=${encodeURIComponent(aliceAddr)}`) throw new Error(`invite link: ${aliceLink}`);
+  // The QR code, as the page draws it (rendered to pixels in the page), reads back as the link.
+  const qrPixels = await a.evaluate(async () => {
+    const svg = document.querySelector("dialog.invite svg.qr");
+    const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], { type: "image/svg+xml" }));
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const c = Object.assign(document.createElement("canvas"), { width: 400, height: 400 });
+    const g = c.getContext("2d");
+    g.imageSmoothingEnabled = false;
+    g.drawImage(img, 0, 0, 400, 400);
+    URL.revokeObjectURL(url);
+    return Array.from(g.getImageData(0, 0, 400, 400).data);
+  });
+  const qrRead = jsQR(Uint8ClampedArray.from(qrPixels), 400, 400);
+  if (qrRead?.data !== aliceLink) throw new Error(`QR code reads ${qrRead?.data}`);
+  // Printed: the code and the address, without the buttons, the field and the explanation.
+  await a.emulateMediaType("print");
+  const printed = await a.evaluate(() => {
+    const shown = (s) => { const e = document.querySelector(s); return !!e && getComputedStyle(e).display !== "none" && e.getBoundingClientRect().width > 0; };
+    return { qr: shown("dialog.invite svg.qr"), addr: shown("dialog.invite .print-only.addr"), actions: shown("dialog.invite .actions"), field: shown("dialog.invite input"), app: shown(".shell") };
+  });
+  await a.screenshot({ path: `${shots}/a-4b-invite-print.png` });
+  await a.emulateMediaType(null);
+  if (!printed.qr || !printed.addr || printed.actions || printed.field || printed.app) throw new Error(`printed invite: ${JSON.stringify(printed)}`);
+  await a.keyboard.press("Escape");
+  await a.waitForFunction(() => !document.querySelector("dialog.invite"), { timeout: 5000 });
+  // On a narrow screen the empty list is the start page: the identifier and "Bjud in någon" are there too.
+  await a.setViewport({ width: 390, height: 800 });
+  await a.waitForSelector(".sidebar .empty .invite-btn", { visible: true, timeout: 5000 });
+  await a.screenshot({ path: `${shots}/a-4c-narrow-empty.png` });
+  await a.setViewport({ width: 1280, height: 800 });
+  // Bob opens the link logged out: it says whom the link is to (exactly), and leaves the address bar at once.
+  const b = await page("bob", null, aliceLink);
+  await b.waitForSelector(".invite-note .addr", { timeout: 10000 });
+  const opened = await b.evaluate(() => [document.querySelector(".invite-note .addr").textContent, location.hash]);
+  if (opened[0] !== aliceAddr || opened[1] !== "") throw new Error(`opened invite: ${opened}`);
   const bobHandle = await register(b, "Bob", "b");
+  // After registering, the new-conversation form is filled in, and nothing has been sent.
+  const filled = await b.evaluate(() => [document.querySelector("#new-handle")?.value, document.querySelector("#new-note")?.value, sessionStorage.getItem("murmo-invite")]);
+  if (filled[0] !== aliceAddr || filled[1] !== "Hej, det är Bob!" || filled[2] !== null) throw new Error(`invite form: ${filled}`);
+  await b.screenshot({ path: `${shots}/b-4d-invite-filled.png` });
+  await b.$eval("#new-handle", (i) => { i.value = ""; });
+  await b.$eval("#new-note", (i) => { i.value = ""; });
   console.log("handles", aliceHandle, bobHandle);
   // Alice requests Bob by exact identifier.
   await a.type("#new-handle", bobHandle);
@@ -141,6 +193,18 @@ try {
 
   await a.click(".conv");
   await a.waitForSelector(".composer textarea", { timeout: 20000 });
+  // A link opened while logged in: to an existing contact it opens the conversation; to oneself, or without a valid
+  // address, it says so; the fragment never stays.
+  await a.click(".new-btn");
+  await a.waitForSelector("#new-handle", { timeout: 5000 });
+  await a.evaluate((x) => { location.hash = `#add=${encodeURIComponent(x)}`; }, bobHandle);
+  await a.waitForSelector(".composer textarea", { timeout: 5000 });
+  if ((await a.evaluate(() => location.hash)) !== "") throw new Error("the invite fragment stayed");
+  for (const [hash, text] of [[`#add=${encodeURIComponent(aliceAddr)}`, /egen adress/], ["#add=inte%20en%20adress", /ingen giltig/]]) {
+    await a.evaluate((x) => { location.hash = x; }, hash);
+    await a.waitForFunction((re) => [...document.querySelectorAll(".toast")].some((t) => new RegExp(re).test(t.textContent)), { timeout: 5000 }, text.source);
+  }
+  if (!(await a.$(".composer textarea"))) throw new Error("a bad invite link left the conversation");
   await a.type(".composer textarea", "Hej! Här är en bild:");
   await a.keyboard.press("Enter");
   // Code (DESIGN.md §6.10): inside an open ``` block Enter makes a new line; after the closing fence it sends.
