@@ -204,9 +204,12 @@ and A6 do the operator guide in review P2. A1 does the P3 item on the mobile emp
    - Docs: a paragraph in DESIGN §6.1 (format, no server involvement, no trust conveyed). THREAT_MODEL: links are
      attacker-made input (lookalike names, a fake "from"); the request flow and the safety code still decide.
      README features: "Invite by link or QR code"
-2. [ ] **A2 Container image and a compose file with automatic TLS** (S). Running a server becomes three steps:
+2. [x] **A2 Container image and a compose file with automatic TLS** (S). Running a server becomes three steps:
    point DNS, set the domain, `docker compose up -d`. Operators bring their whole group, so this is worth more than
-   another feature
+   another feature. Done, with three additions: the image is cross-compiled (no emulation for arm64); `MURMO_DATA`
+   puts the data in a directory instead of a volume, and `compose.own-proxy.yaml` runs Murmo without the bundled
+   Caddy behind a proxy the machine already has; HOSTING.md "Moving to the container" takes a server that runs the
+   binary across with its database, host key and origin, and the way back. The first image comes with the first tag
    - `Dockerfile` in the repo root: a multi-stage build (`rust:1.95` → distroless, non-root), the client at
      `/app/client`, data in the volume `/data` (`MURMO_DB=/data/murmo.sqlite`,
      `MURMO_HOST_KEY_FILE=/data/murmo-host.key`), `MURMO_BIND=0.0.0.0:8080`, and `MURMO_COMMIT` passed as a build

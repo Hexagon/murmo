@@ -60,6 +60,40 @@ jobs:
             ${{ runner.temp }}/server.log
           if-no-files-found: ignore
 
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build for arm64 (cross-compiled, not run)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build for amd64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: murmo:ci
+          build-args: MURMO_COMMIT=${{ github.sha }}
+          cache-from: type=gha
+      - name: Start it and fetch /api/v1/info and the client
+        run: |
+          docker run -d --name murmo -p 127.0.0.1:18080:8080 -e MURMO_ORIGIN=http://127.0.0.1:18080 murmo:ci
+          for i in $(seq 1 50); do curl -sf http://127.0.0.1:18080/api/v1/info > info.json && break; sleep 0.2; done
+          grep -q '"commit":"${{ github.sha }}"' info.json
+          curl -sf http://127.0.0.1:18080/ | grep -q '<title>'
+          docker logs murmo
+      - name: Check the compose files
+        working-directory: deploy
+        run: |
+          cp .env.example .env
+          docker compose config -q
+          docker compose -f compose.yaml -f compose.own-proxy.yaml config -q
+
   fuzz:
     runs-on: ubuntu-latest
     steps:

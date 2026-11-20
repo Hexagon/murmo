@@ -1,0 +1,10 @@
+# For a machine that already has a TLS proxy on ports 80 and 443 (nginx, a Caddy of its own, …): Murmo only, on
+# 127.0.0.1:8080, as a binary started by hand would be. Run it without the bundled Caddy:
+#
+#   docker compose -f compose.yaml -f compose.own-proxy.yaml up -d murmo
+#
+# The proxy must pass the WebSocket upgrade and bodies up to 3 MiB, and set X-Forwarded-For (docs/HOSTING.md).
+services:
+  murmo:
+    ports:
+      - "127.0.0.1:${MURMO_PORT:-8080}:8080"

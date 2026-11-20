@@ -47,6 +47,19 @@ public device keys and what rootcard needs. Full list in [DESIGN.md §11](docs/D
 
 ## Run your own server
 
+With Docker: point a DNS name at the machine, set it in `deploy/.env`, and start Murmo with automatic TLS:
+
+```sh
+cd deploy && cp .env.example .env    # set MURMO_DOMAIN=chat.example.org
+docker compose up -d                 # update: docker compose pull && docker compose up -d
+```
+
+Your server exchanges messages with other Murmo servers by default; make it private with `MURMO_FEDERATION=off` or a
+list of servers. All settings, how to move an existing server into the container, and how to move to a new domain are
+in [docs/HOSTING.md](docs/HOSTING.md).
+
+### From source
+
 Requirements: Rust 1.95+ and a modern browser.
 
 ```sh
@@ -57,9 +70,7 @@ cargo run --release
 ```
 
 For a public server, put a TLS reverse proxy in front and set `MURMO_ORIGIN=https://your.domain` (choose it once: it
-goes into users' signed identity logs). Your server exchanges messages with other Murmo servers by default; make it
-private with `MURMO_FEDERATION=off` or a list of servers. All settings, and how to move to a new domain, are in
-[docs/HOSTING.md](docs/HOSTING.md).
+goes into users' signed identity logs).
 
 ## Development
 

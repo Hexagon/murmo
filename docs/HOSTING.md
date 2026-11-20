@@ -1,7 +1,78 @@
 # Hosting Murmo
 
-How to run your own Murmo server. Build and run it as described in the [README](../README.md#run-your-own-server); put a
-TLS reverse proxy (Caddy, nginx, …) in front of it and set `MURMO_ORIGIN` to the public `https://` address.
+How to run your own Murmo server: with containers (below), or from source as described in the
+[README](../README.md#from-source), behind a TLS reverse proxy (Caddy, nginx, …) with `MURMO_ORIGIN` set to the public
+`https://` address.
+
+## Quick start
+
+On a machine with Docker and the compose plugin, whose ports 80 and 443 are reachable from the internet:
+
+1. Point the DNS name of your server (`chat.example.org`) at the machine.
+2. Get `deploy/` from this repository, `cp .env.example .env`, and set `MURMO_DOMAIN` in `.env`.
+3. `docker compose up -d`
+
+Caddy gets the certificate on first start, and Murmo answers at `https://chat.example.org`. The database and the host
+key are in the volume `murmo-data` (or in `MURMO_DATA`, below). The image is `ghcr.io/hexagon/murmo`, for amd64 and
+arm64, published for every release: `0.2.3`, `0.2` and `latest`. The compose file runs `0.2` (`MURMO_IMAGE`). Until a
+release has been tagged, build the image yourself in the repository and point `.env` at it:
+
+```sh
+docker build --build-arg MURMO_COMMIT=$(git rev-parse HEAD) -t murmo .
+echo MURMO_IMAGE=murmo >> deploy/.env
+```
+
+**Updating:** `docker compose pull && docker compose up -d`. Patches come with the pull. For a new minor version, read
+its notes and then change `MURMO_IMAGE`. Pages that are already open offer a reload when the build changes.
+
+**A proxy of your own:** if the machine already has nginx or Caddy on ports 80 and 443, leave the bundled Caddy out
+and publish Murmo on `127.0.0.1:8080` (`MURMO_PORT` changes the port), as a binary would listen:
+
+```sh
+docker compose -f compose.yaml -f compose.own-proxy.yaml up -d murmo
+```
+
+`MURMO_TRUST_PROXY=1` is set, so `X-Forwarded-For` is taken from proxies on private networks, which includes the host
+as the container sees it.
+
+## Moving to the container
+
+From a server that runs the binary from a script or a service. What must come along is the **database**
+(`murmo.sqlite`, with its `murmo.sqlite-wal` if there is one), the **host key** (`murmo-host.key`), and the
+**origin**. The origin is in every user's signed identity log, and the host key signs this server's federation
+requests and rootcard receipts. A new database or a new key is a new server: accounts, devices and waiting
+messages are gone, and other servers see a different key. Settings stay as they were.
+
+1. **Write down the settings** the script sets (`MURMO_*`). `MURMO_DOMAIN` is the host of today's `MURMO_ORIGIN`
+   (only `https://` on port 443 works with the compose file). Put everything else into `.env`, except `MURMO_ORIGIN`,
+   `MURMO_DB`, `MURMO_HOST_KEY_FILE`, `MURMO_BIND` and `MURMO_CLIENT_DIR`: the image has its own paths.
+2. **Stop the old server** (SIGTERM or Ctrl-C, not `kill -9`). It closes the database, so that everything is in
+   `murmo.sqlite` and the `-wal` file is gone. Never copy the database while a server is running: the copy can be
+   torn. Make sure that the script, or a service manager, does not start the server again.
+3. **Copy, do not move**, into the data directory, and give it to the user the server runs as (uid 65532):
+
+   ```sh
+   sudo mkdir -p /srv/murmo
+   sudo cp -p murmo.sqlite murmo.sqlite-wal murmo-host.key /srv/murmo/   # the -wal file only if it exists
+   sudo chown -R 65532:65532 /srv/murmo && sudo chmod 700 /srv/murmo && sudo chmod 600 /srv/murmo/murmo-host.key
+   ```
+
+   Files still named `mesg.sqlite` and `mesg-host.key` (from before the rename) get the new names in the copy. The
+   old files stay where they are, as the way back.
+4. **Point `.env` at it:** `MURMO_DATA=/srv/murmo`. A directory is easier to back up and inspect than a named
+   volume. To use the volume instead, copy the files into it with a throwaway container.
+5. **Start**: `docker compose up -d` (or with `compose.own-proxy.yaml`, if the old proxy stays). Then check that
+   the move worked: `federation.key` and `push_key` in `https://<domain>/api/v1/info` must be the same as before
+   the move. If they are new, the server started without the old files: stop it and check the path and the owner.
+
+The server is away for as long as it takes to copy the files. Clients reconnect on their own. Other servers keep
+what they could not deliver and try again (§14.3 in DESIGN.md).
+
+**The way back**, if something is wrong: `docker compose down`, then start the old script again. If the new server
+has run for a while, stop it first, then copy the database and key back from `/srv/murmo` (and give them back to
+the user the script runs as), so that what came in meanwhile is not lost. That is only safe if the image is the same version as the binary. A newer version can add columns to the
+database at start, and an older binary might not understand them. So for the move itself, use the image of the version
+the binary already runs, and update afterwards.
 
 ## Configuration
 
