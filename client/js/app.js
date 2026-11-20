@@ -675,6 +675,7 @@ function about() {
 const HELP = [
   ["help.crypto", 3],
   ["help.identity", 5],
+  ["help.invite", 3],
   ["help.server", 4],
   ["help.undo", 4],
   ["help.files", 4],

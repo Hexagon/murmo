@@ -61,6 +61,8 @@ in [docs/HOSTING.md](docs/HOSTING.md).
 Without Docker, each release has static archives for Linux (x86_64 and arm64) with a systemd service and SHA-256
 sums: see [docs/HOSTING.md](docs/HOSTING.md#without-containers).
 
+What changed in each release, and what operators have to do about it, is in [CHANGELOG.md](CHANGELOG.md).
+
 ### From source
 
 Requirements: Rust 1.95+ and a modern browser.

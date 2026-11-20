@@ -35,6 +35,51 @@ docker compose -f compose.yaml -f compose.own-proxy.yaml up -d murmo
 `MURMO_TRUST_PROXY=1` is set, so `X-Forwarded-For` is taken from proxies on private networks, which includes the host
 as the container sees it.
 
+## Backups and updates
+
+Two files hold everything: the database (`MURMO_DB`) and the host key (`MURMO_HOST_KEY_FILE`). The server prints
+both at start, with what it serves:
+
+```text
+murmo-server 0.2.0 (commit 2517ee6…)
+  origin      https://chat.example.org
+  listening   0.0.0.0:8080
+  database    /data/murmo.sqlite
+  host key    /data/murmo-host.key   (back up these two: murmo-server backup <dir>)
+  federation  open
+  client      /app/client (build 0.2.0-…)
+```
+
+It warns when a setting looks wrong: an `http://` origin while it listens beyond loopback, no client where
+`MURMO_CLIENT_DIR` points, or requests with `X-Forwarded-For` while `MURMO_TRUST_PROXY=0`. `murmo-server --version`
+prints the version and commit.
+
+**Backup:** `murmo-server backup <dir>` writes `murmo.sqlite` and `murmo-host.key` into a new or empty directory,
+readable by their owner only. It is safe while the server runs: the database is copied in one read transaction
+(`VACUUM INTO`), never torn. Run it with the server's environment, so that it finds the same files:
+
+```sh
+docker compose exec murmo murmo-server backup /data/backup-$(date +%F)   # in the container: lands in MURMO_DATA
+MURMO_DB=… MURMO_HOST_KEY_FILE=… murmo-server backup /var/backups/murmo  # a binary
+```
+
+Copy the directory off the machine. Copying `murmo.sqlite` itself with `cp` while the server runs is not safe.
+A backup holds the encrypted envelopes and file chunks that were waiting at the time, and the host key: keep it as
+secret as the server, and not longer than you need it.
+
+**Restore:** stop the server, put both files in place of the old ones (with their `-wal` and `-shm` files removed),
+give them to the user the server runs as, start. Envelopes that arrived after the backup and were not yet fetched
+are lost. History is on the devices, not in the database, so it is not affected.
+
+**Updates:** before a start that changes the database's schema, the server copies the database to
+`<db>.before-<version>` and says so. It keeps the newest two copies, each for at most a week (they hold waiting
+envelopes, DESIGN.md §11). If the copy cannot be written (a full disk), the server changes nothing and does not
+start. To go back after an update: stop the new version, put that copy in place of the database, start the old one.
+What arrived in between is lost. A database from a newer version is warned about at start, not refused.
+
+The server never asks anyone whether there is a new version. Watch the releases on GitHub (Watch → Custom →
+Releases); every release says whether operators need to do anything.
+
 ## Without containers
 
 Every release has static server archives for Linux, which need nothing installed, and a systemd service:
@@ -53,7 +98,7 @@ The service runs as a user systemd makes for it (`DynamicUser`), with the databa
 and may write nowhere else. The client is found next to the executable, in `/opt/murmo/client`.
 
 **Updating:** check and unpack the new archive in place of `/opt/murmo`, then `sudo systemctl restart murmo`. The
-server copies its database first if the update changes it (below).
+server copies its database first if the update changes it (see "Backups and updates").
 
 **From a binary started by a script:** stop it cleanly, and copy its `murmo.sqlite` (with `murmo.sqlite-wal` if there
 is one) and `murmo-host.key` to `/var/lib/murmo` before the first `systemctl start`. systemd gives them to the
@@ -106,51 +151,6 @@ map $http_upgrade $connection_upgrade { default upgrade; '' close; }
 ```
 
 The server warns, at most once an hour, when requests carry `X-Forwarded-For` while no proxy is trusted.
-
-## Backups and updates
-
-Two files hold everything: the database (`MURMO_DB`) and the host key (`MURMO_HOST_KEY_FILE`). The server prints
-both at start, with what it serves:
-
-```text
-murmo-server 0.2.0 (commit 2517ee6…)
-  origin      https://chat.example.org
-  listening   0.0.0.0:8080
-  database    /data/murmo.sqlite
-  host key    /data/murmo-host.key   (back up these two: murmo-server backup <dir>)
-  federation  open
-  client      /app/client (build 0.2.0-…)
-```
-
-It warns when a setting looks wrong: an `http://` origin while it listens beyond loopback, no client where
-`MURMO_CLIENT_DIR` points, or requests with `X-Forwarded-For` while `MURMO_TRUST_PROXY=0`. `murmo-server --version`
-prints the version and commit.
-
-**Backup:** `murmo-server backup <dir>` writes `murmo.sqlite` and `murmo-host.key` into a new or empty directory,
-readable by their owner only. It is safe while the server runs: the database is copied in one read transaction
-(`VACUUM INTO`), never torn. Run it with the server's environment, so that it finds the same files:
-
-```sh
-docker compose exec murmo murmo-server backup /data/backup-$(date +%F)   # in the container: lands in MURMO_DATA
-MURMO_DB=… MURMO_HOST_KEY_FILE=… murmo-server backup /var/backups/murmo  # a binary
-```
-
-Copy the directory off the machine. Copying `murmo.sqlite` itself with `cp` while the server runs is not safe.
-A backup holds the encrypted envelopes and file chunks that were waiting at the time, and the host key: keep it as
-secret as the server, and not longer than you need it.
-
-**Restore:** stop the server, put both files in place of the old ones (with their `-wal` and `-shm` files removed),
-give them to the user the server runs as, start. Envelopes that arrived after the backup and were not yet fetched
-are lost. History is on the devices, not in the database, so it is not affected.
-
-**Updates:** before a start that changes the database's schema, the server copies the database to
-`<db>.before-<version>` and says so. It keeps the newest two copies, each for at most a week (they hold waiting
-envelopes, DESIGN.md §11). If the copy cannot be written (a full disk), the server changes nothing and does not
-start. To go back after an update: stop the new version, put that copy in place of the database, start the old one.
-What arrived in between is lost. A database from a newer version is warned about at start, not refused.
-
-The server never asks anyone whether there is a new version. Watch the releases on GitHub (Watch → Custom →
-Releases); every release says whether operators need to do anything.
 
 ## Moving to the container
 
@@ -246,24 +246,8 @@ Files go between servers too. Your server's file limits (`MURMO_FILE_QUEUE_*`, `
 what comes from other servers as to your own users, and are announced in `/api/v1/info`, so that senders elsewhere
 keep within the smaller of both servers' limits.
 
-## Upgrading to the federation release
-
-What changes for a server that ran an earlier version, and for its users:
-
-- **The database** gets a column for the server an envelope came from (`mailbox.origin`), added at the first start.
-  Envelopes waiting in mailboxes are kept. Nothing else is migrated, and no new file needs a backup.
-- **Federation is on** (`open`) after the update. Users can be reached from other servers by anyone who knows their
-  exact identifier, as a message request that they must accept; nobody can search for them. If your server was meant
-  to be private, set `MURMO_FEDERATION=off` (or a list) before you start the new version.
-- **Users** see their identifier as `Name#TAG@your.host`, and that is what "Kopiera identifierare" copies. The short
-  form still works on your server, and the old form for identities from rootcard.org (`Name#TAG@rootcard.org`) still
-  means what it meant.
-- **Existing contacts and conversations** stay as they are: a contact without a server is on this server.
-- **Pages opened before the update** do not know about other servers. Until they are reloaded (the app offers it when
-  the build changes), a message from another server is lost on that device, and a contact on another server added from
-  another own device does not work there. Ask users to reload open tabs and installed apps after the update.
-- **The terms** ("Villkor och integritet") are new, dated, and apply from the day they took effect; existing users see
-  them under the login, in the help and in the settings.
+What changed for servers that ran a version before federation is in [CHANGELOG.md](../CHANGELOG.md) (0.2.0), as is
+what to do for every release.
 
 ## Terms, privacy and the open beta
 

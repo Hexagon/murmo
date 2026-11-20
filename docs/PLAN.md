@@ -128,7 +128,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [x] **Threat model claims unbuilt protections**: T6 lists reproducible client and published hashes (still open above)
 - [x] **Host key compromise** is not a threat entry; `retired_keys` is always empty (`lib.rs:358`), so no rotation.
       Now T47; rotation itself (a setting for retired keys, and what it means for receipts) is still open
-- [ ] **Operator guide in HOSTING.md** (done by A4 and A6): backups and restore of the live SQLite file and `murmo-host.key`; reverse proxy
+- [x] **Operator guide in HOSTING.md** (done by A4 and A6): backups and restore of the live SQLite file and `murmo-host.key`; reverse proxy
       (WebSocket upgrade, bodies up to 6 MiB, `MURMO_TRUST_PROXY`); service example, health, what is printed; upgrades;
       Unix only
 - [x] Facts that disagree with the code: envelope limit is 96 KiB, not 64 (`DESIGN.md:790,1132`); `MURMO_LOG` does not
@@ -264,7 +264,8 @@ and A6 do the operator guide in review P2. A1 does the P3 item on the mobile emp
      `NoNewPrivileges`, `ProtectSystem=strict`. HOSTING.md gives the steps: download, `sha256sum -c`, extract to
      `/opt/murmo`, edit the env file, `systemctl enable --now murmo`. To update, replace `/opt/murmo` and restart
    - No `curl | sh` installer: the people this is for rightly distrust one, and the steps above are short
-6. [ ] **A6 The rest of the documentation** (S). Mostly moving and shortening, with little new text
+6. [x] **A6 The rest of the documentation** (S). Mostly moving and shortening, with little new text. Done; the
+   release workflow also takes the version's CHANGELOG section into the release notes and refuses a tag without one
    - HOSTING.md in the order an operator needs it: Quick start (A2), Updating, Backups and restore (A4: stop or
      `backup`, both files, restore = put them back), Without containers (A5), Reverse proxy without Caddy (WebSocket
      upgrade, 6 MiB bodies, `MURMO_TRUST_PROXY`), then Configuration, Federation, Terms, Moving to a new domain

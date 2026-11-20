@@ -25,6 +25,8 @@ jobs:
             echo "tag $GITHUB_REF_NAME, but Cargo.toml says $v" >&2
             exit 1
           fi
+      - name: CHANGELOG.md has a section for this version
+        run: grep -q "^## ${GITHUB_REF_NAME#v} " CHANGELOG.md
 
   archives:
     needs: check
@@ -50,6 +52,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           {
+            # This version's section of CHANGELOG.md, with the line on what operators have to do.
+            awk -v v="## ${GITHUB_REF_NAME#v} " 'index($0, v) == 1 { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md
+            echo
             echo "## Checksums (SHA-256)"
             echo
             echo '```'
