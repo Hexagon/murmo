@@ -6,27 +6,41 @@ name: release
 # - the container image, for amd64 and arm64, to ghcr.io/<owner>/murmo as 0.2.3, 0.2 and latest. deploy/compose.yaml
 #   pins the minor version, so servers get patches with a pull.
 # Both are built with MURMO_RELEASE=1, so the app links this release next to its commit.
+#
+# A release made by hand on GitHub (which makes the tag) gets the files and these notes ahead of its own text. Run by
+# hand with a tag (Actions → release → Run workflow), it adds the archives to that tag's release again; the image is
+# only built on a tag push.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to make the release archives for, e.g. v0.2.0"
+        required: true
 
 permissions:
   contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - name: The tag is the version in Cargo.toml
         run: |
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
-            echo "tag $GITHUB_REF_NAME, but Cargo.toml says $v" >&2
+          if [ "v$v" != "$TAG" ]; then
+            echo "tag $TAG, but Cargo.toml says $v" >&2
             exit 1
           fi
       - name: CHANGELOG.md has a section for this version
-        run: grep -q "^## ${GITHUB_REF_NAME#v} " CHANGELOG.md
+        run: grep -q "^## ${TAG#v} " CHANGELOG.md
 
   archives:
     needs: check
@@ -35,6 +49,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
@@ -44,16 +60,15 @@ jobs:
           cargo install cargo-zigbuild --version 0.24.1 --locked
       - name: Build the archives
         env:
-          MURMO_COMMIT: ${{ github.sha }}
           MURMO_RELEASE: "1"
-        run: scripts/release-archives.sh
+        run: MURMO_COMMIT=$(git rev-parse HEAD) scripts/release-archives.sh
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           {
             # This version's section of CHANGELOG.md, with the line on what operators have to do.
-            awk -v v="## ${GITHUB_REF_NAME#v} " 'index($0, v) == 1 { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md
+            awk -v v="## ${TAG#v} " 'index($0, v) == 1 { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md
             echo
             echo "## Checksums (SHA-256)"
             echo
@@ -65,10 +80,21 @@ jobs:
             echo "reproducibly: \`scripts/release-archives.sh --client-only\` at this tag makes the same bytes, and its"
             echo "files are what a server of this release serves."
           } > notes.md
-          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Murmo ${GITHUB_REF_NAME#v}" --notes-file notes.md
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # Made by hand: keep its text after ours (unless it is ours from an earlier run), replace the files.
+            gh release view "$TAG" --json body --jq .body > earlier.md
+            if [ -s earlier.md ] && ! grep -q '^## Checksums (SHA-256)' earlier.md; then
+              { echo; cat earlier.md; } >> notes.md
+            fi
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "Murmo ${TAG#v}" --notes-file notes.md
+          fi
 
   image:
     needs: check
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
