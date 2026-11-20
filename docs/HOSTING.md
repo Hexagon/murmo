@@ -35,6 +35,78 @@ docker compose -f compose.yaml -f compose.own-proxy.yaml up -d murmo
 `MURMO_TRUST_PROXY=1` is set, so `X-Forwarded-For` is taken from proxies on private networks, which includes the host
 as the container sees it.
 
+## Without containers
+
+Every release has static server archives for Linux, which need nothing installed, and a systemd service:
+
+1. Download `murmo-<version>-x86_64-linux-musl.tar.gz` (or `aarch64` for arm64) and `SHA256SUMS` from the release on
+   GitHub, and check it: `sha256sum -c SHA256SUMS --ignore-missing`. The sums are in the release notes too.
+2. Unpack it to `/opt/murmo`:
+   `sudo mkdir -p /opt/murmo && sudo tar -xzf murmo-*-linux-musl.tar.gz -C /opt/murmo --strip-components=1`
+3. `sudo mkdir -p /etc/murmo && sudo cp /opt/murmo/deploy/murmo.env.example /etc/murmo/murmo.env`, and set
+   `MURMO_ORIGIN` in it.
+4. `sudo cp /opt/murmo/deploy/murmo.service /etc/systemd/system/ && sudo systemctl enable --now murmo`
+5. Put your TLS proxy in front of `127.0.0.1:8080` (see "A reverse proxy of your own" below). `journalctl -u murmo`
+   shows what the server printed at start.
+
+The service runs as a user systemd makes for it (`DynamicUser`), with the database and host key in `/var/lib/murmo`,
+and may write nowhere else. The client is found next to the executable, in `/opt/murmo/client`.
+
+**Updating:** check and unpack the new archive in place of `/opt/murmo`, then `sudo systemctl restart murmo`. The
+server copies its database first if the update changes it (below).
+
+**From a binary started by a script:** stop it cleanly, and copy its `murmo.sqlite` (with `murmo.sqlite-wal` if there
+is one) and `murmo-host.key` to `/var/lib/murmo` before the first `systemctl start`. systemd gives them to the
+service's user. Its `MURMO_*` settings go into `/etc/murmo/murmo.env`, except `MURMO_DB` and `MURMO_HOST_KEY_FILE`.
+The rest is as in "Moving to the container" below: the same origin, the old files kept as the way back.
+
+**Checking what a server serves:** the client archive `murmo-client-<version>.tar.gz` is made reproducibly
+(`scripts/release-archives.sh --client-only` at the release's tag makes the same bytes). Its files are what a server
+of that release serves under `/`. The app shows the version and commit, and for a release build it links the release
+page ("Säkerhet och integritet").
+
+## A reverse proxy of your own
+
+Murmo listens on plain HTTP (`MURMO_BIND`, `127.0.0.1:8080` by default) and needs a proxy in front for TLS. The proxy
+must pass the WebSocket upgrade on `/api/v1/ws`, allow request bodies of 6 MiB (rootcard's limit for identity logs;
+deliveries from other servers take up to 3 MiB), and set `X-Forwarded-For`, which Murmo believes only with
+`MURMO_TRUST_PROXY` (`1`: proxies on loopback and private networks).
+
+Caddy:
+
+```text
+chat.example.org {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+nginx (with a certificate already set up, for example by certbot):
+
+```nginx
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name chat.example.org;
+    # ssl_certificate …; ssl_certificate_key …;
+
+    client_max_body_size 6m;
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 1h;   # the WebSocket stays open
+    }
+}
+
+# In the http block:
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+```
+
+The server warns, at most once an hour, when requests carry `X-Forwarded-For` while no proxy is trusted.
+
 ## Backups and updates
 
 Two files hold everything: the database (`MURMO_DB`) and the host key (`MURMO_HOST_KEY_FILE`). The server prints

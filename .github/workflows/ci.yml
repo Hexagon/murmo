@@ -87,6 +87,13 @@ jobs:
           grep -q '"commit":"${{ github.sha }}"' info.json
           curl -sf http://127.0.0.1:18080/ | grep -q '<title>'
           docker logs murmo
+      - name: The client archive is reproducible
+        run: |
+          scripts/release-archives.sh --client-only
+          cp dist/SHA256SUMS first
+          touch client/index.html
+          scripts/release-archives.sh --client-only
+          cmp first dist/SHA256SUMS
       - name: Check the compose files
         working-directory: deploy
         run: |

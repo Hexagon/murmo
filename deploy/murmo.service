@@ -1,0 +1,50 @@
+# Murmo as a systemd service, from a release archive unpacked to /opt/murmo (docs/HOSTING.md, "Without containers"):
+#
+#   sudo cp /opt/murmo/deploy/murmo.service /etc/systemd/system/
+#   sudo mkdir -p /etc/murmo && sudo cp /opt/murmo/deploy/murmo.env.example /etc/murmo/murmo.env   # then edit it
+#   sudo systemctl enable --now murmo
+#
+# The database and host key are in /var/lib/murmo, owned by a user systemd makes for the service. The client is
+# found next to the executable (/opt/murmo/client).
+[Unit]
+Description=Murmo server
+Documentation=https://github.com/Hexagon/murmo/blob/main/docs/HOSTING.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/murmo/murmo-server
+Environment=MURMO_DB=/var/lib/murmo/murmo.sqlite
+Environment=MURMO_HOST_KEY_FILE=/var/lib/murmo/murmo-host.key
+EnvironmentFile=/etc/murmo/murmo.env
+DynamicUser=yes
+StateDirectory=murmo
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/murmo
+UMask=0077
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

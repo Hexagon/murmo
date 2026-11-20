@@ -14,6 +14,8 @@ ARG TARGETARCH
 ARG BUILDARCH
 # The commit shown in the app ("Säkerhet och integritet"); .git is not in the build context.
 ARG MURMO_COMMIT=""
+# 1 for a build from a version tag: the app then links the release page with its checksums.
+ARG MURMO_RELEASE=""
 RUN <<SH
 set -eu
 case "$TARGETARCH" in
@@ -42,7 +44,7 @@ set -eu
 t=$(cat /target); gcc=$(cat /cc)
 T=$(echo "$t" | tr 'a-z-' 'A-Z_'); u=$(echo "$t" | tr '-' '_')
 export "CARGO_TARGET_${T}_LINKER=$gcc" "CC_${u}=$gcc"
-MURMO_COMMIT="$MURMO_COMMIT" cargo build --release --locked -p murmo-server --target "$t"
+MURMO_COMMIT="$MURMO_COMMIT" MURMO_RELEASE="$MURMO_RELEASE" cargo build --release --locked -p murmo-server --target "$t"
 cp "target/$t/release/murmo-server" /murmo-server
 SH
 # The data directory, owned by the user the server runs as (a new volume takes it over).

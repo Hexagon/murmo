@@ -6,6 +6,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-env-changed=MURMO_COMMIT");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    println!("cargo:rerun-if-env-changed=MURMO_RELEASE");
     for p in ["../.git/HEAD", "../.git/refs/heads", "../.git/packed-refs"] {
         if std::path::Path::new(p).exists() {
             println!("cargo:rerun-if-changed={p}");

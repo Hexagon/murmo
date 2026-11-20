@@ -6,3 +6,4 @@ murmo-host.key
 mesg-host.key
 /deploy.sh
 /deploy/.env
+/dist/

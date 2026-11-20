@@ -129,7 +129,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [x] **Host key compromise** is not a threat entry; `retired_keys` is always empty (`lib.rs:358`), so no rotation.
       Now T47; rotation itself (a setting for retired keys, and what it means for receipts) is still open
 - [ ] **Operator guide in HOSTING.md** (done by A4 and A6): backups and restore of the live SQLite file and `murmo-host.key`; reverse proxy
-      (WebSocket upgrade, bodies up to 3 MiB, `MURMO_TRUST_PROXY`); service example, health, what is printed; upgrades;
+      (WebSocket upgrade, bodies up to 6 MiB, `MURMO_TRUST_PROXY`); service example, health, what is printed; upgrades;
       Unix only
 - [x] Facts that disagree with the code: envelope limit is 96 KiB, not 64 (`DESIGN.md:790,1132`); `MURMO_LOG` does not
       exist (`DESIGN.md:916`); T13 window is up to 4 weeks, not 3
@@ -216,7 +216,7 @@ and A6 do the operator guide in review P2. A1 does the P3 item on the mobile emp
      argument so the app shows the commit
    - `deploy/compose.yaml` + `deploy/Caddyfile` + `deploy/.env.example` (`MURMO_DOMAIN=chat.example.org`).
      `MURMO_ORIGIN=https://${MURMO_DOMAIN}` and `MURMO_TRUST_PROXY=1`. Caddy gets the certificate and passes the
-     WebSocket through. Bodies up to 3 MiB are allowed by default
+     WebSocket through. Bodies up to 6 MiB are allowed by default
    - Published by a release workflow on each `v*` tag: `ghcr.io/hexagon/murmo:0.2.3`, `:0.2`, `:latest`, amd64 and
      arm64 (a Raspberry Pi is a likely home server). The compose file pins `:0.2`: patches come with a pull, and a minor
      version waits until its notes are read
@@ -252,7 +252,10 @@ and A6 do the operator guide in review P2. A1 does the P3 item on the mobile emp
    - `MURMO_CLIENT_DIR` (default `client`) also looks next to the executable when the working directory has none, so
      the release archive (A5) runs from anywhere
    - No automatic update check: the server does not phone home. Operators watch GitHub releases (documented)
-5. [ ] **A5 Release archives with checksums, and systemd** (S). For servers without containers. Does phase 2 item 3
+5. [x] **A5 Release archives with checksums, and systemd** (S). For servers without containers. Does phase 2 item 3.
+   Done: `scripts/release-archives.sh` (static builds with cargo-zigbuild; the same script makes the client archive
+   in CI, twice, and compares). The app links the release page only for builds made from a tag (`MURMO_RELEASE=1`,
+   `release: true` in `/api/v1/info`). The release workflow refuses a tag that is not the version in Cargo.toml
    - The same workflow as A2 builds `murmo-<version>-x86_64-linux-musl.tar.gz` and `…-aarch64-…`: the binary,
      `client/`, the licences and `deploy/`. It also builds a client-only archive made reproducibly (`tar --sort=name
      --mtime=@0 --owner=0 --group=0 --numeric-owner`, `gzip -n`) and one `SHA256SUMS` for all of them, in the release
@@ -264,7 +267,7 @@ and A6 do the operator guide in review P2. A1 does the P3 item on the mobile emp
 6. [ ] **A6 The rest of the documentation** (S). Mostly moving and shortening, with little new text
    - HOSTING.md in the order an operator needs it: Quick start (A2), Updating, Backups and restore (A4: stop or
      `backup`, both files, restore = put them back), Without containers (A5), Reverse proxy without Caddy (WebSocket
-     upgrade, 3 MiB bodies, `MURMO_TRUST_PROXY`), then Configuration, Federation, Terms, Moving to a new domain
+     upgrade, 6 MiB bodies, `MURMO_TRUST_PROXY`), then Configuration, Federation, Terms, Moving to a new domain
    - `CHANGELOG.md`, with an "Operators: anything to do?" line for every release. "Upgrading to the federation
      release" moves there from HOSTING.md
    - In the app's help: "Invite someone" (A1), in de/en/es/sv
@@ -290,7 +293,7 @@ L longer.
 1. [x] **What the documents promise** (S, review P2): §14.5 and the route map in §11, T6 claiming unbuilt protections,
        host key compromise as a threat. Users and operators decide on these texts; they must be true first
 2. [ ] **Accessibility and polish** (S each, review P3): direct benefit for every user, no protocol risk
-3. [ ] **Published release hashes** (S, done by A5): every release a reproducible client archive and its SHA-256 list in the release
+3. [x] **Published release hashes** (S, done by A5): every release a reproducible client archive and its SHA-256 list in the release
        notes; the "Säkerhet och integritet" view links them next to the commit it already shows. The first, cheap half
        of T6: anyone can check what a server serves
 4. [ ] **Hybrid post-quantum envelope** (M, `DESIGN.md` §15.2): ML-KEM-768 next to X25519 in signed prekeys,

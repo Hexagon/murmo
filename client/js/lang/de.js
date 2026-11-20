@@ -165,6 +165,7 @@ export default {
   "help.limits.2": "Murmo und rootcard sind frühe Versionen, die niemand von außen geprüft hat.",
   "help.limits.3": "Die Verschlüsselung schützt nicht vor einem bereits infizierten Gerät oder vor jemandem, der auf deinen Bildschirm schaut.",
   "help.version": "Version {version}",
+  "help.release": "Release und Prüfsummen",
 
   // ── terms, privacy and the open beta ──
   "beta.mark": "Offene Beta",
