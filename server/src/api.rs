@@ -165,7 +165,7 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
 
 /// An identifier of the client that is served now: it changes when any file of the client changes, so an open page
 /// can offer a reload. Not a security measure. Read from disk at most every 30 seconds.
-fn client_build(dir: &str) -> Option<String> {
+pub fn client_build(dir: &str) -> Option<String> {
     use std::hash::Hasher;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};

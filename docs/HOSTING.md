@@ -35,6 +35,51 @@ docker compose -f compose.yaml -f compose.own-proxy.yaml up -d murmo
 `MURMO_TRUST_PROXY=1` is set, so `X-Forwarded-For` is taken from proxies on private networks, which includes the host
 as the container sees it.
 
+## Backups and updates
+
+Two files hold everything: the database (`MURMO_DB`) and the host key (`MURMO_HOST_KEY_FILE`). The server prints
+both at start, with what it serves:
+
+```text
+murmo-server 0.2.0 (commit 2517ee6…)
+  origin      https://chat.example.org
+  listening   0.0.0.0:8080
+  database    /data/murmo.sqlite
+  host key    /data/murmo-host.key   (back up these two: murmo-server backup <dir>)
+  federation  open
+  client      /app/client (build 0.2.0-…)
+```
+
+It warns when a setting looks wrong: an `http://` origin while it listens beyond loopback, no client where
+`MURMO_CLIENT_DIR` points, or requests with `X-Forwarded-For` while `MURMO_TRUST_PROXY=0`. `murmo-server --version`
+prints the version and commit.
+
+**Backup:** `murmo-server backup <dir>` writes `murmo.sqlite` and `murmo-host.key` into a new or empty directory,
+readable by their owner only. It is safe while the server runs: the database is copied in one read transaction
+(`VACUUM INTO`), never torn. Run it with the server's environment, so that it finds the same files:
+
+```sh
+docker compose exec murmo murmo-server backup /data/backup-$(date +%F)   # in the container: lands in MURMO_DATA
+MURMO_DB=… MURMO_HOST_KEY_FILE=… murmo-server backup /var/backups/murmo  # a binary
+```
+
+Copy the directory off the machine. Copying `murmo.sqlite` itself with `cp` while the server runs is not safe.
+A backup holds the encrypted envelopes and file chunks that were waiting at the time, and the host key: keep it as
+secret as the server, and not longer than you need it.
+
+**Restore:** stop the server, put both files in place of the old ones (with their `-wal` and `-shm` files removed),
+give them to the user the server runs as, start. Envelopes that arrived after the backup and were not yet fetched
+are lost. History is on the devices, not in the database, so it is not affected.
+
+**Updates:** before a start that changes the database's schema, the server copies the database to
+`<db>.before-<version>` and says so. It keeps the newest two copies, each for at most a week (they hold waiting
+envelopes, DESIGN.md §11). If the copy cannot be written (a full disk), the server changes nothing and does not
+start. To go back after an update: stop the new version, put that copy in place of the database, start the old one.
+What arrived in between is lost. A database from a newer version is warned about at start, not refused.
+
+The server never asks anyone whether there is a new version. Watch the releases on GitHub (Watch → Custom →
+Releases); every release says whether operators need to do anything.
+
 ## Moving to the container
 
 From a server that runs the binary from a script or a service. What must come along is the **database**
@@ -70,9 +115,9 @@ what they could not deliver and try again (§14.3 in DESIGN.md).
 
 **The way back**, if something is wrong: `docker compose down`, then start the old script again. If the new server
 has run for a while, stop it first, then copy the database and key back from `/srv/murmo` (and give them back to
-the user the script runs as), so that what came in meanwhile is not lost. That is only safe if the image is the same version as the binary. A newer version can add columns to the
-database at start, and an older binary might not understand them. So for the move itself, use the image of the version
-the binary already runs, and update afterwards.
+the user the script runs as), so that what came in meanwhile is not lost. That is only safe if the image is the same version as the binary. A newer version can change the database at start
+(it copies it first, see above), and an older binary might not understand the change. So for the move itself, use
+the image of the version the binary already runs, and update afterwards.
 
 ## Configuration
 
@@ -85,7 +130,7 @@ Set in the environment:
 | `MURMO_BIND` | `127.0.0.1:8080` | listen address (put a TLS reverse proxy in front) |
 | `MURMO_DB` | `murmo.sqlite` | SQLite database |
 | `MURMO_HOST_KEY_FILE` | `murmo-host.key` | rootcard host key, created on first start (back it up, keep it secret) |
-| `MURMO_CLIENT_DIR` | `client` | static client to serve (empty: none) |
+| `MURMO_CLIENT_DIR` | `client` | static client to serve (empty: none); unset, `client` in the working directory, else next to the executable |
 | `MURMO_REALM` | `global` | rootcard realm for identities registered here |
 | `MURMO_REMOTE_HOMES` | `https://rootcard.org` | other homes whose identities may log in (comma-separated origins, `*` for any https host, empty for none) |
 | `MURMO_REALMS` | `global` | realms accepted from other homes |

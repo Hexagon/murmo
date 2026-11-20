@@ -237,7 +237,11 @@ and A6 do the operator guide in review P2. A1 does the P3 item on the mobile emp
    - Scanning needs nothing in the app: the phone's camera opens the link, and A1 handles the rest. An in-app scanner
      (`BarcodeDetector`, not in Safari or Firefox) is left for later
    - README: "no dependencies besides the vendored rootcard core" becomes "…rootcard core and a QR encoder"
-4. [ ] **A4 Safe updates and a readable first start** (S, server)
+4. [x] **A4 Safe updates and a readable first start** (S, server). Done, with three changes: `backup` takes a
+   directory and writes both files into it; the schema has a version (`PRAGMA user_version`, `db::SCHEMA_VERSION`),
+   raised with every change, so a start knows whether it changes the database (the first start of this version
+   copies once, from version 0); copies made before a change are kept a week at most, since they hold waiting
+   envelopes (§11 and the terms say so)
    - `murmo-server --version`; `murmo-server backup <file>` takes a consistent copy of the live database
      (`VACUUM INTO`) next to the key file. This is the backup half of the operator guide
    - Before a start that changes the schema (`db.rs:191-224` adds columns), write `<db>.before-<version>` with

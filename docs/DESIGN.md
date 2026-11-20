@@ -996,6 +996,7 @@ on the live budgets.
 | the sending server of an envelope from another server (§14) | the recipient looks the sender up there | with the envelope |
 | envelopes for another server that could not be reached (device there, ciphertext, when to try again) | delivery once it is back (§14.3) | until delivered or refused, at most 14 days (or the envelope's `ttl`) |
 | for each local account, which devices on other servers it writes to and on which server (device id, origin, last use), in memory | its file chunks and presence questions go to the right server (§14.6) | a week after last use, or a restart; at most 512 devices per account (the least recently used go first) |
+| a copy of the database made before a start that changes its schema (`<db>.before-<version>`) | a way back after an update | the newest two, at most a week |
 | other servers' federation keys, nonces of their deliveries, device lists fetched from them, in memory | federation (§14) | an hour, 10 minutes, 20 seconds; at most 1 024 servers, and 256 lists of 16 MiB in all (the least recently fetched go first) |
 
 The server writes no access log. What it prints (its start, errors, and at most every 10 minutes a push service that
