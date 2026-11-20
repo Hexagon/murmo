@@ -719,7 +719,7 @@ function showHelp() {
 // ── terms, privacy and the open beta ────────────────────────────────────────────────────────────────────────────
 
 /** The day the terms below last changed (Unix seconds), shown with them. */
-const TERMS_DATE = Date.UTC(2026, 10, 17) / 1000;
+const TERMS_DATE = Date.UTC(2026, 10, 20) / 1000;
 
 /** The sections of the terms, as HELP; the demo section only on a demo server (`MURMO_DEMO`). */
 const termSections = () => [

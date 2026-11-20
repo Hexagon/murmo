@@ -12,7 +12,7 @@ What Murmo protects, against whom, and what it accepts. It builds on rootcard's 
 | G2 | **Authentic messages.** A message shown as from Alice was written on one of Alice's current devices. |
 | G3 | **Controlled devices.** Only the owner's existing devices (a paper key with the password counts as one), or after a reset the recovery key, can add a device. |
 | G4 | **Detectable key changes.** A change of the other party's devices is visible, and a fork is refused. |
-| G5 | **Minimal server data.** The server holds no plaintext, no history, no contact list and no social graph. |
+| G5 | **Minimal server data.** The server holds no plaintext, no history and no contact list. What it knows about who writes to whom is kept as keyed hashes, or in memory for a limited time (DESIGN.md §11). |
 | G6 | **Consent.** Nobody can make a message appear in a conversation without the recipient accepting a request. |
 | G7 | **No enumeration.** Users cannot be found by search; an identifier must be known exactly. |
 | G8 | **Bounded exposure in time.** Recorded ciphertext becomes undecryptable once the prekeys involved are deleted. |
@@ -43,18 +43,19 @@ service.
 | T3 | Server hides a newly added or removed device | X3 | Heads gossiped inside every message; a stale view is corrected by the next message; each device pins its own account's list too and refuses an older one (one that still holds a removed device) | Until a message arrives, the sender may still encrypt to a removed device |
 | T4 | Password thief adds a device | X4 | Link needs approval on an existing device (§4.3); entry 0 only when no list exists for the instance | Accounts that never created a device; a careless user approving a request they did not start (the code comparison is the defence) |
 | T5 | Script in the page reads keys or plaintext | X6, X3 | Strict CSP, no third-party code, no inline script, plain-text rendering only, non-extractable keys | Code in the origin can use keys and read plaintext while it runs (accepted: web delivery, AR1) |
-| T6 | Server serves a modified client | X3 | Reproducible static client; published hashes; option to run the client from a local copy | Accepted for the hosted client (AR1) |
+| T6 | Server serves a modified client | X3 | Static client without a build step or third-party code, so what a server serves can be read and compared with the source; the app shows the version and commit it claims to be. Planned, not built: reproducible release archives with published hashes (PLAN.md A5) and an installable client not served by the server (PLAN.md phase 2 item 8) | Accepted for the hosted client (AR1): nothing checks that the served code is the release it claims to be |
 | T7 | Forge or replay a message | X2, X3 | Ed25519 signature by the sender device inside AES-GCM; recipient device and conversation bound in the signature; message ids remembered | – |
 | T8 | Forward a signed message to a third party | X2 | `to` and `conv` are signed; recipients check both | – |
-| T9 | Server learns the social graph | X3 | No contact lists on the server; requests indistinguishable from messages; sealed sender towards storage | The live connection reveals sender device and recipient devices at send time |
+| T9 | Server learns the social graph | X3 | No contact lists on the server; requests indistinguishable from messages; sealed sender towards storage | The live connection reveals sender device and recipient devices at send time. For contacts on other servers, the sender's server keeps in memory which of their devices each local account writes to (a week after last use), and a recipient's server learns the sending account and device of file chunks (DESIGN.md §14.5) |
 | T10 | Spam and harassment | X2 | Message requests; one pending request per sender; block list; rate limits; mailbox quotas, with a share per sender (500 envelopes per device for a contact, 50 for anyone else, 1 000 or 200 per other server) | A flood of new accounts, each sending one request (rate limits per address) |
 | T11 | Enumerate users | X2 | No search; lookup needs the full handle; lookups rate limited per address | Tag brute force of a known username at the rate limit (rootcard AR7) |
 | T12 | Offline reading of a stolen browser profile | X5 | All local data, private keys included, encrypted under a key derived from a secret in the rootcard vault; the derived key lives in memory only | "Remember me" stores the derived key on the device (user's choice); a weak password lets someone with the profile *and* the vault guess |
-| T13 | Decrypt recorded traffic later with a stolen device | X3+X5 | Prekeys rotated weekly, private keys deleted after 21 days; senders refuse prekeys older than 28 days or older than one seen before for the device, so a server cannot keep serving an old prekey | Messages from the last three weeks; per-message forward secrecy in phase 2 |
+| T13 | Decrypt recorded traffic later with a stolen device | X3+X5 | Prekeys rotated weekly, private keys deleted after 21 days; senders refuse prekeys older than 28 days or older than one seen before for the device, so a server cannot keep serving an old prekey | Messages from the last three to four weeks (a prekey is used up to 7 days, then kept 21); per-message forward secrecy in phase 2 |
 | T14 | Recovery-card thief | X7 | Out of Murmo's hands: the thief can make a new instance, and a new device list | Contacts see a reset; rootcard AR3 |
 | T15 | Malformed or huge input to the server | X2 | Size limits before parsing, rootcard's strict JSON reader, entry and device limits, per-connection limits | – |
 | T16 | Unauthenticated mailbox access | X2 | WebSocket requires a fresh challenge signed by a device present in the list | – |
 | T17 | Link-request spam to an account | X2 | Requires a fresh rootcard proof by the account key (the password), rate limited, at most 3 pending, kept 10 minutes | A password thief can annoy the owner (and is then visible) |
+| T18 | Quantum adversary records traffic | future | – (X25519 and Ed25519 only) | Hybrid ML-KEM prekeys planned (DESIGN.md §15.2, PLAN.md phase 2 item 4); signatures later (§15.1 step C) |
 | T19 | Password thief (or server capturing it) reads messages | X4, X3 | E2E private keys are never in the vault; the vault only holds the local secret, useless without a device's disk | A server serving modified code can read what the page shows (AR1) |
 | T20 | Server stores or inspects files | X3 | Chunks encrypted with a per-file key that only the signed `file` message carries; live relay frames are never written to disk; the file queue (for devices that are away) holds ciphertext only, until acknowledged or 14 days, and can be turned off by the sender and the operator; binary chunk frames carry the same ciphertext, id and indices as JSON ones | Chunk sizes and timing reveal approximate file size; a queued file's ciphertext is on disk until fetched; a `relay-grant` tells the server that one device asked another for about so many bytes |
 | T21 | Presence probing: who is online | X2 | Presence answers only for device ids, which are public in device lists; rate limited, also for other servers (no more often about one device than a local device may ask) | Anyone who knows an identifier can see when its devices are connected (accepted for live transfer) |
@@ -83,18 +84,20 @@ service.
 | T44 | Two pages of one device take the connection from each other, losing messages and chunks between them | – (an ordinary user) | One connection per device; the older page is told `replaced` and stops, saying so | A page from before this release keeps reconnecting until it is reloaded (DESIGN.md §12) |
 | T45 | Forged deliveries with bad signatures make a server fetch the claimed sender's key again and again, tying up its blocking pool for up to 10 s each | X2 | A forced refetch at most once a minute per origin; failed fetches cached for a minute; at most 10 failed verifications a minute per address, checked before any fetch | Requests from an address that shares a network with an attacker are refused for up to a minute |
 | T46 | An invite link misleads: a lookalike name, a false "from", or a link that makes a request in the user's name | X2 | A link carries only an address, in the fragment (the server never sees it); it is shown exactly and bidi-isolated, and never as "X invited you"; it only fills in the new-conversation form, and nothing is sent without a tap; the lookup checks that the log answers for the address, and the request flow and the safety code decide as for a typed identifier (DESIGN.md §6.1) | A user who does not read the address may write to a lookalike account; the person they write to sees a request and can decline |
-| T18 | Quantum adversary records traffic | future | – (X25519 and Ed25519 only) | Hybrid ML-KEM prekeys planned (DESIGN.md §15.2, PLAN.md phase 2 item 4); signatures later (§15.1 step C) |
+| T47 | The host key (`murmo-host.key`) is stolen, from the server or a backup | X3, anyone with a backup | Created on first start with mode 0600 and never sent anywhere; it protects no content (E2E keys are on the devices). With it, someone can sign federation requests as this server (deliveries, chunks and questions in its accounts' names, within the shares the other servers keep for this server) and rootcard receipts as this home; a receipt cannot make an event, which still needs the identity's own keys | No rotation yet: Murmo has no setting for retired host keys (rootcard-host's `retired_keys` is always empty, `lib.rs`), so a replaced key is not announced as replacing the old one, and other servers take the new federation key only after a signature fails (DESIGN.md §14.3). What a replaced key means for receipts already given is not worked out |
 
 ## 4. Accepted risks
 
 - **AR1: Web delivery.** Whoever serves the page can change it. The client is static, has no build step and no
-  dependencies outside the vendored rootcard core and QR encoder, so it can be reviewed and pinned. A later phase adds a signed
+  dependencies outside the vendored rootcard core and QR encoder, so it can be reviewed and compared with the source. Nothing yet checks it
+  for the user (T6). A later phase adds a signed
   release and an installable copy that is not served by the Murmo server.
 - **AR2: TOFU without comparison.** Users who never compare safety codes get protection only against later changes.
 - **AR3: Metadata at send time.** The server sees which device sends to which devices when it happens. It does not
-  store it.
+  write it to disk, except as keyed hashes (DESIGN.md §11). For contacts on other servers it keeps in memory, per
+  account, which of their devices it writes to, for a week after last use.
 - **AR4: Lost devices, lost history.** Without any device left, history is gone by design. A paper key (DESIGN.md §4.5)
   keeps the account and its device list, not the history (DESIGN.md §7.1).
-- **AR5: Federation metadata.** The recipient's server learns which server sent an envelope and when, and which of
-  its accounts users of another server look up. The sender's server learns the recipient's server. Neither learns
-  content.
+- **AR5: Federation metadata.** The recipient's server learns which server sent an envelope and when, which account
+  and device sent a file chunk to which of its devices, and which of its accounts users of another server look up.
+  The sender's server learns the recipient's server. Neither learns content.

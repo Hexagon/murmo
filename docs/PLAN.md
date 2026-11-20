@@ -120,21 +120,23 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 
 ### P2: documentation and privacy statements
 
-- [ ] **Correct what other servers learn.** §14.5 and `federation.rs:8` say "never which account or device", but
+- [x] **Correct what other servers learn.** §14.5 and `federation.rs:8` say "never which account or device", but
       `/federation/relay` sends `sender: {account, device}` and `/federation/space` the account. Fix §14.5, AR5
-- [ ] **Declare the federation route map.** Local account → contacts' remote devices, 7 days in memory
-      (`federation.rs:54,110,180`): missing from §11 stored data (and so the terms), and at odds with G5, T9, AR3
-- [ ] **Threat model claims unbuilt protections**: T6 lists reproducible client and published hashes (still open above)
-- [ ] **Host key compromise** is not a threat entry; `retired_keys` is always empty (`lib.rs:358`), so no rotation
+- [x] **Declare the federation route map.** Local account → contacts' remote devices, 7 days in memory
+      (`federation.rs:54,110,180`): missing from §11 stored data (and so the terms), and at odds with G5, T9, AR3.
+      Declared in §11, §14.5, the terms (de/en/es/sv, dated 2026-11-20), G5, T9, AR3, AR5
+- [x] **Threat model claims unbuilt protections**: T6 lists reproducible client and published hashes (still open above)
+- [x] **Host key compromise** is not a threat entry; `retired_keys` is always empty (`lib.rs:358`), so no rotation.
+      Now T47; rotation itself (a setting for retired keys, and what it means for receipts) is still open
 - [ ] **Operator guide in HOSTING.md** (done by A4 and A6): backups and restore of the live SQLite file and `murmo-host.key`; reverse proxy
       (WebSocket upgrade, bodies up to 3 MiB, `MURMO_TRUST_PROXY`); service example, health, what is printed; upgrades;
       Unix only
-- [ ] Facts that disagree with the code: envelope limit is 96 KiB, not 64 (`DESIGN.md:790,1132`); `MURMO_LOG` does not
+- [x] Facts that disagree with the code: envelope limit is 96 KiB, not 64 (`DESIGN.md:790,1132`); `MURMO_LOG` does not
       exist (`DESIGN.md:916`); T13 window is up to 4 weeks, not 3
 - [ ] API reference (§10) is missing the log and federation routes, `link-decline`, `remote-lookup`/`remote-devices`,
       `ready.remote`, and most `info` fields; README misses the `ws_binary` fuzz target and fmt/clippy in CI;
       `lib.rs` module docs miss 8 variables; the component diagram lacks federation, file queue and push
-- [ ] English docs use Swedish UI labels ("Säkerhet och integritet"); split §12 table; T18 out of order
+- [ ] English docs use Swedish UI labels ("Säkerhet och integritet"); split §12 table (T18 is now in order)
 
 ### P2: robustness and federation details
 
@@ -278,7 +280,7 @@ ready goes out, whatever its place below. Items 1–2 run alongside the rest, an
 comes first among new work. Effort: S days, M one to three weeks,
 L longer.
 
-1. [ ] **What the documents promise** (S, review P2): §14.5 and the route map in §11, T6 claiming unbuilt protections,
+1. [x] **What the documents promise** (S, review P2): §14.5 and the route map in §11, T6 claiming unbuilt protections,
        host key compromise as a threat. Users and operators decide on these texts; they must be true first
 2. [ ] **Accessibility and polish** (S each, review P3): direct benefit for every user, no protocol risk
 3. [ ] **Published release hashes** (S, done by A5): every release a reproducible client archive and its SHA-256 list in the release

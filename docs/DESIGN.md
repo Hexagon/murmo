@@ -231,7 +231,8 @@ The server stores `envelope` as an opaque string addressed to `to`.
 
 `sig` signs `frame("mesg/prekey/v1", canonical(prekey without sig))` with the device key. A device publishes a new
 prekey every 7 days and deletes prekey private keys 21 days after replacing them; mailbox entries expire after 14 days.
-This gives **forward secrecy with a window of about three weeks**: once a prekey's private key is deleted, recorded
+This gives **forward secrecy with a window of three to four weeks** (a prekey is used for up to 7 days, and its
+private key kept 21 days after that): once a prekey's private key is deleted, recorded
 ciphertext to it cannot be decrypted even with the device. Per-message forward secrecy and post-compromise security
 come with the Double Ratchet in phase 2 (draft in §15).
 
@@ -847,7 +848,7 @@ that does not take it) is listed in `sent.failed`. A client splits more than 24 
 a later one fails after an earlier one was taken, it keeps the message (stored as `unsent` before sending) instead of
 sending it again under a new id.
 
-Limits (v0): envelope ≤ 64 KiB, ≤ 24 recipients per send, ≤ 2 000 queued envelopes per device, mailbox TTL 14 days,
+Limits (v0): envelope ≤ 96 KiB (base64url text), ≤ 24 recipients per send, ≤ 2 000 queued envelopes per device, mailbox TTL 14 days,
 60 sends per minute per device, 20 lookups per minute and 5 link requests per hour per network address.
 
 The 2 000 places of a device's mailbox are not first come, first served: each sender has a **share** of them, so that
@@ -994,9 +995,13 @@ on the live budgets.
 | network addresses | rate limits | keyed hashes only; in memory, and for windows of 10 minutes or more in the database, at most an hour |
 | the sending server of an envelope from another server (§14) | the recipient looks the sender up there | with the envelope |
 | envelopes for another server that could not be reached (device there, ciphertext, when to try again) | delivery once it is back (§14.3) | until delivered or refused, at most 14 days (or the envelope's `ttl`) |
+| for each local account, which devices on other servers it writes to and on which server (device id, origin, last use), in memory | its file chunks and presence questions go to the right server (§14.6) | a week after last use, or a restart; at most 512 devices per account (the least recently used go first) |
 | other servers' federation keys, nonces of their deliveries, device lists fetched from them, in memory | federation (§14) | an hour, 10 minutes, 20 seconds; at most 1 024 servers, and 256 lists of 16 MiB in all (the least recently fetched go first) |
 
-No access logs with addresses are written by default (`MURMO_LOG=info` logs no addresses or account ids).
+The server writes no access log. What it prints (its start, errors, and at most every 10 minutes a push service that
+fails) names no network address and no account, with one exception: once an hour at most, the account id of an
+identity from another home whose home serves a log that forks from the one kept here (§14), for the operator to look
+into.
 
 ## 12. Mixed versions
 
@@ -1214,7 +1219,7 @@ assistant ──MCP tools──► murmo-bot (Node, long-running) ──HTTPS/We
   allowlist of contacts; message text is passed to the assistant as data, never as instructions.
 - **A leak costs the bot, not the user.** A stolen bot device can speak only as the bot. Replacing it is a new device
   that contacts see (the safety code changes), and any device of the bot can `remove` it (§4.4).
-- Limits are no obstacle: 60 sends per minute per device, 64 KiB per envelope (§10).
+- Limits are no obstacle: 60 sends per minute per device, 96 KiB per envelope (§10).
 
 *Order of work.* 1) decide marking and add the threat-model row; 2) file-backed `Store` with tests; 3) the sidecar
 (login, unlock, `Messenger`, reconnects) under `tools/murmo-bot/`; 4) the MCP tools with confirmation before sending;
@@ -1361,9 +1366,20 @@ federation key, and other servers then refuse it as `federation_refused` rather 
 | | Sender's server | Recipient's server |
 |---|---|---|
 | content | nothing (E2E) | nothing (E2E) |
-| who sends | the account and device, as for local messages | only the sending **server** |
+| who sends a message | the account and device, as for local messages | only the sending **server** |
+| who sends a file | the account and device | the sending server, **and the account and device**: `/federation/relay` names them, and `/federation/space` the account (§14.6) |
 | who receives | the recipient's devices, and their server | the devices, as for local messages |
 | when and how much | yes, in the moment | yes, in the moment; ciphertext queued until fetched |
+
+Envelopes say nothing about their sender outside the encryption, so for messages the recipient's server learns only
+which server sent them. File chunks are different: each server keeps its limits per sending account (§14.6), so a
+chunk, and the question whether a file fits the queue, names the sending account (and a chunk the sending device) to
+the recipient's server. That server then learns, while a file is sent, that this account sends to these devices. It
+does not store it beyond the limits' windows (a minute) and the queued chunks themselves.
+
+The sender's server keeps in memory, per local account, which devices on other servers it writes to (§11: a week
+after last use), so that file chunks and presence questions find their server. That is part of its accounts'
+contacts on other servers, by device; it is not written to disk and is gone after a restart.
 
 Lookups and device lists of the recipient are asked by the sender's server, so the recipient's server sees which
 accounts on it are looked up by users of that server (not by whom).
