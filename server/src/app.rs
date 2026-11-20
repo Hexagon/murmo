@@ -99,6 +99,39 @@ impl Config {
             total: self.file_queue_total,
         }
     }
+
+    /// A configuration for tests: in memory, no client, no federation.
+    #[cfg(test)]
+    pub fn test() -> Config {
+        Config {
+            origin: "http://127.0.0.1:8080".into(),
+            old_origins: Vec::new(),
+            bind: String::new(),
+            db: ":memory:".into(),
+            key_file: String::new(),
+            client_dir: String::new(),
+            realm: "global".into(),
+            realms: vec!["global".into()],
+            remote_homes: Vec::new(),
+            any_home: false,
+            trust_proxy: Vec::new(),
+            limit_scale: 1,
+            file_queue: 0,
+            file_queue_total: 0,
+            file_queue_sender: 0,
+            file_queue_account: 0,
+            relay_granted: crate::ws::RELAY_GRANTED_BYTES,
+            relay_store: crate::ws::RELAY_STORE_BYTES,
+            push_hosts: Vec::new(),
+            giphy_key: String::new(),
+            giphy_rating: "pg-13".into(),
+            beta: true,
+            demo: false,
+            federation: crate::federation::Policy::Off,
+            federation_block: Vec::new(),
+            push_contact: String::new(),
+        }
+    }
 }
 
 /// Locking that survives a panic elsewhere: a mutex whose holder panicked is used as it was left instead of failing

@@ -1,0 +1,6 @@
+# Only the server sources and the client go into the image build.
+*
+!Cargo.toml
+!Cargo.lock
+!server/
+!client/

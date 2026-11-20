@@ -1,0 +1,102 @@
+name: release
+
+# On a version tag (v0.2.3), which must be the version in Cargo.toml:
+# - a GitHub release with the server archives (static, x86_64 and aarch64), the client archive (made reproducibly) and
+#   SHA256SUMS, whose sums are also in the release notes (docs/HOSTING.md, "Without containers");
+# - the container image, for amd64 and arm64, to ghcr.io/<owner>/murmo as 0.2.3, 0.2 and latest. deploy/compose.yaml
+#   pins the minor version, so servers get patches with a pull.
+# Both are built with MURMO_RELEASE=1, so the app links this release next to its commit.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag is the version in Cargo.toml
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME, but Cargo.toml says $v" >&2
+            exit 1
+          fi
+      - name: CHANGELOG.md has a section for this version
+        run: grep -q "^## ${GITHUB_REF_NAME#v} " CHANGELOG.md
+
+  archives:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+      - name: Zig and cargo-zigbuild, for static builds of both
+        run: |
+          python3 -m pip install --user --break-system-packages ziglang==0.17.1
+          cargo install cargo-zigbuild --version 0.24.1 --locked
+      - name: Build the archives
+        env:
+          MURMO_COMMIT: ${{ github.sha }}
+          MURMO_RELEASE: "1"
+        run: scripts/release-archives.sh
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            # This version's section of CHANGELOG.md, with the line on what operators have to do.
+            awk -v v="## ${GITHUB_REF_NAME#v} " 'index($0, v) == 1 { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md
+            echo
+            echo "## Checksums (SHA-256)"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+            echo
+            echo "Check a download with \`sha256sum -c SHA256SUMS --ignore-missing\`. The client archive is made"
+            echo "reproducibly: \`scripts/release-archives.sh --client-only\` at this tag makes the same bytes, and its"
+            echo "files are what a server of this release serves."
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Murmo ${GITHUB_REF_NAME#v}" --notes-file notes.md
+
+  image:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/murmo
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            MURMO_COMMIT=${{ github.sha }}
+            MURMO_RELEASE=1
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

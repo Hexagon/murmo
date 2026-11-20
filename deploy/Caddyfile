@@ -1,0 +1,7 @@
+# Caddy gets and renews the certificate for MURMO_DOMAIN, and passes everything, the WebSocket included, to Murmo.
+# It sends X-Forwarded-For, which Murmo believes from it (MURMO_TRUST_PROXY=1: private networks, such as the compose
+# network). Request bodies are not limited here; Murmo limits its own.
+{$MURMO_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy murmo:8080
+}

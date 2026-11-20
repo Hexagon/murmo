@@ -675,6 +675,7 @@ function about() {
 const HELP = [
   ["help.crypto", 3],
   ["help.identity", 5],
+  ["help.invite", 3],
   ["help.server", 4],
   ["help.undo", 4],
   ["help.files", 4],
@@ -683,11 +684,15 @@ const HELP = [
   ["help.limits", 3],
 ];
 
-/** "Version 0.2.0 · commit 1a2b3c4d5e6f", linking to the source of that commit; null if the server does not say. */
+/**
+ * "Version 0.2.0 · commit 1a2b3c4d5e6f · release and checksums", linking to the source of that commit and, for a
+ * release build, to its release page (the archives and their SHA-256 sums); null if the server does not say.
+ */
 function versionLine() {
   if (typeof info?.version !== "string") return null;
   const commit = /^[0-9a-f]{7,40}$/.test(info.commit ?? "") ? info.commit : null;
   const source = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(info.source ?? "") ? info.source : null;
+  const release = info.release === true && source && /^\d+\.\d+\.\d+$/.test(info.version);
   const short = commit?.slice(0, 12);
   return h(
     "p",
@@ -695,6 +700,8 @@ function versionLine() {
     tr("help.version", { version: info.version }),
     commit ? " · commit " : null,
     commit && source ? h("a", { href: `${source}/commit/${commit}`, target: "_blank", rel: "noopener noreferrer", text: short }) : short,
+    release ? " · " : null,
+    release ? h("a", { href: `${source}/releases/tag/v${info.version}`, target: "_blank", rel: "noopener noreferrer", text: tr("help.release") }) : null,
   );
 }
 
@@ -719,7 +726,7 @@ function showHelp() {
 // ── terms, privacy and the open beta ────────────────────────────────────────────────────────────────────────────
 
 /** The day the terms below last changed (Unix seconds), shown with them. */
-const TERMS_DATE = Date.UTC(2026, 10, 17) / 1000;
+const TERMS_DATE = Date.UTC(2026, 10, 20) / 1000;
 
 /** The sections of the terms, as HELP; the demo section only on a demo server (`MURMO_DEMO`). */
 const termSections = () => [

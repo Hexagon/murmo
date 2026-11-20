@@ -10,7 +10,7 @@
 //! | `MURMO_BIND` | `127.0.0.1:8080` | address to listen on |
 //! | `MURMO_DB` | `murmo.sqlite` | SQLite database |
 //! | `MURMO_HOST_KEY_FILE` | `murmo-host.key` | rootcard host key seed (created on first start, mode 0600) |
-//! | `MURMO_CLIENT_DIR` | `client` | static client directory (empty: do not serve a client) |
+//! | `MURMO_CLIENT_DIR` | `client` | static client directory (empty: do not serve a client); unset, `client` in the working directory, else next to the executable |
 //! | `MURMO_REALM` | `global` | rootcard realm for new identities |
 //! | `MURMO_REMOTE_HOMES` | `https://rootcard.org` | other rootcard homes whose identities may log in (comma-separated origins; `*` for any public https host; empty for none) |
 //! | `MURMO_REALMS` | `global` | realms accepted for identities from other homes (comma-separated) |
@@ -28,6 +28,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod admin;
 pub mod api;
 pub mod app;
 pub mod db;
@@ -75,6 +76,9 @@ impl FromRequestParts<Arc<App>> for ClientAddr {
             .get::<ConnectInfo<SocketAddr>>()
             .map_or(IpAddr::from([0, 0, 0, 0]), |c| c.0.ip());
         if app.cfg.trust_proxy.is_empty() {
+            if parts.headers.contains_key("x-forwarded-for") {
+                admin::untrusted_forwarding();
+            }
             return Ok(ClientAddr(peer));
         }
         let forwarded = parts
@@ -118,6 +122,34 @@ fn file_env(name: &str, default: &str, old_default: &str) -> String {
     default.to_string()
 }
 
+/// `MURMO_CLIENT_DIR` as set (empty: no client); unset, `client` in the working directory, else `client` next to the
+/// executable (an unpacked release archive started from anywhere), else `client` (and a warning at start).
+fn client_dir() -> String {
+    if std::env::var_os("MURMO_CLIENT_DIR").is_some()
+        || std::env::var_os("MESG_CLIENT_DIR").is_some()
+    {
+        return env("MURMO_CLIENT_DIR", "client");
+    }
+    if std::path::Path::new("client").is_dir() {
+        return "client".into();
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| Some(e.parent()?.join("client")))
+        .filter(|d| d.is_dir())
+        .map_or_else(|| "client".into(), |d| d.to_string_lossy().into_owned())
+}
+
+/// `murmo-server backup <dir>`: a consistent copy of the database and the host key, from the same environment as the
+/// server (also while it runs). See [`admin::backup`].
+pub fn backup(dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = config()?;
+    for f in admin::backup(&cfg, std::path::Path::new(dir))? {
+        println!("{}", f.display());
+    }
+    Ok(())
+}
+
 fn list(s: &str) -> Vec<String> {
     s.split(',')
         .map(str::trim)
@@ -157,7 +189,7 @@ fn config() -> Result<Config, String> {
         bind: env("MURMO_BIND", "127.0.0.1:8080"),
         db: file_env("MURMO_DB", "murmo.sqlite", "mesg.sqlite"),
         key_file: file_env("MURMO_HOST_KEY_FILE", "murmo-host.key", "mesg-host.key"),
-        client_dir: env("MURMO_CLIENT_DIR", "client"),
+        client_dir: client_dir(),
         realm: env("MURMO_REALM", "global"),
         realms: list(&env("MURMO_REALMS", "global")),
         remote_homes: list(&env("MURMO_REMOTE_HOMES", "https://rootcard.org"))
@@ -407,6 +439,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let seed = host_key(&cfg.key_file)?;
+    admin::upgrade_copy(&cfg.db)?;
     let app = build(&cfg, db::Db::open(&cfg.db)?, seed)?;
     // Pushes that were due when the server stopped.
     push::resume(&app);
@@ -417,6 +450,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             tick.tick().await;
             if let Err(e) = sweeper.db.purge(now()) {
                 eprintln!("purge: {e}");
+            }
+            for p in admin::prune_upgrade_copies(&sweeper.cfg.db) {
+                eprintln!("deleted {}", p.display());
             }
             sweeper.links.sweep();
             sweeper.limits.sweep();
@@ -439,9 +475,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
-    eprintln!("murmo-server for {} on {}", cfg.origin, cfg.bind);
-    if !cfg.old_origins.is_empty() {
-        eprintln!("  also answering for {}", cfg.old_origins.join(", "));
+    for line in admin::summary(&cfg, api::client_build(&cfg.client_dir).as_deref()) {
+        eprintln!("{line}");
     }
     let last = app.clone();
     axum::serve(

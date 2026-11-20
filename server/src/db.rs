@@ -160,6 +160,51 @@ pub struct Remote {
     pub fetched: i64,
 }
 
+/// The version of the schema this server writes, kept in `PRAGMA user_version`. Raise it with every change to
+/// [`SCHEMA`] or to the columns [`Db::open`] adds: a start that finds an older version copies the database first
+/// (`lib.rs`, `upgrade_backup`), so that an update always has a way back.
+pub const SCHEMA_VERSION: i64 = 1;
+
+/// What the database at a path is, before [`Db::open`] changes anything.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Schema {
+    /// No database yet (or an empty file): nothing to keep.
+    New,
+    /// This server's schema.
+    Current,
+    /// An older schema (0: from before versions were kept), which opening it changes.
+    Older(i64),
+    /// A schema from a newer server.
+    Newer(i64),
+}
+
+/// The schema of the database at `path`, read without changing it.
+pub fn schema_of(path: &str) -> rusqlite::Result<Schema> {
+    if path == ":memory:" || !std::path::Path::new(path).exists() {
+        return Ok(Schema::New);
+    }
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let tables: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r.get(0))?;
+    if tables == 0 {
+        return Ok(Schema::New);
+    }
+    let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    Ok(match v.cmp(&SCHEMA_VERSION) {
+        std::cmp::Ordering::Less => Schema::Older(v),
+        std::cmp::Ordering::Equal => Schema::Current,
+        std::cmp::Ordering::Greater => Schema::Newer(v),
+    })
+}
+
+/// A consistent copy of the database at `src` into the new file `dest` (`VACUUM INTO`), also while a server is
+/// using it: the copy is one read transaction, and holds only live rows.
+pub fn copy_into(src: &str, dest: &str) -> rusqlite::Result<()> {
+    let conn = Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_secs(30))?;
+    conn.execute("VACUUM INTO ?1", params![dest])?;
+    Ok(())
+}
+
 /// The database. Cheap to clone.
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
@@ -224,6 +269,11 @@ impl Db {
                 "ALTER TABLE push_subs ADD COLUMN pushed INTEGER NOT NULL DEFAULT 0;
                  UPDATE push_subs SET pushed = (SELECT COALESCE(MAX(id), 0) FROM mailbox);",
             )?;
+        }
+        // A newer server's version stays: this one does not undo what that one added.
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if v < SCHEMA_VERSION {
+            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         }
         Ok(Db(Arc::new(Mutex::new(conn))))
     }

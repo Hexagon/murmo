@@ -1,0 +1,41 @@
+# Murmo with automatic TLS (docs/HOSTING.md, "Quick start"):
+#
+#   cp .env.example .env     # and set MURMO_DOMAIN
+#   docker compose up -d
+#
+# Update: docker compose pull && docker compose up -d
+# Back up the volume murmo-data (the database and the host key): see docs/HOSTING.md.
+name: murmo
+
+services:
+  murmo:
+    image: ${MURMO_IMAGE:-ghcr.io/hexagon/murmo:0.2}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MURMO_ORIGIN: https://${MURMO_DOMAIN:?set MURMO_DOMAIN in .env}
+      MURMO_TRUST_PROXY: "1"
+    volumes:
+      # A named volume, or a directory on this machine (MURMO_DATA=/srv/murmo in .env), owned by uid 65532.
+      - ${MURMO_DATA:-murmo-data}:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - murmo
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      MURMO_DOMAIN: ${MURMO_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  murmo-data:
+  caddy-data:
+  caddy-config:

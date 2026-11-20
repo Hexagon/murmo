@@ -10,7 +10,9 @@
 //! File chunks go the same way (`/federation/relay`), as do the questions a transfer needs: which devices are
 //! connected (`/federation/presence`) and which have room in the file queue (`/federation/space`). Each server keeps
 //! its own limits for what it takes from other servers, and says what they are in `/api/v1/info` (`relay`,
-//! `file_queue_limits`), so that a sender can keep within the smaller of both.
+//! `file_queue_limits`), so that a sender can keep within the smaller of both. Those limits are per sending account,
+//! so unlike an envelope, a chunk names its sending account and device, and a `space` question its account
+//! (DESIGN.md §14.5).
 //!
 //! Which servers take part is the operator's choice (`MURMO_FEDERATION`: `open`, `off`, or a list of origins, and
 //! `MURMO_FEDERATION_BLOCK`). An open server talks only to public https origins with a domain name.

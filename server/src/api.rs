@@ -113,6 +113,10 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
     if !env!("MURMO_COMMIT").is_empty() {
         m.insert("commit", env!("MURMO_COMMIT").into());
     }
+    // Built by the release workflow from a version tag: the release page has the archives and their SHA-256 sums.
+    if option_env!("MURMO_RELEASE") == Some("1") {
+        m.insert("release", true.into());
+    }
     if app.cfg.file_queue > 0 {
         // Bytes of queued chunk text (encrypted chunks as sent), not of the file itself: the client knows how much
         // a file grows. Upper bounds; whether a file fits now is still asked with `relay-space`.
@@ -165,7 +169,7 @@ pub async fn info(State(app): State<Arc<App>>) -> Response {
 
 /// An identifier of the client that is served now: it changes when any file of the client changes, so an open page
 /// can offer a reload. Not a security measure. Read from disk at most every 30 seconds.
-fn client_build(dir: &str) -> Option<String> {
+pub fn client_build(dir: &str) -> Option<String> {
     use std::hash::Hasher;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
