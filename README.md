@@ -99,7 +99,8 @@ npm run test:ui                      # browser smoke test, see tests/ui-smoke.mj
 cd fuzz && cargo +nightly fuzz run ws_frame   # fuzzing (also json_body, http_text)
 ```
 
-Contributions are welcome: open an issue or a pull request. Security issues go through
+Contributions are welcome: open an issue or a pull request; how the project works is in
+[CONTRIBUTING.md](CONTRIBUTING.md) (and [AGENTS.md](AGENTS.md) for coding agents). Security issues go through
 [SECURITY.md](SECURITY.md), not public issues.
 
 ## License
