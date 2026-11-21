@@ -9,6 +9,13 @@ its section and puts the section in the release notes.
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.2.1 (2026-11-21)
+
+A patch release for users: accessibility, a few things that were missing, and settings kept encrypted. Nothing
+changes in the protocol, the server or its database.
+
 **For users**
 
 - **Easier with a screen reader and a keyboard.** Toasts and form errors are announced, and so is a new message, once
