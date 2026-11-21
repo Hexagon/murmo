@@ -9,11 +9,14 @@ How to run your own Murmo server: with containers (below), or from source as des
 On a machine with Docker and the compose plugin, whose ports 80 and 443 are reachable from the internet:
 
 1. Point the DNS name of your server (`chat.example.org`) at the machine.
-2. Get `deploy/` from this repository, `cp .env.example .env`, and set `MURMO_DOMAIN` in `.env`.
+2. Get `deploy/`: `git clone https://github.com/Hexagon/murmo.git` (then `cd murmo/deploy`), or unpack a release
+   archive (below), which has it too. `cp .env.example .env`, and set `MURMO_DOMAIN` in `.env`.
 3. `docker compose up -d`
 
 Caddy gets the certificate on first start, and Murmo answers at `https://chat.example.org`. The database and the host
-key are in the volume `murmo-data` (or in `MURMO_DATA`, below). The image is `ghcr.io/hexagon/murmo`, for amd64 and
+key are in the volume `murmo-data`, or in a directory on the machine set as `MURMO_DATA` in `.env`; such a directory
+must be owned by uid 65532, the user the server runs as (`sudo chown 65532:65532 /srv/murmo`), or the server cannot
+write to it. The image is `ghcr.io/hexagon/murmo`, for amd64 and
 arm64, published for every release: `0.2.1`, `0.2` and `latest`. The compose file runs `0.2` (`MURMO_IMAGE`). To run a
 build of your own (from `main`, or with changes), build the image in the repository and point `.env` at it:
 
@@ -41,13 +44,13 @@ Two files hold everything: the database (`MURMO_DB`) and the host key (`MURMO_HO
 both at start, with what it serves:
 
 ```text
-murmo-server 0.2.0 (commit 2517ee6…)
+murmo-server 0.2.1 (commit 2517ee6…)
   origin      https://chat.example.org
   listening   0.0.0.0:8080
   database    /data/murmo.sqlite
   host key    /data/murmo-host.key   (back up these two: murmo-server backup <dir>)
   federation  open
-  client      /app/client (build 0.2.0-…)
+  client      /app/client (build 0.2.1-…)
 ```
 
 It warns when a setting looks wrong: an `http://` origin while it listens beyond loopback, no client where
@@ -63,12 +66,20 @@ docker compose exec murmo murmo-server backup /data/backup-$(date +%F)   # in th
 MURMO_DB=… MURMO_HOST_KEY_FILE=… murmo-server backup /var/backups/murmo  # a binary
 ```
 
+For the systemd service from a release archive (below), the executable is not on the `PATH` and the files are in
+`/var/lib/murmo`, readable by root:
+
+```sh
+sudo MURMO_DB=/var/lib/murmo/murmo.sqlite MURMO_HOST_KEY_FILE=/var/lib/murmo/murmo-host.key \
+  /opt/murmo/murmo-server backup /var/backups/murmo-$(date +%F)
+```
+
 Copy the directory off the machine. Copying `murmo.sqlite` itself with `cp` while the server runs is not safe.
 A backup holds the encrypted envelopes and file chunks that were waiting at the time, and the host key: keep it as
 secret as the server, and not longer than you need it.
 
-**Restore:** stop the server, put both files in place of the old ones (with their `-wal` and `-shm` files removed),
-give them to the user the server runs as, start. Envelopes that arrived after the backup and were not yet fetched
+**Restore:** stop the server, delete the old database's `-wal` and `-shm` files if there are any, put both files in
+place of the old ones, give them to the user the server runs as, start. Envelopes that arrived after the backup and were not yet fetched
 are lost. History is on the devices, not in the database, so it is not affected.
 
 **Updates:** before a start that changes the database's schema, the server copies the database to
@@ -97,7 +108,9 @@ Every release has static server archives for Linux, which need nothing installed
 The service runs as a user systemd makes for it (`DynamicUser`), with the database and host key in `/var/lib/murmo`,
 and may write nowhere else. The client is found next to the executable, in `/opt/murmo/client`.
 
-**Updating:** check and unpack the new archive in place of `/opt/murmo`, then `sudo systemctl restart murmo`. The
+**Updating:** check the new archive, remove the old client (`sudo rm -rf /opt/murmo/client`: files that the new
+version no longer has would otherwise still be served), unpack the new archive over `/opt/murmo` as in step 2, then
+`sudo systemctl restart murmo`. The
 server copies its database first if the update changes it (see "Backups and updates").
 
 **From a binary started by a script:** stop it cleanly, and copy its `murmo.sqlite` (with `murmo.sqlite-wal` if there
@@ -108,7 +121,7 @@ The rest is as in "Moving to the container" below: the same origin, the old file
 **Checking what a server serves:** the client archive `murmo-client-<version>.tar.gz` is made reproducibly
 (`scripts/release-archives.sh --client-only` at the release's tag makes the same bytes). Its files are what a server
 of that release serves under `/`. The app shows the version and commit, and for a release build it links the release
-page ("Säkerhet och integritet").
+page ("Security and privacy").
 
 ## A reverse proxy of your own
 
@@ -187,8 +200,9 @@ what they could not deliver and try again (§14.3 in DESIGN.md).
 
 **The way back**, if something is wrong: `docker compose down`, then start the old script again. If the new server
 has run for a while, stop it first, then copy the database and key back from `/srv/murmo` (and give them back to
-the user the script runs as), so that what came in meanwhile is not lost. That is only safe if the image is the same version as the binary. A newer version can change the database at start
-(it copies it first, see above), and an older binary might not understand the change. So for the move itself, use
+the user the script runs as), so that what came in meanwhile is not lost. That is only safe if the image is the
+same version as the binary. A newer version can change the database at start (it copies it first, see above), and
+an older binary might not understand the change. So for the move itself, use
 the image of the version the binary already runs, and update afterwards.
 
 ## Configuration
@@ -222,10 +236,19 @@ Set in the environment:
 | `MURMO_FEDERATION_BLOCK` | empty | servers never to exchange messages with (comma-separated origins or host names; each also blocks its other ports and subdomains) |
 | `MURMO_DEMO` | `0` | mark this server as a demo (`1`): a "Demo" mark, a notice on the login screen and a section in the terms saying that identities, messages and files may be wiped at any time, with a link to running one's own server. murmo.org runs with it |
 
+With the compose files, these are read from `deploy/.env` by Docker Compose, not by the server:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MURMO_DOMAIN` | none (required) | the server's DNS name; `MURMO_ORIGIN` is set to `https://<MURMO_DOMAIN>`, and Caddy gets its certificate |
+| `MURMO_IMAGE` | `ghcr.io/hexagon/murmo:0.2` | the image to run (`0.2` gets every 0.2.x patch with a pull) |
+| `MURMO_DATA` | the volume `murmo-data` | where the database and host key are: a volume name, or a directory owned by uid 65532 |
+| `MURMO_PORT` | `8080` | the port on `127.0.0.1` with `compose.own-proxy.yaml` |
+
 Murmo was called mesg before. The old variable names (`MESG_…`) still work when the new ones are not set, and an
 existing `mesg.sqlite` / `mesg-host.key` is used when the new default files do not exist yet.
 
-The version shown in the app ("Säkerhet och integritet") is the commit the server was built from: `MURMO_COMMIT` or
+The version shown in the app ("Security and privacy") is the commit the server was built from: `MURMO_COMMIT` or
 `GITHUB_SHA` at build time, otherwise `git rev-parse HEAD`.
 
 The `MURMO_ORIGIN` goes into users' signed rootcard logs as their home address: choose it once.
