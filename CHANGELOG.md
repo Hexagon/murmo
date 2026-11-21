@@ -9,7 +9,21 @@ its section and puts the section in the release notes.
 
 ## Unreleased
 
-Nothing yet.
+**For users**
+
+- **The help says what the server keeps about who writes to whom.** It keeps, as keyed hashes, the sender of each
+  waiting message and, for 90 days, which account wrote to which (the terms already said so; the help and the FAQ
+  said nothing was written down). The help also says that forward secrecy covers traffic older than about four weeks,
+  that a reset with the recovery card logs out every device and the paper key, and that Microsoft's push service can
+  be the one a browser uses. In all four languages.
+
+**For operators**
+
+- `docs/HOSTING.md`: how to get `deploy/`, that a `MURMO_DATA` directory must be owned by uid 65532, the backup
+  command for the systemd service, removing the old client before unpacking an update, and a table of the settings
+  the compose files read.
+
+**Operators: anything to do?** No.
 
 ## 0.2.1 (2026-11-21)
 
