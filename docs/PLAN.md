@@ -162,14 +162,21 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 
 ### P3: polish
 
-- [ ] `aria-live` on all of `#app` (`index.html:80`); toasts and form errors without `role="status"`/`"alert"`
-- [ ] Safety code button unnamed on mobile (`app.js:1534`, `style.css:637`); consider a "verified" state
-- [ ] Contrast: focus ring 1.75:1 (`--focus`), `--faint` text 2.7–3:1 (`style.css:15,23,44`)
+- [x] `aria-live` on all of `#app` (`index.html:80`); toasts and form errors without `role="status"`/`"alert"`. The
+      toasts are one `status` region, form errors `alert`s, and an incoming message is said once by a hidden region
+- [x] Safety code button unnamed on mobile (`app.js:1534`, `style.css:637`). A "verified" state is left for QR
+      verification (below, Later), which would set it
+- [x] Contrast: focus ring 1.75:1 (`--focus`), `--faint` text 2.7–3:1 (`style.css:15,23,44`). The ring is the accent
+      (6.4:1 and more), `--faint` at least 4.5:1 on every background it is used on, light and dark
 - [x] (A1) Mobile empty state hides "share your identifier" and the paper-key warning
-- [ ] Dialogs without `aria-labelledby` (`app.js:217`), nested `main`, tablist without `role="tab"` (`app.js:578`)
-- [ ] Recovery card screen has no back; registration never offers "remember"; toasts drawn under modal backdrops
-- [ ] PWA: offline screen, maskable icon, manifest description in English; spinner ignores `prefers-reduced-motion`
-- [ ] Per-account settings in plain `localStorage` (`app.js:299,307`), against T12
+- [x] Dialogs without `aria-labelledby` (`app.js:217`), nested `main`, tablist without `role="tab"` (`app.js:578`)
+- [x] Recovery card screen has no back; registration never offers "remember"; toasts drawn under modal backdrops.
+      Toasts move into the topmost open dialog, so they are also heard there (the page behind is inert)
+- [x] PWA: offline screen, maskable icon, manifest description in English; spinner ignores `prefers-reduced-motion`.
+      The offline screen comes from the service worker, which the installed app registers at start (DESIGN §10.1);
+      the spinner turns three times slower
+- [x] Per-account settings in plain `localStorage` (`app.js:299,307`), against T12. Now in the encrypted store, and
+      moved there from `localStorage` at the next login
 
 ## Adoption: setup, updates and invites
 
@@ -293,7 +300,7 @@ L longer.
 
 1. [x] **What the documents promise** (S, review P2): §14.5 and the route map in §11, T6 claiming unbuilt protections,
        host key compromise as a threat. Users and operators decide on these texts; they must be true first
-2. [ ] **Accessibility and polish** (S each, review P3): direct benefit for every user, no protocol risk
+2. [x] **Accessibility and polish** (S each, review P3): direct benefit for every user, no protocol risk
 3. [x] **Published release hashes** (S, done by A5): every release a reproducible client archive and its SHA-256 list in the release
        notes; the "Säkerhet och integritet" view links them next to the commit it already shows. The first, cheap half
        of T6: anyone can check what a server serves

@@ -580,7 +580,7 @@ Database `mesg-<account>`:
 
 | Store | Contents |
 |---|---|
-| `meta` | device id, public keys, wrapped (encrypted) private keys, optional remembered local key |
+| `meta` | device id, public keys, wrapped (encrypted) private keys, optional remembered local key, the account's settings on this device (encrypted, secret `settings`) |
 | `contacts` | encrypted contact records: handle, pinned device list, state (requested, accepted, blocked) |
 | `messages` | encrypted messages, indexed by conversation and time |
 | `files` | one header per complete file (`{ n, size }`), by file id; written last, after all its parts |
@@ -593,6 +593,11 @@ parts are hashed in order as they become contiguous. Chunks that come before the
 (at most 16 MiB per sender account and 64 MiB in all; beyond that a chunk is refused and, if queued, not acknowledged
 so it comes again) and are forgotten after 10 minutes without it. Parts without a header and incoming chunks older
 than an hour are deleted at start. Files stored by version 1 (one record in `files`) are still read.
+
+Outside the store, in `localStorage`, are only the choices made before any account is open: the theme and the
+language. The account's own settings (notifications, the file queue, undo send, the files view's tab …) are in `meta`;
+0.2.0 and earlier kept them in `localStorage` under `murmo-settings:<account>`, which names the account, and they are
+moved into the store at the next login.
 A file that does not fit on the device (`QuotaExceededError`) is deleted at once, on the sender before it is sent
 (*no room on this device*) and on a receiver while it arrives (it can be fetched again later).
 
@@ -907,6 +912,12 @@ device per 10 seconds. The service worker has no keys and does not connect to th
 and the page fetches and decrypts when the user opens it. So a wake-up does not make the device look connected, and the
 push service learns only that this browser got a wake-up from this server at that time. An endpoint that the push
 service reports as gone (404/410) is deleted.
+
+The same worker gives the installed app (which registers it at once, without notifications) a screen of its own when
+it is opened without a connection: `offline.html`, with its style sheet, script and icon, is the only thing it stores.
+Opening a page always goes to the server first, and the stored screen is shown only when that fails, so the app that
+runs is always the one the server serves; the screen says so, and reloads when the connection is back. The worker
+caches no other file and answers no other request.
 
 While the page runs in the background (not frozen), it shows the notification itself with the sender's handle, which
 never leaves the device.

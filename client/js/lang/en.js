@@ -58,6 +58,7 @@ export default {
 
   // ── common ──
   "common.close": "Close",
+  "common.back": "Back",
   "common.cancel": "Cancel",
   "common.continue": "Continue",
   "common.copy": "Copy",
@@ -247,6 +248,7 @@ export default {
   "card.intro": "Save the card before the account is created. It is the only way to reset a forgotten password or move the identity. Whoever has the card controls the identity – keep it offline.",
   "card.downloadFile": "Download card file",
   "card.saved": "I have saved my recovery card in a safe place.",
+  "card.backHint": "Nothing has been created yet. Going back leaves this card unused, and you get a new one when you continue.",
 
   // ── linking a device ──
   "link.noOther": "I have no other device left",

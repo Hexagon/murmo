@@ -6,7 +6,8 @@
 // - Safari on iPhone and iPad has no prompt, so the box says how: Share, then "Add to Home Screen";
 // - Safari on a Mac (17 and later) likewise: File, then "Add to Dock".
 //
-// Anywhere else (Firefox on a computer, an already installed app) the box stays hidden.
+// Anywhere else (Firefox on a computer, an already installed app) the box stays hidden. The installed app also
+// registers the service worker (below), for its offline screen.
 
 const box = document.getElementById("install");
 const button = document.getElementById("install-btn");
@@ -58,3 +59,9 @@ button?.addEventListener("click", async () => {
 
 const safari = safariKind();
 if (safari) show(safari);
+
+// The installed app gets the service worker at once (in a tab it comes with notifications, notify.js): when it is
+// opened without a connection, the worker shows a screen of its own (offline.html) instead of the system's error.
+if (standalone() && globalThis.isSecureContext && "serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).catch(() => {});
+}

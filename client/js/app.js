@@ -442,11 +442,22 @@ function showStorageFull() {
   document.body.append(bar);
 }
 
-function toast(text) {
+/**
+ * Toasts are one live region (`role="status"`), there before anything is said in it. While a modal dialog is open the
+ * rest of the page is inert, hidden from screen readers and drawn under the dialog's backdrop, so the region moves
+ * into the topmost open dialog and back when it closes (`dialog`).
+ */
+function toastBox() {
   let box = document.querySelector(".toasts");
-  if (!box) document.body.append((box = h("div", { class: "toasts" })));
+  if (!box) box = h("div", { class: "toasts", role: "status", "aria-live": "polite" });
+  const top = [...document.querySelectorAll("dialog[open]")].at(-1) ?? document.body;
+  if (box.parentNode !== top) top.append(box);
+  return box;
+}
+
+function toast(text) {
   const t = h("div", { class: "toast", text });
-  box.append(t);
+  toastBox().append(t);
   setTimeout(() => t.remove(), 4500);
 }
 
@@ -472,11 +483,27 @@ function confirmDialog(title, text, ok) {
   });
 }
 
+let dialogIds = 0;
+/**
+ * A modal dialog, named by its first heading (`aria-labelledby`) unless it is given a name of its own. Toasts move
+ * into it while it is the topmost one, and back out when it closes, so they are seen and heard over it.
+ */
 function dialog(...children) {
   const d = h("dialog", {}, ...children);
-  d.addEventListener("close", () => d.remove());
+  const title = d.querySelector("h1, h2, h3");
+  if (title && !d.hasAttribute("aria-label")) {
+    title.id ||= `dialog-${++dialogIds}`;
+    d.setAttribute("aria-labelledby", title.id);
+  }
+  d.addEventListener("close", () => {
+    // (No longer `[open]` here: the box goes to the dialog below, or to the page.)
+    const box = d.querySelector(":scope > .toasts");
+    if (box) ([...document.querySelectorAll("dialog[open]")].at(-1) ?? document.body).append(box);
+    d.remove();
+  });
   document.body.append(d);
   d.showModal();
+  if (document.querySelector(".toasts")) toastBox();
   return d;
 }
 
@@ -569,20 +596,38 @@ function lastSeen(t) {
 const DEFAULTS = { notify: true, fileQueue: true, notifyPrompted: false, undoSend: true };
 const UNDO_SEND = 5000;
 
+// Kept encrypted in the account's store, like everything else of the account (T12), and in memory while it is open.
+// Read once when the account opens (`loadSettings`); before that, and after logging out, the defaults.
+let prefs = {};
+let prefsSaved = Promise.resolve(); // one write after the other, so the last setting is the one stored
+
 function settings() {
-  try {
-    // `mesg-…`: the key under the project's old name, read until the setting is saved again.
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(`murmo-settings:${messenger?.me.account}`) ?? localStorage.getItem(`mesg-settings:${messenger?.me.account}`) ?? "{}") };
-  } catch {
-    return { ...DEFAULTS };
-  }
+  return { ...DEFAULTS, ...prefs };
 }
 
 function setSetting(k, v) {
+  prefs = { ...prefs, [k]: v };
+  const store = messenger?.store;
+  const now = prefs;
+  // Not saved (a full disk): the setting lasts for this session.
+  if (store) prefsSaved = prefsSaved.then(() => store.setSecret("settings", now)).catch(() => {});
+}
+
+/**
+ * The account's settings from its store. Earlier versions kept them in plain `localStorage` (`murmo-settings:<account>`,
+ * or `mesg-…` under the project's old name): taken over once and removed from there.
+ */
+async function loadSettings(store, account) {
+  prefs = (await store.secret("settings").catch(() => null)) ?? {};
   try {
-    localStorage.setItem(`murmo-settings:${messenger.me.account}`, JSON.stringify({ ...settings(), [k]: v }));
+    const keys = [`murmo-settings:${account}`, `mesg-settings:${account}`];
+    const old = keys.map((k) => localStorage.getItem(k)).find((v) => v != null);
+    if (old == null) return;
+    prefs = { ...JSON.parse(old), ...prefs };
+    await store.setSecret("settings", prefs);
+    for (const k of keys) localStorage.removeItem(k);
   } catch {
-    // storage may be unavailable; the setting then keeps its default
+    // unreadable or unavailable: the defaults, and nothing is removed
   }
 }
 
@@ -858,15 +903,25 @@ async function boot() {
 
 // ── authentication screens ──────────────────────────────────────────────────────────────────────────────────────
 
+/** `prefill`: the handle for logging in, or for registering what was chosen before (`registerForm`). */
 function showAuth(tab = "login", prefill = "") {
-  const err = h("div", { class: "error" });
-  const body = h("div");
-  const tabs = h(
-    "div",
-    { class: "tabs", role: "tablist" },
-    h("button", { class: tab === "login" ? "on" : "", "data-tab": "login", text: tr("auth.login"), onclick: () => showAuth("login") }),
-    h("button", { class: tab === "register" ? "on" : "", "data-tab": "register", text: tr("auth.register"), onclick: () => showAuth("register") }),
-  );
+  const err = h("div", { class: "error", role: "alert" });
+  const body = h("div", { role: "tabpanel", id: "auth-panel", "aria-labelledby": `auth-tab-${tab}` });
+  const tabBtn = (k, label) =>
+    h("button", {
+      type: "button", role: "tab", id: `auth-tab-${k}`, class: tab === k ? "on" : "", "data-tab": k, text: tr(label),
+      "aria-selected": String(tab === k), "aria-controls": "auth-panel", tabindex: tab === k ? "0" : "-1",
+      onclick: () => showAuth(k),
+      // Arrow keys move between the tabs (and show the other one), as in any tab list.
+      onkeydown: (e) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+        e.preventDefault();
+        const to = e.key === "Home" ? "login" : e.key === "End" ? "register" : tab === "login" ? "register" : "login";
+        if (to !== tab) showAuth(to);
+        root.querySelector(`#auth-tab-${to}`)?.focus();
+      },
+    });
+  const tabs = h("div", { class: "tabs", role: "tablist" }, tabBtn("login", "auth.login"), tabBtn("register", "auth.register"));
   inApp(false);
   root.replaceChildren(
     h(
@@ -887,7 +942,7 @@ function showAuth(tab = "login", prefill = "") {
     ),
   );
   if (tab === "login") loginForm(body, err, prefill);
-  else registerForm(body, err);
+  else registerForm(body, err, prefill || null);
 }
 
 function allowedHomes() {
@@ -958,17 +1013,7 @@ async function loginForm(body, err, prefill) {
     remoteField,
     field(tr("common.handle"), handle),
     field(tr("common.password"), pw),
-    h(
-      "label",
-      { class: "check" },
-      remember,
-      h(
-        "span",
-        {},
-        tr("auth.remember"),
-        h("span", { class: "hint", style: "display:block", text: tr("auth.rememberHint") }),
-      ),
-    ),
+    rememberField(remember),
     btn,
   );
   body.replaceChildren(form);
@@ -976,8 +1021,20 @@ async function loginForm(body, err, prefill) {
   if (canHover()) (prefill ? pw : handle).focus({ preventScroll: true });
 }
 
-function registerForm(body, err) {
-  const user = h("input", { class: "input", autocomplete: "username", placeholder: tr("auth.userPlaceholder"), spellcheck: "false" });
+/** "Remember this device", with what it means. */
+function rememberField(box) {
+  return h(
+    "label",
+    { class: "check" },
+    box,
+    h("span", {}, tr("auth.remember"), h("span", { class: "hint", style: "display:block", text: tr("auth.rememberHint") })),
+  );
+}
+
+/** `back`: what was chosen before going back from the recovery card (`{ user, remember }`). */
+function registerForm(body, err, back = null) {
+  const user = h("input", { class: "input", autocomplete: "username", placeholder: tr("auth.userPlaceholder"), spellcheck: "false", value: back?.user ?? "" });
+  const remember = h("input", { type: "checkbox", checked: !!back?.remember });
   const pw = h("input", { class: "input", type: "password", autocomplete: "new-password" });
   const pw2 = h("input", { class: "input", type: "password", autocomplete: "new-password" });
   const btn = h("button", { class: "btn primary", type: "submit", text: tr("common.continue") });
@@ -992,7 +1049,7 @@ function registerForm(body, err) {
           const restore = busy(btn, tr("auth.makingKeys"));
           try {
             const reg = await id.prepareRegistration(api, user.value.trim(), pw.value);
-            showCard(reg, pw.value);
+            showCard(reg, pw.value, remember.checked);
           } catch (x) {
             err.textContent = say(x);
             restore();
@@ -1002,13 +1059,14 @@ function registerForm(body, err) {
       field(tr("auth.username"), user),
       field(tr("auth.passwordMin"), pw),
       field(tr("auth.repeat"), pw2),
+      rememberField(remember),
       h("p", { class: "hint", text: tr("auth.handleHint") }),
       (info?.homes ?? []).length ? h("p", { class: "hint", text: tr("auth.haveIdentity", { homes: allowedHomes() }) }) : null,
       h("p", { class: "hint" }, tr("terms.accept"), " ", h("button", { class: "link", type: "button", text: tr("terms.read"), onclick: showTerms })),
       btn,
     ),
   );
-  if (canHover()) user.focus({ preventScroll: true });
+  if (canHover()) (back ? pw : user).focus({ preventScroll: true });
 }
 
 /**
@@ -1055,8 +1113,12 @@ function download(name, blob) {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-function showCard(reg, password) {
-  const err = h("div", { class: "error" });
+/**
+ * The recovery card, before the account is made. Nothing has been sent yet: "Back" leaves this card unused, and
+ * continuing again makes a new one.
+ */
+function showCard(reg, password, remember) {
+  const err = h("div", { class: "error", role: "alert" });
   const saved = h("input", { type: "checkbox" });
   const go = h("button", { class: "btn primary", text: tr("auth.register"), disabled: true });
   saved.addEventListener("change", () => (go.disabled = !saved.checked));
@@ -1065,7 +1127,7 @@ function showCard(reg, password) {
     const restore = busy(go, tr("card.creating"));
     try {
       const done = await reg.finish();
-      await loginAndEnter("", done.handle, password, false);
+      await loginAndEnter("", done.handle, password, remember);
     } catch (x) {
       err.textContent = say(x);
       restore();
@@ -1093,7 +1155,13 @@ function showCard(reg, password) {
             h("button", { class: "btn ghost", text: tr("common.print"), onclick: () => print() }),
           ),
           h("label", { class: "check" }, saved, h("span", { text: tr("card.saved") })),
-          go,
+          h(
+            "div",
+            { class: "card-go" },
+            h("button", { class: "btn ghost", text: tr("common.back"), onclick: () => showAuth("register", { user: reg.card.username, remember }) }),
+            go,
+          ),
+          h("p", { class: "hint", text: tr("card.backHint") }),
           err,
         ),
       ),
@@ -1212,7 +1280,7 @@ function showLinkWait(setup, handle, home) {
 /** A field for the account's paper key on the link screen: it adds this device instead of another device (§4.5). */
 function paperKeyForm(setup, done) {
   const input = h("input", { type: "text", autocomplete: "off", autocapitalize: "characters", spellcheck: false, placeholder: "MPK-XXXX-XXXX-…" });
-  const err = h("div", { class: "error" });
+  const err = h("div", { class: "error", role: "alert" });
   const go = h("button", { class: "btn primary", type: "submit", text: tr("paper.use") });
   const form = h(
     "form",
@@ -1303,6 +1371,7 @@ function recoveryHelp(home, handle) {
 // ── the main view ───────────────────────────────────────────────────────────────────────────────────────────────
 
 async function enter({ store, account, handle, home }) {
+  await loadSettings(store, account);
   messenger = new Messenger({ api, store, account, handle, home, realms: info.realms, fileQueue: () => settings().fileQueue, queueLimit: () => queueLimit() ?? Infinity });
   messenger.addEventListener("contacts", () => { renderSidebar(); refreshConversation(); if (filesView) scheduleFiles(); });
   messenger.addEventListener("messages", (e) => {
@@ -1393,14 +1462,25 @@ function updateTitle() {
 
 function onIncoming({ conv, kind }) {
   const looking = document.visibilityState === "visible" && document.hasFocus();
+  const who = messenger.contacts.get(conv)?.handle ?? tr("common.someone");
+  const key = { request: "notify.request", file: "notify.file", ephemeral: "notify.ephemeral" }[kind] ?? "notify.message";
+  const text = tr(key, { who });
+  // Said to a screen reader in the page: the thread itself is not a live region (it is redrawn, older messages come).
+  if (document.visibilityState === "visible") announce(text);
   if (looking && conv === current) return;
   unread.add(conv);
   renderSidebar();
   if (looking || !settings().notify) return;
-  const who = messenger.contacts.get(conv)?.handle ?? tr("common.someone");
-  const key = { request: "notify.request", file: "notify.file", ephemeral: "notify.ephemeral" }[kind] ?? "notify.message";
-  const text = tr(key, { who });
   notify.show(text).catch(() => {});
+}
+
+/** Say something to screen readers only, politely: a hidden live region that is there before anything is said. */
+function announce(text) {
+  let box = document.getElementById("announce");
+  if (!box) document.body.append((box = h("div", { id: "announce", class: "sr-only", role: "status", "aria-live": "polite" })));
+  box.textContent = "";
+  // In the next frame, so the same text twice is still a change.
+  requestAnimationFrame(() => { box.textContent = text; });
 }
 
 /** Keep the server's push endpoint for this device in step with the setting. */
@@ -1550,7 +1630,8 @@ function renderShell() {
   }, icon("search"));
   ui.filesBtn = h("button", { class: "icon-btn files-btn", "aria-label": tr("files.title"), title: tr("files.title"), "aria-pressed": "false", onclick: () => openFiles() }, icon("folder"));
   ui.foot = h("div", { class: "side-foot" });
-  ui.main = h("main", { class: "main" });
+  // Not a second `main`: the page's own (index.html) already holds the app.
+  ui.main = h("div", { class: "main" });
   ui.net = h("div", { class: "net-banner", role: "status", hidden: true },
     h("span", { class: "dot" }),
     h("span", { class: "net-text", text: tr("net.offline") }),
@@ -1878,7 +1959,7 @@ function openConversation(account, form = false) {
   holdThread();
   const head = topbar(
     h("div", { class: "title" }, name, h("span", { class: "tag", text: tag }), homeLabel(c.home) ? h("span", { class: "home", text: ` · ${homeLabel(c.home)}` }) : null, c.retention ? h("span", { class: "home", title: tr("conv.retentionTitle"), text: tr("conv.retention", { time: retentionLabel(c.retention) }) }) : null),
-    c.state === "accepted" ? h("button", { class: "btn ghost small", onclick: () => showSafety(c) }, icon("shield"), h("span", { class: "wide", text: tr("conv.safety") })) : null,
+    c.state === "accepted" ? h("button", { class: "btn ghost small safety-btn", "aria-label": tr("conv.safety"), title: tr("conv.safety"), onclick: () => showSafety(c) }, icon("shield"), h("span", { class: "wide", text: tr("conv.safety") })) : null,
     h("button", { class: "btn ghost small wide files-open", title: tr("files.ofConversation"), onclick: () => openFiles(c.account, c.account) }, icon("folder"), h("span", { text: tr("files.title") })),
     h("button", { class: "icon-btn", "aria-label": tr("conv.more"), onclick: () => showContactMenu(c) }, icon("more")),
   );
@@ -1926,7 +2007,7 @@ function renderWelcome() {
   ui.thread = null;
   const input = h("input", { class: "input", id: "new-handle", placeholder: tr("common.handlePlaceholder"), spellcheck: "false", autocomplete: "off", autocapitalize: "off", enterkeyhint: "next" });
   const note = h("input", { class: "input", id: "new-note", placeholder: tr("new.notePlaceholder"), maxlength: 500, enterkeyhint: "send" });
-  const err = h("div", { class: "error" });
+  const err = h("div", { class: "error", role: "alert" });
   const send = h("button", { class: "btn primary", type: "submit", text: tr("new.send") });
   const form = h(
     "form",
@@ -2646,8 +2727,8 @@ async function loadOlder() {
     const from = Math.max(0, start - PAGE);
     const pics = stored.slice(from, start).map((m) => m.file).filter((f) => f?.have && p.inlineImage(f.mime, f.size) && !imgSizes.has(f.f));
     // Behind the pictures on the screen (the queue), but the newest of them first.
-    const time = new Map(stored.slice(from, start).filter((m) => m.file).map((m) => [m.file.f, m.time]));
-    await Promise.all(pics.map((f) => picJob("size", time.get(f.f), () => messenger.imageSize(f.f), null, true).then((s) => { if (p.imageFits(s)) imgSizes.set(f.f, { width: s.width, height: s.height }); }, () => {})));
+    const msg = new Map(stored.slice(from, start).filter((m) => m.file).map((m) => [m.file.f, m]));
+    await Promise.all(pics.map((f) => picJob("size", msg.get(f.f), () => messenger.imageSize(f.f), null, true).then((s) => { if (p.imageFits(s)) imgSizes.set(f.f, { width: s.width, height: s.height }); }, () => {})));
     if (conv !== current) return;
     const m = stored[from];
     threadFrom = { time: m.time, at: m.at, id: m.id };
@@ -3181,6 +3262,7 @@ function showImage(url, name, gif = null, f = null, locked = false) {
     save,
   );
   d.classList.add("viewer");
+  d.setAttribute("aria-label", name);
   if (f) d.dataset.f = f; // closed when the picture's message is gone (a disappearing picture, deleted)
   d.addEventListener("click", () => d.close());
 }
@@ -3229,10 +3311,11 @@ const picJobs = [];
 let picRunning = 0;
 const PIC_PARALLEL = 2;
 
-function picJob(kind, time, fn, el = null, settle = false) {
+/** `m`: the picture's message; its `time` (seconds) orders the jobs, and where that is the same, `at` (when stored). */
+function picJob(kind, m, fn, el = null, settle = false) {
   const conv = current;
   return new Promise((resolve, reject) => {
-    picJobs.push({ fill: kind === "fill", time: time ?? 0, el, conv, drop: settle ? () => resolve(undefined) : null, run: () => fn().then(resolve, reject) });
+    picJobs.push({ fill: kind === "fill", time: m?.time ?? 0, at: m?.at ?? 0, el, conv, drop: settle ? () => resolve(undefined) : null, run: () => fn().then(resolve, reject) });
     queueMicrotask(pumpPictures); // after the whole thread is drawn, so the order is decided over all its pictures
   });
 }
@@ -3251,7 +3334,8 @@ function pumpPictures() {
     for (let i = 1; i < picJobs.length; i++) {
       const a = picJobs[i];
       const b = picJobs[best];
-      if (a.rank > b.rank || (a.rank === b.rank && a.time > b.time)) best = i;
+      // (Pictures sent together share their second: the one stored last is the newest.)
+      if (a.rank > b.rank || (a.rank === b.rank && (a.time > b.time || (a.time === b.time && a.at > b.at)))) best = i;
     }
     const [job] = picJobs.splice(best, 1);
     if (job.conv !== current) {
@@ -3301,7 +3385,7 @@ function fileView(m) {
       return img;
     }
     // A size already read (and checked) this session is not read again.
-    const sized = known ? Promise.resolve(known) : picJob("size", m.time, () => messenger.imageSize(f.f), img);
+    const sized = known ? Promise.resolve(known) : picJob("size", m, () => messenger.imageSize(f.f), img);
     sized.then(async (size) => {
       if (!p.imageFits(size)) {
         const why = size ? tr("msg.tooBig", { w: i18n.num(size.width), h: i18n.num(size.height) }) : tr("msg.cannotShow");
@@ -3314,7 +3398,7 @@ function fileView(m) {
       placeImage(img, size);
       // Put together from its stored parts only when it nears the screen: a long thread does not read all its pictures.
       await nearScreen(img);
-      const b = await picJob("fill", m.time, () => messenger.fileBlob(f.f, f.mime), img);
+      const b = await picJob("fill", m, () => messenger.fileBlob(f.f, f.mime), img);
       if (!b) throw new Error("no_file");
       let url = objectUrls.get(f.f);
       if (!url) {
@@ -4020,7 +4104,7 @@ function showGallery(items, start) {
   let i = start;
   let url = null;
   const stage = h("div", { class: "fv-stage" });
-  const cap = h("div", { class: "fv-cap" });
+  const cap = h("div", { class: "fv-cap", id: `dialog-${++dialogIds}` });
   const prev = h("button", { class: "fv-nav prev", "aria-label": tr("files.prev"), title: tr("files.prev"), onclick: (e) => { e.stopPropagation(); step(-1); } }, icon("back"));
   const next = h("button", { class: "fv-nav next", "aria-label": tr("files.next"), title: tr("files.next"), onclick: (e) => { e.stopPropagation(); step(1); } }, icon("back"));
   const d = dialog(
@@ -4028,6 +4112,7 @@ function showGallery(items, start) {
     prev, stage, next, cap,
   );
   d.classList.add("viewer", "gallery");
+  d.setAttribute("aria-labelledby", cap.id); // the shown file's name and where it is from
   d.addEventListener("click", (e) => { if (!e.target.closest("video, .fv-cap button")) d.close(); });
   d.addEventListener("close", () => { if (url) URL.revokeObjectURL(url); });
   d.addEventListener("keydown", (e) => {
@@ -4358,7 +4443,7 @@ async function showDevices() {
  * must be saved, and only then is it added to the device list (replacing an earlier one).
  */
 function showPaperKey(onDone = () => {}) {
-  const err = h("div", { class: "error" });
+  const err = h("div", { class: "error", role: "alert" });
   const pw = h("input", { type: "password", autocomplete: "current-password" });
   const go = h("button", { class: "btn primary", type: "submit", text: tr("common.continue") });
   const body = h(
@@ -4391,7 +4476,7 @@ function showPaperKey(onDone = () => {}) {
 }
 
 function showPaperKeyText(d, prepared, onDone) {
-  const err = h("div", { class: "error" });
+  const err = h("div", { class: "error", role: "alert" });
   const saved = h("input", { type: "checkbox" });
   const go = h("button", { class: "btn primary", text: tr("pk.activate"), disabled: true });
   saved.addEventListener("change", () => (go.disabled = !saved.checked));
@@ -4436,6 +4521,7 @@ async function logout(forget) {
   }
   messenger?.stop();
   messenger = null;
+  prefs = {};
   current = null;
   for (const f of [...pictures.keys()]) dropPicture(f);
   imgSizes.clear();
