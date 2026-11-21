@@ -82,7 +82,9 @@ const sending = new Map();
 // are sent at once rather than lost.
 const heldMsgs = new Map();
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden") for (const e of [...heldMsgs.values()]) e.fire();
+  if (document.visibilityState !== "hidden") return;
+  for (const e of [...heldMsgs.values()]) e.fire();
+  messenger?.flushReads().catch(() => {}); // a phone may freeze the page before the reads would have gone
 });
 
 // ── tiny DOM helpers ────────────────────────────────────────────────────────────────────────────────────────────
@@ -1401,6 +1403,11 @@ async function enter({ store, account, handle, home }) {
     checkVersion(); // the server may have been restarted with a new client
   });
   messenger.addEventListener("incoming", (e) => onIncoming(e.detail));
+  // Read here or on an own device: once nothing waits, a notification shown for it has nothing left to say.
+  messenger.addEventListener("read", () => {
+    renderSidebar();
+    if (!waiting()) notify.clear().catch(() => {});
+  });
   messenger.addEventListener("link", (e) => showLinkRequest(e.detail));
   messenger.addEventListener("error", (e) => {
     console.warn(e.detail.message);
@@ -1435,6 +1442,7 @@ function showReplaced() {
 function wake() {
   if (document.visibilityState !== "visible") return;
   messenger?.wake();
+  if (current && document.hasFocus()) messenger?.markRead(current).catch(() => {});
   notify.clear().catch(() => {});
   updateBell();
   checkVersion();
@@ -1446,18 +1454,22 @@ addEventListener("online", wake);
 
 // ── notifications ───────────────────────────────────────────────────────────────────────────────────────────────
 
-const unread = new Set(); // conversations with something new since the page was last looked at
-
 /**
  * The tab title: "(N) Murmo" while anything waits — unread conversations and pending requests, counted once each —
  * and the page's own title otherwise. Only the count leaves the tab, never who or what.
  */
 function updateTitle() {
+  const n = waiting();
+  document.title = n ? `(${n}) Murmo` : tr("page.title");
+}
+
+/** How many conversations wait for the user: unread on all own devices, and pending requests, counted once each. */
+function waiting() {
   let n = 0;
   for (const c of messenger?.contactList() ?? []) {
-    if (c.state === "incoming" || (c.state === "accepted" && unread.has(c.account))) n++;
+    if (c.state === "incoming" || (c.state === "accepted" && messenger.isUnread(c.account))) n++;
   }
-  document.title = n ? `(${n}) Murmo` : tr("page.title");
+  return n;
 }
 
 function onIncoming({ conv, kind }) {
@@ -1467,9 +1479,7 @@ function onIncoming({ conv, kind }) {
   const text = tr(key, { who });
   // Said to a screen reader in the page: the thread itself is not a live region (it is redrawn, older messages come).
   if (document.visibilityState === "visible") announce(text);
-  if (looking && conv === current) return;
-  unread.add(conv);
-  renderSidebar();
+  if (looking && conv === current) return void messenger.markRead(conv).catch(() => {});
   if (looking || !settings().notify) return;
   notify.show(text).catch(() => {});
 }
@@ -1682,7 +1692,7 @@ function convItem(c) {
     h("span", { class: "name" }, name, h("span", { class: "tag", text: tag })),
     c.state === "incoming" ? h("span", { class: "badge", text: tr("side.badgeNew") }) : null,
     c.state === "outgoing" ? h("span", { class: "badge muted", text: tr("side.badgeWaiting") }) : null,
-    c.state === "accepted" && unread.has(c.account) ? h("span", { class: "unread", "aria-label": tr("side.unread") }) : null,
+    c.state === "accepted" && messenger.isUnread(c.account) ? h("span", { class: "unread", "aria-label": tr("side.unread") }) : null,
     c.fork ? h("span", { class: "badge", text: "!" }) : null,
   );
 }
@@ -1945,7 +1955,7 @@ function openConversation(account, form = false) {
     history.pushState({ murmo: 1 }, "");
     pushed = true;
   }
-  if (current) unread.delete(current);
+  if (current) messenger.markRead(current).catch(() => {});
   renderSidebar();
   const c = current && messenger.contacts.get(current);
   ui.shape = shape(c);
@@ -4526,7 +4536,6 @@ async function logout(forget) {
   for (const f of [...pictures.keys()]) dropPicture(f);
   imgSizes.clear();
   ui.sideList = null;
-  unread.clear();
   updateTitle();
   if (session) await id.logout(api, session.home, session.token);
   session = null;

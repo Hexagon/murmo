@@ -2,8 +2,9 @@
 // file transfer (docs/DESIGN.md). No DOM: the UI listens to events.
 //
 // Events: "status" (online/offline), "contacts", "messages" ({ conv }), "gifs" (the collection changed), "names" (a
-// device nickname changed), "link" ({ request, code }), "file" ({ f }), "incoming" ({ conv, kind }: something from a
-// contact the user should hear about), "removed" (this device was removed), "error" ({ message }).
+// device nickname changed), "link" ({ request, code }), "file" ({ f }), "incoming" ({ conv, kind, id }: something from
+// a contact the user should hear about), "read" ({ conv }: something unread in it is no longer, read here or on an own
+// device), "removed" (this device was removed), "error" ({ message }).
 
 import * as rc from "../vendor/rootcard/src/index.js";
 import * as p from "./protocol.js";
@@ -52,6 +53,10 @@ export function isStorageFull(err) {
 /** Receipts are collected for this long and sent together (a mailbox read after a while away is one receipt). */
 const RECEIPT_WAIT = 400;
 const RECEIPT_MAX = 200;
+/** Most message ids kept unread or read ahead per conversation, and sent in one "read" (DESIGN.md §6.11). */
+const UNREAD_MAX = 200;
+/** How long reads are gathered before they go to the own devices (ms): reading along in an open chat sends few. */
+const READ_DELAY = 1500;
 /** Longest retention a conversation can be set to (seconds); 0 keeps messages until the conversation is deleted. */
 export const RETENTION_MAX = 10 * 365 * 24 * 3600;
 const PRUNE_EVERY = 60_000;
@@ -267,6 +272,7 @@ export class Messenger extends EventTarget {
     this.receipts = new Map(); // account → Set(message id): arrived here, the sender is told soon
     this.early = new Set(); // receipts that came before this device had stored the message
     this.timed = new Map(); // message id → { conv, at (ms) }: disappearing messages and what they leave, by deadline
+    this.reads = new Map(); // conv → Set(message id): read here, the own devices are told soon (§6.11)
   }
 
   emit(type, detail) {
@@ -561,6 +567,7 @@ export class Messenger extends EventTarget {
     await this.flushFiles();
     await this.fetchMissingGifs();
     await this.askWanted();
+    await this.flushReads();
   }
 
   async rotatePrekey() {
@@ -657,7 +664,11 @@ export class Messenger extends EventTarget {
     if (!c) return;
     c.state = state;
     c.updated = p.now();
-    if (state === "declined") c.declined = c.updated; // older requests from this sender are replays (handleMessage)
+    if (state === "declined") {
+      c.declined = c.updated; // older requests from this sender are replays (handleMessage)
+      delete c.unread;
+      delete c.readAhead;
+    }
     await this.saveContact(c);
     if (state === "declined") await this.store.deleteConversation(account);
     await this.sendOwn("sync", account, { contact: { account, state } });
@@ -688,7 +699,9 @@ export class Messenger extends EventTarget {
     for (const c of [...this.contacts.values()]) {
       if (only && c.account !== only) continue;
       const before = this.cutoff(c.account);
-      if (before && (await this.store.pruneConversation(c.account, before))) this.emit("messages", { conv: c.account });
+      if (!before || !(await this.store.pruneConversation(c.account, before))) continue;
+      await this.settleUnread(c.account);
+      this.emit("messages", { conv: c.account });
     }
   }
 
@@ -1016,6 +1029,7 @@ export class Messenger extends EventTarget {
           await this.forgetPendingFile(id);
         }
         await this.store.replaceMessage(gone, f);
+        await this.dropUnread(m.conv, [id]); // it waited unread too long and is gone: nothing waits any longer
         if (gone.until > now) this.timed.set(id, { conv: m.conv, at: gone.until });
         else await this.store.deleteMessage(id);
         convs.add(m.conv);
@@ -1176,7 +1190,7 @@ export class Messenger extends EventTarget {
         this.queueReceipt(peer, m.id); // also for a copy we already have: the first receipt may have been lost
         if (!(await this.isNew({ id: m.id, conv: peer, dir: "in", time: m.time, device: m.from.device }))) return;
         await this.record({ id: m.id, conv: peer, dir: "in", time: m.time, kind: "text", text: String(m.body?.text ?? "").slice(0, TEXT_MAX), device: m.from.device });
-        this.emit("incoming", { conv: peer, kind: "text" });
+        await this.arrived(peer, m.id, "text");
         return;
       case "ephemeral": {
         if (c?.state !== "accepted") return;
@@ -1184,7 +1198,7 @@ export class Messenger extends EventTarget {
         if (!e) return;
         if (e.file) {
           // A picture counts as arrived when its content is here (as a file).
-          if (await this.onFileMeta(m, peer, "in", e)) this.emit("incoming", { conv: peer, kind: "ephemeral" });
+          if (await this.onFileMeta(m, peer, "in", e)) await this.arrived(peer, m.id, "ephemeral");
           return;
         }
         this.queueReceipt(peer, m.id);
@@ -1194,7 +1208,7 @@ export class Messenger extends EventTarget {
         const wait = Math.min(e.wait, this.ephemeralWait(peer));
         if ((m.time + wait) * 1000 <= Date.now()) return;
         await this.record({ id: m.id, conv: peer, dir: "in", time: m.time, kind: "ephemeral", text: e.text, ttl: e.ttl, wait, device: m.from.device });
-        this.emit("incoming", { conv: peer, kind: "ephemeral" });
+        await this.arrived(peer, m.id, "ephemeral");
         return;
       }
       case "receipt":
@@ -1211,7 +1225,7 @@ export class Messenger extends EventTarget {
         return;
       case "file":
         if (c?.state !== "accepted") return;
-        if (await this.onFileMeta(m, peer, "in")) this.emit("incoming", { conv: peer, kind: "file" });
+        if (await this.onFileMeta(m, peer, "in")) await this.arrived(peer, m.id, "file");
         return;
       default:
         return;
@@ -1266,7 +1280,11 @@ export class Messenger extends EventTarget {
         const c = s && this.contacts.get(s.account);
         if (c && ["accepted", "blocked", "declined"].includes(s.state)) {
           c.state = s.state;
-          if (s.state === "declined") c.declined = Math.max(c.declined ?? 0, Number.isSafeInteger(m.time) ? m.time : 0);
+          if (s.state === "declined") {
+            c.declined = Math.max(c.declined ?? 0, Number.isSafeInteger(m.time) ? m.time : 0);
+            delete c.unread;
+            delete c.readAhead;
+          }
           await this.saveContact(c);
           if (s.state === "declined") await this.store.deleteConversation(s.account);
           this.emit("messages", { conv: s.account });
@@ -1296,6 +1314,9 @@ export class Messenger extends EventTarget {
         return;
       case "names":
         if (conv === this.me.account) await this.mergeNames(m.body);
+        return;
+      case "read":
+        if (conv !== this.me.account) await this.applyRead(conv, m.body?.ids);
         return;
       default:
         return;
@@ -2260,6 +2281,7 @@ export class Messenger extends EventTarget {
     }
     const t = { id: m.id, conv: m.conv, dir: m.dir, time: m.time, at: m.at, device: m.device, ...extra };
     await this.store.replaceMessage(t, f);
+    await this.dropUnread(m.conv, [m.id]); // taken back or deleted before it was read: nothing waits any longer
     this.emit("messages", { conv: m.conv });
   }
 
@@ -2560,6 +2582,111 @@ export class Messenger extends EventTarget {
     if (!changed) return;
     await this.store.setSecret("names", capNames(names));
     this.emit("names");
+  }
+
+  // ── unread, the same on all own devices (DESIGN.md §6.11) ─────────────────────────────────────────────────────
+  //
+  // Each conversation keeps the ids of the contact's messages that have not been read (`unread`) in the encrypted
+  // contact record, so it survives a reload and goes with a history hand-over. Reading a conversation on one device
+  // sends those ids to the own other devices in a "read" message, and they take them off their lists too. Ids are
+  // exact where times are not: a contact's devices can have clocks that disagree. A "read" can come before the message
+  // itself (it is another sender's queue); its ids wait in `readAhead` so that the message does not arrive unread.
+
+  /** Whether the conversation with `account` has a message the user has not read on any own device. */
+  isUnread(account) {
+    return !!this.contacts.get(account)?.unread?.length;
+  }
+
+  /** A message from a contact arrived (text, file, disappearing): unread, unless an own device has read it already. */
+  async arrived(conv, id, kind) {
+    const c = this.contacts.get(conv);
+    if (!c) return;
+    if (c.readAhead?.includes(id)) {
+      c.readAhead = c.readAhead.filter((x) => x !== id);
+      if (!c.readAhead.length) delete c.readAhead;
+      await this.saveContact(c);
+      return; // read on another own device already: nothing to hear about
+    }
+    if (!c.unread?.includes(id)) {
+      c.unread = [...(c.unread ?? []), id].slice(-UNREAD_MAX);
+      await this.saveContact(c);
+    }
+    this.emit("incoming", { conv, kind, id });
+  }
+
+  /** The user has seen the conversation with `conv` here: nothing in it is unread, here and soon on the own devices. */
+  async markRead(conv) {
+    const c = this.contacts.get(conv);
+    if (!c?.unread?.length) return;
+    const ids = c.unread;
+    delete c.unread;
+    await this.saveContact(c);
+    this.emit("read", { conv });
+    const q = this.reads.get(conv) ?? new Set();
+    for (const id of ids) q.add(id);
+    this.reads.set(conv, q);
+    clearTimeout(this.readTimer);
+    this.readTimer = setTimeout(() => this.flushReads().catch(() => {}), READ_DELAY); // kept for the next connection
+  }
+
+  /** Tell the own other devices what was read here now. What cannot go is kept for the next connection. */
+  async flushReads() {
+    clearTimeout(this.readTimer);
+    if (this.status !== "online" || !this.reads.size) return;
+    const owns = await this.ownTargets();
+    for (const [conv, q] of [...this.reads]) {
+      this.reads.delete(conv);
+      if (!owns.length) continue; // no other device to tell
+      try {
+        await this.deliver(owns, "read", conv, { ids: [...q].slice(-UNREAD_MAX) });
+      } catch (e) {
+        const again = this.reads.get(conv) ?? new Set();
+        for (const id of q) again.add(id);
+        this.reads.set(conv, again);
+        if (OFFLINE.includes(e?.message)) return;
+        throw e;
+      }
+    }
+  }
+
+  /** "read" from an own device: `{ ids }`, messages of `conv` read there. */
+  async applyRead(conv, ids) {
+    const c = this.contacts.get(conv);
+    if (!c || !Array.isArray(ids)) return;
+    const read = ids.slice(0, UNREAD_MAX).filter((id) => typeof id === "string" && id.length <= 64);
+    const unread = c.unread ?? [];
+    const left = unread.filter((id) => !read.includes(id));
+    // Not here yet: remembered, so that it does not arrive unread.
+    const ahead = [];
+    for (const id of read) {
+      if (!unread.includes(id) && !c.readAhead?.includes(id) && !(await this.store.hasMessage(id))) ahead.push(id);
+    }
+    if (left.length === unread.length && !ahead.length) return;
+    if (left.length) c.unread = left;
+    else delete c.unread;
+    if (ahead.length) c.readAhead = [...(c.readAhead ?? []), ...ahead].slice(-UNREAD_MAX);
+    await this.saveContact(c);
+    if (left.length !== unread.length) this.emit("read", { conv });
+  }
+
+  /** Take messages that are gone (taken back, deleted, run out) off the unread list of `conv`. */
+  async dropUnread(conv, ids) {
+    const c = this.contacts.get(conv);
+    if (!c?.unread?.some((id) => ids.includes(id))) return;
+    const left = c.unread.filter((id) => !ids.includes(id));
+    if (left.length) c.unread = left;
+    else delete c.unread;
+    await this.saveContact(c);
+    this.emit("read", { conv });
+  }
+
+  /** Take the messages that are no longer stored (after a prune) off the unread list of `conv`. */
+  async settleUnread(conv) {
+    const c = this.contacts.get(conv);
+    if (!c?.unread?.length) return;
+    const gone = [];
+    for (const id of c.unread) if (!(await this.store.hasMessage(id))) gone.push(id);
+    if (gone.length) await this.dropUnread(conv, gone);
   }
 
   // ── recently used emoji, encrypted on this device ──────────────────────────────────────────────────────────────
