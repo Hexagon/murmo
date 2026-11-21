@@ -24,7 +24,7 @@
 - [x] Run the browser smoke test in CI
 - [x] Per-sender quota in the file queue: per (sender account, device) and per sender account, checked by
       `relay-space` too (`MURMO_FILE_QUEUE_SENDER_MB`, `MURMO_FILE_QUEUE_ACCOUNT_MB`)
-- [x] Version and commit shown under "Säkerhet och integritet" (`/api/v1/info`: `version`, `commit`, `source`)
+- [x] Version and commit shown under "Security and privacy" (`/api/v1/info`: `version`, `commit`, `source`)
 - [x] Bounded memory for files: stored in IndexedDB in 48 KiB parts as they are read or arrive, hashed incrementally
       (pure-JS SHA-256), sent part by part; chunks before their `file` message wait in IndexedDB within 16 MiB per
       sender account and 64 MiB in all (`DESIGN.md` §8.1, §9)
@@ -136,7 +136,19 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [ ] API reference (§10) is missing the log and federation routes, `link-decline`, `remote-lookup`/`remote-devices`,
       `ready.remote`, and most `info` fields; README misses the `ws_binary` fuzz target and fmt/clippy in CI;
       `lib.rs` module docs miss 8 variables; the component diagram lacks federation, file queue and push
-- [ ] English docs use Swedish UI labels ("Säkerhet och integritet"); split §12 table (T18 is now in order)
+- [x] English docs use Swedish UI labels ("Security and privacy"): now "Security and privacy"
+- [ ] Split §12 table (T18 is now in order)
+- [x] **In-app help that disagreed with the code** (de/en/es/sv): the server writes down who wrote to whom as keyed
+      hashes (`help.server.2/3`, `page.faq1a`, `compose.foot` said nothing was written down); forward secrecy has a
+      window of about four weeks (`page.sec4`); a recovery-card reset logs out every device and the paper key
+      (`page.faq4a`, `card.intro`); Microsoft's push service is named (`help.notify.2`, `acct.notifyHint`)
+- [ ] **In-app help still missing:** `help.server.1` and `terms.privacy.1` against §11 (push endpoints, logs of
+      identities from other homes, the outgoing queue for unreachable servers); device limits (8 with the paper key,
+      32 changes per list) with translated `err.too_many_devices` / `err.bad_devices`, and that a new paper key changes
+      the safety code; a help section on disappearing messages (`timer.on` says "after reading", but there are no read
+      receipts); local search (`about.3`, `page.check3` say "No search"); per-conversation retention; files above
+      50 MB (never queued) and the 1 GB limit (`help.files.2`); federation (the part after @ is the Murmo server, an
+      identity on two servers has two separate device lists); a device away for 14 days misses what was sent
 
 ### P2: robustness and federation details
 
@@ -266,7 +278,7 @@ and A6 do the operator guide in review P2. A1 does the P3 item on the mobile emp
    - The same workflow as A2 builds `murmo-<version>-x86_64-linux-musl.tar.gz` and `…-aarch64-…`: the binary,
      `client/`, the licences and `deploy/`. It also builds a client-only archive made reproducibly (`tar --sort=name
      --mtime=@0 --owner=0 --group=0 --numeric-owner`, `gzip -n`) and one `SHA256SUMS` for all of them, in the release
-     notes. "Säkerhet och integritet" links them next to the commit
+     notes. "Security and privacy" links them next to the commit
    - `deploy/murmo.service`: `DynamicUser`, `StateDirectory=murmo`, `EnvironmentFile=/etc/murmo/murmo.env`,
      `NoNewPrivileges`, `ProtectSystem=strict`. HOSTING.md gives the steps: download, `sha256sum -c`, extract to
      `/opt/murmo`, edit the env file, `systemctl enable --now murmo`. To update, replace `/opt/murmo` and restart
@@ -302,7 +314,7 @@ L longer.
        host key compromise as a threat. Users and operators decide on these texts; they must be true first
 2. [x] **Accessibility and polish** (S each, review P3): direct benefit for every user, no protocol risk
 3. [x] **Published release hashes** (S, done by A5): every release a reproducible client archive and its SHA-256 list in the release
-       notes; the "Säkerhet och integritet" view links them next to the commit it already shows. The first, cheap half
+       notes; the "Security and privacy" view links them next to the commit it already shows. The first, cheap half
        of T6: anyone can check what a server serves
 4. [ ] **Hybrid post-quantum envelope** (M, `DESIGN.md` §15.2): ML-KEM-768 next to X25519 in signed prekeys,
        envelope `v: 2`. Small change, nothing for the user to do, and it only protects traffic recorded after it ships,
