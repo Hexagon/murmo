@@ -58,6 +58,7 @@ export default {
 
   // ── common ──
   "common.close": "Cerrar",
+  "common.back": "Atrás",
   "common.cancel": "Cancelar",
   "common.continue": "Continuar",
   "common.copy": "Copiar",
@@ -247,6 +248,7 @@ export default {
   "card.intro": "Guarda la tarjeta antes de crear la cuenta. Es la única forma de restablecer una contraseña olvidada o trasladar la identidad. Quien tenga la tarjeta controla la identidad: guárdala sin conexión.",
   "card.downloadFile": "Descargar archivo de tarjeta",
   "card.saved": "He guardado mi tarjeta de recuperación en un lugar seguro.",
+  "card.backHint": "Todavía no se ha creado nada. Si vuelves atrás, esta tarjeta no se usará y recibirás una nueva al continuar.",
 
   // ── linking a device ──
   "link.noOther": "No me queda ningún otro dispositivo",

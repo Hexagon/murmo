@@ -12,7 +12,7 @@
   --panel: #ffffff;
   --text: #141c22;
   --muted: #56636c;
-  --faint: #86929a;
+  --faint: #5f6b73;
   --line: #dfe5e9;
   --bubble: #e7eef0;
   --accent: #1d5c6e;
@@ -41,7 +41,7 @@
     --panel: #18222a;
     --text: #e6edf0;
     --muted: #9fadb5;
-    --faint: #6f7e87;
+    --faint: #8c9aa3;
     --line: #26343d;
     --bubble: #20303a;
     --accent: #5fb4c4;
@@ -66,7 +66,7 @@
   --panel: #18222a;
   --text: #e6edf0;
   --muted: #9fadb5;
-  --faint: #6f7e87;
+  --faint: #8c9aa3;
   --line: #26343d;
   --bubble: #20303a;
   --accent: #5fb4c4;
@@ -96,10 +96,14 @@ body {
 }
 button, input, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
-:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* The ring in the accent itself: at least 3:1 against every background (--focus is only a halo, too light alone). */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .hidden { display: none !important; }
 .spinner { width: 16px; height: 16px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+/* Read by screen readers, not shown. */
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .drop { outline: 2px dashed var(--accent); outline-offset: -8px; }
 
 /* ── buttons and fields ───────────────────────────────────────────────────────────────────────────────────────── */
@@ -169,6 +173,7 @@ pre.cardtext {
 .auth-foot { display: flex; flex-direction: column; align-items: center; gap: 12px; margin-top: 16px; }
 .auth-foot .theme, .auth-foot .lang { width: 240px; }
 .auth .card > .link { display: block; margin: 14px auto 0; }
+.card-go { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .auth .about { margin-top: 18px; }
 /* An opened invite link (#add=): whom it is to, shown exactly; the link is not signed, so it never says who sent it. */
 .invite-note { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; background: var(--panel); }

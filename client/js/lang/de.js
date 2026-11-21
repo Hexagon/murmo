@@ -58,6 +58,7 @@ export default {
 
   // ── common ──
   "common.close": "Schließen",
+  "common.back": "Zurück",
   "common.cancel": "Abbrechen",
   "common.continue": "Weiter",
   "common.copy": "Kopieren",
@@ -247,6 +248,7 @@ export default {
   "card.intro": "Speichere die Karte, bevor das Konto erstellt wird. Nur mit ihr kannst du ein vergessenes Passwort zurücksetzen oder die Identität umziehen. Wer die Karte hat, kontrolliert die Identität – bewahre sie offline auf.",
   "card.downloadFile": "Kartendatei herunterladen",
   "card.saved": "Ich habe meine Wiederherstellungskarte an einem sicheren Ort gespeichert.",
+  "card.backHint": "Noch ist nichts angelegt. Gehst du zurück, wird diese Karte nicht verwendet; beim Fortfahren bekommst du eine neue.",
 
   // ── linking a device ──
   "link.noOther": "Ich habe kein anderes Gerät mehr",

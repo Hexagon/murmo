@@ -68,6 +68,8 @@ async function named(pg, where, labels = {}) {
     for (const el of scope.querySelectorAll("input:not([type=hidden]), select, textarea")) {
       if (el.offsetParent !== null && !name(el)) out.push(el.outerHTML.slice(0, 80));
     }
+    // A dialog is named too: by its heading (`aria-labelledby`) or `aria-label`.
+    if (scope !== document && !name(scope)) out.push(`dialog ${scope.className || "(no class)"} has no name`);
     for (const [text, sel] of Object.entries(labels)) {
       const label = [...scope.querySelectorAll(".field > label")].find((l) => l.textContent === text);
       const target = label && (label.control ?? document.querySelector(`[aria-labelledby="${label.id}"]`));
@@ -77,10 +79,22 @@ async function named(pg, where, labels = {}) {
   }, labels);
   if (bad.length) throw new Error(`${where}: form fields without an accessible name: ${bad.join("; ")}`);
 }
-async function register(pg, user, tag) {
+/** The login and register tabs are a tab list: tabs, the chosen one selected, and a panel they control. */
+async function tabsOk(pg, selected) {
+  const t = await pg.evaluate(() => {
+    const tabs = [...document.querySelectorAll(".auth .tabs[role=tablist] > [role=tab]")];
+    const on = tabs.filter((x) => x.getAttribute("aria-selected") === "true");
+    const panel = document.getElementById(on[0]?.getAttribute("aria-controls"));
+    return { n: tabs.length, on: on.map((x) => x.textContent), panel: panel?.getAttribute("role"), by: panel?.getAttribute("aria-labelledby") === on[0]?.id };
+  });
+  if (t.n !== 2 || t.on.join() !== selected || t.panel !== "tabpanel" || !t.by) throw new Error(`auth tabs: ${JSON.stringify(t)}`);
+}
+async function register(pg, user, tag, back = false) {
   await pg.screenshot({ path: `${shots}/${tag}-1-login.png` });
   await named(pg, "login", { Identifierare: "input[autocomplete=username]", Lösenord: "input[type=password]", "Var finns din identitet?": ".seg[role=group]" });
+  await tabsOk(pg, "Logga in");
   await clickText(pg, "Skapa konto");
+  await tabsOk(pg, "Skapa konto");
   await named(pg, "register", { Användarnamn: "input" });
   const inputs = await pg.$$("form input");
   await inputs[0].type(user);
@@ -89,6 +103,18 @@ async function register(pg, user, tag) {
   await pg.screenshot({ path: `${shots}/${tag}-2-register.png` });
   await clickText(pg, "Fortsätt");
   await pg.waitForSelector("pre.cardtext", { timeout: 60000 });
+  if (back) {
+    // The recovery card has a way back: nothing was made, the name is kept, and continuing makes a new card.
+    const card = await pg.$eval("pre.cardtext", (e) => e.textContent);
+    await clickText(pg, "Tillbaka");
+    await pg.waitForSelector(".auth form input[autocomplete=username]", { timeout: 5000 });
+    const kept = await pg.$eval(".auth form input[autocomplete=username]", (i) => i.value);
+    if (kept !== user) throw new Error(`back from the card: the name is ${kept}`);
+    const pws = await pg.$$(".auth form input[type=password]");
+    for (const i of pws) await i.type("correct horse battery staple");
+    await clickText(pg, "Fortsätt");
+    await pg.waitForFunction((old) => document.querySelector("pre.cardtext") && document.querySelector("pre.cardtext").textContent !== old, { timeout: 60000 }, card);
+  }
   await pg.screenshot({ path: `${shots}/${tag}-3-card.png` });
   await pg.click(".check input");
   await clickText(pg, "Skapa konto");
@@ -112,7 +138,7 @@ try {
     await pg.browserContext().close();
   }
   const a = await page("alice");
-  const aliceHandle = await register(a, "Alice", "a");
+  const aliceHandle = await register(a, "Alice", "a", true);
   // Invite link (DESIGN.md §6.1): "Bjud in någon" gives a link with the address in the fragment.
   await a.click(".welcome .invite-btn");
   await a.waitForSelector("dialog.invite input", { visible: true, timeout: 5000 });
@@ -138,6 +164,10 @@ try {
   });
   const qrRead = jsQR(Uint8ClampedArray.from(qrPixels), 400, 400);
   if (qrRead?.data !== aliceLink) throw new Error(`QR code reads ${qrRead?.data}`);
+  // A toast over a modal dialog is drawn in the dialog (not under its backdrop, and not in the inert page behind it),
+  // and goes back to the page when the dialog closes.
+  await clickText(a, "Kopiera länk");
+  await a.waitForSelector("dialog.invite .toasts[role=status] .toast", { timeout: 5000 });
   // Printed: the code and the address, without the buttons, the field and the explanation.
   await a.emulateMediaType("print");
   const printed = await a.evaluate(() => {
@@ -149,6 +179,7 @@ try {
   if (!printed.qr || !printed.addr || printed.actions || printed.field || printed.app) throw new Error(`printed invite: ${JSON.stringify(printed)}`);
   await a.keyboard.press("Escape");
   await a.waitForFunction(() => !document.querySelector("dialog.invite"), { timeout: 5000 });
+  if (!(await a.evaluate(() => document.querySelector(".toasts")?.parentNode === document.body))) throw new Error("the toasts did not come back to the page");
   // On a narrow screen the empty list is the start page: the identifier and "Bjud in någon" are there too.
   await a.setViewport({ width: 390, height: 800 });
   await a.waitForSelector(".sidebar .empty .invite-btn", { visible: true, timeout: 5000 });
@@ -776,6 +807,39 @@ try {
   await clickText(a2, "Använd pappersnyckeln");
   await a2.waitForFunction(() => document.querySelector("dialog h2")?.textContent === "Välkommen tillbaka", { timeout: 30000 });
   await a2.screenshot({ path: `${shots}/a2-2-welcome-back.png` });
+  // Settings of an account are in its encrypted store, not in plain localStorage (T12).
+  for (const pg of [a, b, a2]) {
+    const keys = await pg.evaluate(() => Object.keys(localStorage).filter((k) => /settings/.test(k)));
+    if (keys.length) throw new Error(`settings in localStorage: ${keys}`);
+  }
+  // The installed app's offline screen: with the service worker in place, opening the page without a connection
+  // shows the worker's own screen in the app's language, and the app again once the connection is back.
+  // (Chrome logs the failed loads while offline; those are not counted as problems.)
+  {
+    const off = await page("offline");
+    await off.evaluate(async () => {
+      await navigator.serviceWorker.register("sw.js", { updateViaCache: "none" });
+      await navigator.serviceWorker.ready;
+    });
+    const sw = await browser.waitForTarget((t) => t.type() === "service_worker" && t.browserContext() === off.browserContext(), { timeout: 10000 });
+    const swSession = await sw.createCDPSession();
+    // The worker first when going online: the page's `online` event reloads it through the worker.
+    const offline = async (on) => {
+      if (on) await off.setOfflineMode(true);
+      await swSession.send("Network.enable");
+      await swSession.send("Network.emulateNetworkConditions", { offline: on, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+      if (!on) await off.setOfflineMode(false);
+    };
+    const quietOff = problems.length;
+    await offline(true);
+    await off.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+    await off.waitForFunction(() => document.querySelector("h1")?.textContent === "Ingen anslutning" && document.documentElement.lang === "sv", { timeout: 10000 });
+    await off.screenshot({ path: `${shots}/offline.png` });
+    await offline(false);
+    await off.waitForSelector(".auth .tabs", { timeout: 15000 }); // reloaded by the `online` event
+    problems.length = quietOff;
+    await off.browserContext().close();
+  }
   if (codeA !== codeB) throw new Error("safety codes differ");
 } catch (e) {
   console.log("FAILED", e.message, e.stack?.split("\n").find((l) => l.includes("ui-smoke")));

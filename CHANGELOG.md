@@ -9,7 +9,20 @@ its section and puts the section in the release notes.
 
 ## Unreleased
 
-Nothing yet.
+**For users**
+
+- **Easier with a screen reader and a keyboard.** Toasts and form errors are announced, and so is a new message, once
+  (the whole app is no longer one live region). Dialogs are named by their headings, login and registration are real
+  tabs, the safety code button has a name on phones, and a toast over a dialog is shown and read in it.
+- **Easier to see.** The focus ring and the faintest text have enough contrast, in light and dark.
+- **The recovery card screen has a way back**, and registering offers "Remember this device", as logging in does.
+- **The installed app** has a screen of its own when it is opened without a connection, and an icon that fills the
+  shape the phone gives it. The spinner turns slowly when the system asks for less motion.
+- **Your settings on a device are encrypted** with everything else of your account. They are moved out of the
+  browser's plain storage at your next login.
+- Pictures sent within the same second load newest first, like all others.
+
+**Operators: anything to do?** No.
 
 ## 0.2.0 (2026-11-20)
 

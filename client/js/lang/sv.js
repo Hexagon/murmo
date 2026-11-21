@@ -58,6 +58,7 @@ export default {
 
   // ── common ──
   "common.close": "Stäng",
+  "common.back": "Tillbaka",
   "common.cancel": "Avbryt",
   "common.continue": "Fortsätt",
   "common.copy": "Kopiera",
@@ -247,6 +248,7 @@ export default {
   "card.intro": "Spara kortet innan kontot skapas. Det är det enda sättet att återställa ett glömt lösenord eller flytta identiteten. Den som har kortet kontrollerar identiteten – förvara det offline.",
   "card.downloadFile": "Ladda ner kortfil",
   "card.saved": "Jag har sparat mitt återställningskort på ett säkert ställe.",
+  "card.backHint": "Inget har skapats än. Går du tillbaka används inte det här kortet, och du får ett nytt när du fortsätter.",
 
   // ── linking a device ──
   "link.noOther": "Jag har ingen annan enhet kvar",

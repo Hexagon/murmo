@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex">
+  <title>Murmo</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="offline.css">
+  <script type="module" src="offline.js"></script>
+</head>
+<body>
+  <!-- Shown by the service worker (sw.js) when the installed app opens without a connection. -->
+  <main>
+    <img src="icon.svg" alt="" width="56" height="56">
+    <h1 data-t="title">No connection</h1>
+    <p data-t="text">Murmo opens only from its server, so that what runs here is always what the server serves. Your
+      messages are still on this device, encrypted, and come back when the connection does.</p>
+    <button type="button" id="retry" data-t="retry">Try again</button>
+  </main>
+</body>
+</html>
