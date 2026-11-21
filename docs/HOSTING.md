@@ -14,7 +14,7 @@ On a machine with Docker and the compose plugin, whose ports 80 and 443 are reac
 
 Caddy gets the certificate on first start, and Murmo answers at `https://chat.example.org`. The database and the host
 key are in the volume `murmo-data` (or in `MURMO_DATA`, below). The image is `ghcr.io/hexagon/murmo`, for amd64 and
-arm64, published for every release: `0.2.0`, `0.2` and `latest`. The compose file runs `0.2` (`MURMO_IMAGE`). To run a
+arm64, published for every release: `0.2.1`, `0.2` and `latest`. The compose file runs `0.2` (`MURMO_IMAGE`). To run a
 build of your own (from `main`, or with changes), build the image in the repository and point `.env` at it:
 
 ```sh
