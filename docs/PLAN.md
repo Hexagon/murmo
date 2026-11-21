@@ -136,7 +136,7 @@ against the code at 0.2. Ordered by priority; within a priority, by area. Each i
 - [ ] API reference (§10) is missing the log and federation routes, `link-decline`, `remote-lookup`/`remote-devices`,
       `ready.remote`, and most `info` fields; README misses the `ws_binary` fuzz target and fmt/clippy in CI;
       `lib.rs` module docs miss 8 variables; the component diagram lacks federation, file queue and push
-- [x] English docs use Swedish UI labels ("Security and privacy"): now "Security and privacy"
+- [x] English docs use Swedish UI labels: now the English ones ("Security and privacy")
 - [ ] Split §12 table (T18 is now in order)
 - [x] **In-app help that disagreed with the code** (de/en/es/sv): the server writes down who wrote to whom as keyed
       hashes (`help.server.2/3`, `page.faq1a`, `compose.foot` said nothing was written down); forward secrecy has a
