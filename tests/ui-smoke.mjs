@@ -552,12 +552,20 @@ try {
   }
   await a.waitForFunction(() => [...document.querySelectorAll(".msg.out img.inline.loaded")].filter((x) => x.alt.startsWith("tall-")).length === 5 && !document.querySelector(".uploads .upload:not(.ok)"), { timeout: 60000 });
   await sleep(1500); // stored on Bob's side
+  // The order the pictures are given to the browser (their `src` is set once read from storage) is what the app
+  // decides: the newest first. The order they finish decoding is the browser's, and on a busy machine a small old
+  // picture can finish before a larger new one, so that is only kept to explain a failure.
   await b.evaluate(() => {
+    window.__srcOrder = [];
     window.__loadOrder = [];
-    new MutationObserver(() => {
-      const all = [...document.querySelectorAll(".thread img.inline")];
-      for (const img of all) if (img.classList.contains("loaded") && !window.__loadOrder.includes(img.alt)) window.__loadOrder.push(img.alt);
-    }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ["class"] });
+    new MutationObserver((records) => {
+      for (const r of records) {
+        const img = r.target;
+        if (!img.matches?.(".thread img.inline")) continue;
+        if (r.attributeName === "src" && img.getAttribute("src") && !window.__srcOrder.includes(img.alt)) window.__srcOrder.push(img.alt);
+        if (img.classList.contains("loaded") && !window.__loadOrder.includes(img.alt)) window.__loadOrder.push(img.alt);
+      }
+    }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ["class", "src"] });
   });
   await b.$eval(".side-list .conv", (x) => x.click());
   // (Those far above the screen are not loaded until scrolled to.)
@@ -565,10 +573,10 @@ try {
   await sleep(500);
   const pics = await b.evaluate(() => {
     const s = document.querySelector(".main .scroll");
-    return { order: window.__loadOrder, left: s.scrollHeight - s.scrollTop - s.clientHeight };
+    return { order: window.__srcOrder, loaded: window.__loadOrder, left: s.scrollHeight - s.scrollTop - s.clientHeight };
   });
-  // (Two are read at a time: the newest two may finish in either order.)
-  if (pics.order.slice(0, 2).sort().join() !== "tall-3.png,tall-4.png") throw new Error(`the newest picture was not loaded first: ${pics.order.join(", ")}`);
+  // (Two are read at a time: the newest two may come in either order.)
+  if (pics.order.slice(0, 2).sort().join() !== "tall-3.png,tall-4.png") throw new Error(`the newest picture was not read first: ${pics.order.join(", ")} (finished decoding: ${pics.loaded.join(", ")})`);
   if (!(pics.left < 2)) throw new Error(`the thread was left ${pics.left}px above its bottom once its pictures came`);
   // A lost connection: after a moment a banner says so above everything, and a text held for "Ångra" carries a
   // pending mark instead of looking sent. Taken back here, so nothing is sent; the banner goes when it is back.
