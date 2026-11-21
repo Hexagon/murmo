@@ -342,7 +342,7 @@ export async function open(myDevice, prekeys, packed) {
 
 // ── messages (DESIGN.md §5.3) ───────────────────────────────────────────────────────────────────────────────────
 
-export const KINDS = ["request", "accept", "text", "file", "sync", "history", "receipt", "reaction", "gifs", "names", "retract", "edit", "ephemeral"];
+export const KINDS = ["request", "accept", "text", "file", "sync", "history", "receipt", "reaction", "gifs", "names", "read", "retract", "edit", "ephemeral"];
 
 /** A signed message as bytes. */
 export async function signMessage(fields, deviceKey) {

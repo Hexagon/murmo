@@ -507,6 +507,31 @@ An older client shows the backticks as they are (§12), and search, editing and 
   Enter is always a new line and the send button sends; the keyboard shows a return key (`enterkeyhint`). Ctrl+Enter
   (⌘+Enter) sends anyway. Enter while an input method is composing text no longer sends.
 
+### 6.11 Unread, the same on all own devices
+
+A conversation with a message the user has not read shows a dot in the sidebar and counts in the tab title
+("(N) Murmo"). Reading it on one device takes the dot off on the account's other devices too, and closes the
+notification shown there once nothing else waits.
+
+- **What is unread:** a text, file or disappearing message from the contact, from when it is stored on the device. It
+  is read when its conversation is open on a page that is visible and has the focus: when it is opened, when the page
+  comes back to the front, or when the message arrives while the user looks at it. A pending request counts by its
+  state (§6.1), not here.
+- **Kept by id, not by time.** Each conversation keeps the ids of its unread messages (at most 200, the newest) in
+  the contact record, encrypted at rest (§8.1). A contact's devices can have clocks that disagree, so a "read up to
+  this time" mark could hide a message that arrives later with an earlier time. The list survives a reload and goes
+  with the contacts in a history hand-over (§7).
+- **Own-only `read` message:** reading sends `{ ids: [<message id>, …] }` (at most 200) with `conv` = the contact to
+  the own other devices, gathered for a moment (1.5 s) so that reading along in an open conversation sends few, and at
+  once when the page goes to the background. What cannot go is sent on the next connection (until the page is
+  closed). A `read` from anyone but an own device is ignored; a contact learns nothing about reading (§6.4).
+- **Before the message:** a `read` can arrive before the message itself (they come from different senders' queues).
+  Ids that are not here yet are kept as read ahead (at most 200), and the message then arrives read, without a
+  notification.
+- A message taken back (§6.6), deleted for me, run out (§6.8) or pruned by retention (§8.1) is no longer unread; a
+  declined conversation forgets its list.
+- Contacts stored before this have no list: nothing in them is unread until something new arrives.
+
 ## 7. Multi-device history
 
 - Every message is also encrypted to the sender's own other devices, with `kind` unchanged and `to` set to that
@@ -1042,6 +1067,7 @@ What clients from before emoji, reactions, the shared GIF collection and code fo
 | `` `inline code` `` and ```` ``` ```` blocks in a text (§6.10) | the text with its backticks, as written; nothing is lost |
 | `gifs` to an own older device | dropped; that device has no collection until it is updated, and then gets only GIFs saved after that. The bytes are pulled with `file-req` (§9.2), so no chunks are pushed to it; a `file-req` for `gif:…` sent to an older device finds no file message and is ignored |
 | `names` to an own older device | dropped; it shows the automatic labels until it is updated, and then only gets the nicknames set after that |
+| `read` to an own older device | dropped; it keeps its own idea of what is unread (only for the open page) until it is updated. An older device sends no `read`, so what is read there stays unread on the newer ones until it is read on one of them |
 
 | a file chunk as a binary frame (§10.2) | not sent to it: an older page does not ask for binary frames in `auth`, so the server lists it in `relay-missed` (`text`), and the sender sends it text frames and offers the file again. A binary chunk queued while it was away stays queued until it expires; such pages last only until the next reload |
 | `relay-grant` | not sent by older devices, so a file they ask for comes on the live budgets as before; an older sender ignores the server's note and paces for the live budgets, which still leaves the transfer within the grant |

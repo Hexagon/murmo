@@ -349,6 +349,53 @@ test("a newly linked device receives the nicknames after the history hand-over",
   await until(async () => (await nina2.names())[nina1.me.device]?.name === "Skrivbordet");
 });
 
+test("unread is the same on all own devices: read on one, read on all", async () => {
+  const conv = bob.me.account;
+  for (const dev of [alice, alice2]) await dev.markRead(conv); // what earlier tests left
+  await until(async () => !alice.isUnread(conv) && !alice2.isUnread(conv));
+
+  // A text from Bob is unread on both of Alice's devices, and kept so (in the encrypted contact record).
+  const { id } = await bob.sendText(alice.me.account, "Har du läst?");
+  await until(async () => alice.isUnread(conv) && alice2.isUnread(conv));
+  assert.deepEqual((await alice2.store.contacts()).find((c) => c.account === conv).unread, [id]);
+
+  // Read on one device: the other is told and takes it off its list too.
+  const read = waitFor(alice2, "read", (d) => d.conv === conv);
+  await alice.markRead(conv);
+  assert.equal(alice.isUnread(conv), false);
+  await read;
+  assert.equal(alice2.isUnread(conv), false);
+  assert.equal((await alice2.store.contacts()).find((c) => c.account === conv).unread, undefined);
+
+  // A "read" that comes before the message: it arrives read, and nothing is said about it.
+  const early = p.b64(p.random(16));
+  await alice2.applyRead(conv, [early]);
+  let heard = false;
+  const listen = (e) => { if (e.detail.id === early) heard = true; };
+  alice2.addEventListener("incoming", listen);
+  await bob.sendText(alice.me.account, "Redan läst", early);
+  await until(async () => (await alice2.messages(conv)).some((m) => m.id === early));
+  await until(async () => alice.isUnread(conv));
+  alice2.removeEventListener("incoming", listen);
+  assert.equal(alice2.isUnread(conv), false);
+  assert.equal(heard, false);
+  await alice.markRead(conv);
+
+  // Taken back before it was read: nothing waits any longer.
+  const gone = await bob.sendText(alice.me.account, "Oj, fel");
+  await until(async () => alice.isUnread(conv) && alice2.isUnread(conv));
+  await bob.retract(alice.me.account, gone.id);
+  await until(async () => !alice.isUnread(conv) && !alice2.isUnread(conv));
+
+  // Only an own device can mark something read: a "read" from a contact is ignored.
+  const kept = await bob.sendText(alice.me.account, "Fortfarande oläst");
+  await until(async () => alice.isUnread(conv));
+  await bob.deliver(await bob.peerTargets(alice.me.account), "read", conv, { ids: [kept.id] });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(alice.isUnread(conv), true);
+  for (const dev of [alice, alice2]) await dev.markRead(conv);
+});
+
 test("retention: old messages are deleted on all own devices, new ones kept", async () => {
   const conv = bob.me.account;
   const old = Math.floor(Date.now() / 1000) - 3 * 86400;
