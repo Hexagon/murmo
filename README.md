@@ -50,8 +50,9 @@ public device keys and what rootcard needs. Full list in [DESIGN.md §11](docs/D
 With Docker: point a DNS name at the machine, set it in `deploy/.env`, and start Murmo with automatic TLS:
 
 ```sh
-cd deploy && cp .env.example .env    # set MURMO_DOMAIN=chat.example.org
-docker compose up -d                 # update: docker compose pull && docker compose up -d
+git clone https://github.com/Hexagon/murmo.git   # or take deploy/ from a release archive
+cd murmo/deploy && cp .env.example .env          # set MURMO_DOMAIN=chat.example.org
+docker compose up -d                             # update: docker compose pull && docker compose up -d
 ```
 
 Your server exchanges messages with other Murmo servers by default; make it private with `MURMO_FEDERATION=off` or a

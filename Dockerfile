@@ -12,7 +12,7 @@
 FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS build
 ARG TARGETARCH
 ARG BUILDARCH
-# The commit shown in the app ("Säkerhet och integritet"); .git is not in the build context.
+# The commit shown in the app ("Security and privacy"); .git is not in the build context.
 ARG MURMO_COMMIT=""
 # 1 for a build from a version tag: the app then links the release page with its checksums.
 ARG MURMO_RELEASE=""
