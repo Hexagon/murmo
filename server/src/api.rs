@@ -239,67 +239,84 @@ pub async fn lookup(
     respond((|| {
         app.limits.by_addr("lookup", addr, 20, 60)?;
         let raw = query(&uri, "handle").ok_or(ApiError::new(400, "bad_handle"))?;
-        let (handle, host) = match raw.rsplit_once('@') {
-            Some((h, d)) => (h.to_string(), Some(d.to_ascii_lowercase())),
-            None => (raw, None),
-        };
-        // `@` this server's own host is the full address a user copies (federation): any identity that uses it.
-        let host = host.filter(|d| {
-            !app.origins()
-                .any(|o| o.split("://").nth(1).is_some_and(|x| x == d))
-        });
-        let h =
-            rootcard::id::parse_handle(&handle).map_err(|_| ApiError::new(400, "bad_handle"))?;
-        let mut found: Vec<(String, String, String)> = Vec::new(); // account, home, username
-        let key = HandleKey {
-            realm: app.cfg.realm.clone(),
-            username: h.username.to_ascii_lowercase(),
-            tag: h.tag.clone(),
-        };
-        for a in app.host.store.by_handle(&key).map_err(ApiError::internal)? {
-            if let Some(s) = app.host.store.load(&a).map_err(ApiError::internal)?
-                && s.vault.is_some()
-                && h.matches(&s.state.username, &s.state.account)
-            {
-                let home = s
-                    .state
-                    .instance
-                    .as_ref()
-                    .map_or_else(|| app.local_home(), |i| i.home.url.clone());
-                found.push((a, home, s.state.username));
-            }
-        }
-        for (a, home, username) in app
-            .db
-            .find_remote(&key.username, &key.tag)
-            .map_err(ApiError::internal)?
-        {
-            if h.matches(&username, &a) {
-                found.push((a, home, username));
-            }
-        }
-        if let Some(host) = &host {
-            found.retain(|(_, home, _)| {
-                remote::origin_of(home)
-                    .is_some_and(|o| o.split("://").nth(1).is_some_and(|x| x == host))
-            });
-        }
-        match found.as_slice() {
-            [] => Err(ApiError::new(404, "unknown_account")),
-            [(account, home, username)] => Ok(json(
-                200,
-                &Map::new()
-                    .with("account", account.as_str())
-                    .with("home", home.as_str())
-                    .with(
-                        "handle",
-                        format!("{username}#{}", rootcard::id::tag(account)),
-                    )
-                    .into(),
-            )),
-            _ => Err(ApiError::new(409, "ambiguous_handle")),
-        }
+        let f = find_handle(&app, &raw)?;
+        Ok(json(
+            200,
+            &Map::new()
+                .with("account", f.account.as_str())
+                .with("home", f.home.as_str())
+                .with("handle", f.handle.as_str())
+                .into(),
+        ))
     })())
+}
+
+/// An identity found by its exact identifier.
+pub(crate) struct Found {
+    /// The account id.
+    pub account: String,
+    /// Its rootcard home (base URL).
+    pub home: String,
+    /// `Name#TAG`.
+    pub handle: String,
+}
+
+/// `Name#TAG[@host]` among the identities this server knows (its own and connected ones from other homes). There is
+/// no search: the full handle is required. Used by [`lookup`] and by the bridge.
+pub(crate) fn find_handle(app: &App, raw: &str) -> Result<Found, ApiError> {
+    let (handle, host) = match raw.rsplit_once('@') {
+        Some((h, d)) => (h.to_string(), Some(d.to_ascii_lowercase())),
+        None => (raw.to_string(), None),
+    };
+    // `@` this server's own host is the full address a user copies (federation): any identity that uses it.
+    let host = host.filter(|d| {
+        !app.origins()
+            .any(|o| o.split("://").nth(1).is_some_and(|x| x == d))
+    });
+    let h = rootcard::id::parse_handle(&handle).map_err(|_| ApiError::new(400, "bad_handle"))?;
+    let mut found: Vec<(String, String, String)> = Vec::new(); // account, home, username
+    let key = HandleKey {
+        realm: app.cfg.realm.clone(),
+        username: h.username.to_ascii_lowercase(),
+        tag: h.tag.clone(),
+    };
+    for a in app.host.store.by_handle(&key).map_err(ApiError::internal)? {
+        if let Some(s) = app.host.store.load(&a).map_err(ApiError::internal)?
+            && s.vault.is_some()
+            && h.matches(&s.state.username, &s.state.account)
+        {
+            let home = s
+                .state
+                .instance
+                .as_ref()
+                .map_or_else(|| app.local_home(), |i| i.home.url.clone());
+            found.push((a, home, s.state.username));
+        }
+    }
+    for (a, home, username) in app
+        .db
+        .find_remote(&key.username, &key.tag)
+        .map_err(ApiError::internal)?
+    {
+        if h.matches(&username, &a) {
+            found.push((a, home, username));
+        }
+    }
+    if let Some(host) = &host {
+        found.retain(|(_, home, _)| {
+            remote::origin_of(home)
+                .is_some_and(|o| o.split("://").nth(1).is_some_and(|x| x == host))
+        });
+    }
+    match found.as_slice() {
+        [] => Err(ApiError::new(404, "unknown_account")),
+        [(account, home, username)] => Ok(Found {
+            account: account.clone(),
+            home: home.clone(),
+            handle: format!("{username}#{}", rootcard::id::tag(account)),
+        }),
+        _ => Err(ApiError::new(409, "ambiguous_handle")),
+    }
 }
 
 /// `GET /api/v1/accounts/{account}/log`: the identity's rootcard log as this server has it (its own, or the newest it

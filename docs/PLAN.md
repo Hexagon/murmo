@@ -335,6 +335,24 @@ L longer.
 10. [ ] **Later** (`DESIGN.md` §15.1 step C): one-time prekeys; a post-quantum step in the ratchet; MLS for groups;
         ML-DSA signatures, with rootcard
 
+## The bridge: programs as contacts
+
+- [x] **Bridge** (`MURMO_BRIDGE=1`, `DESIGN.md` §16): owners log in at `/bridge/` with a rootcard proof, make bots
+      (identities of this home with one device in the server), get an address and an API key; programs send and
+      receive over `/bridge/api/v1`. Per bot: retention (0, the default, deletes events as they are handed out; up to
+      30 days until confirmed), owner only, accept requests at once. Protocol code in Rust, checked against the real
+      client engine (`tests/bridge.test.mjs`). Threats T48–T53, AR6
+- [ ] **Terms and in-app help** (decision for the maintainer): say that on a server with the bridge, what is written
+      to a bot is read by the server and the bot's program. Proposed wording in the pull request; until then
+      `docs/HOSTING.md` asks operators to tell their users
+- [ ] **Bots marked in the messenger** (`DESIGN.md` §13.6): a flag in the bot's profile, shown with its request and next
+      to the safety code, not only the device label
+- [ ] **Federation for bots:** take envelopes from other Murmo servers and write to contacts there (today they are
+      deleted, and such recipients are refused)
+- [ ] **Files for bots:** take chunks (and send files) through the relay and the file queue
+- [ ] **Push instead of polling:** a webhook per bot, or a WebSocket for programs, beside `GET /messages?wait=`
+- [ ] **An MCP server** over the API, so that an assistant gets `send_message` and `read_messages` as tools
+
 ## Phase 3: beyond one server
 
 - [x] Identities whose rootcard home is another host (logs fetched from allowlisted homes)

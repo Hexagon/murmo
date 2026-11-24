@@ -22,6 +22,9 @@
 //! | `MURMO_FEDERATION` | `open` | other Murmo servers to exchange messages with: `open` (any public https server), `off`, or a comma-separated list of origins |
 //! | `MURMO_FEDERATION_BLOCK` | empty | servers never to exchange messages with (comma-separated origins or host names; each also blocks its other ports and subdomains) |
 //! | `MURMO_DEMO` | `0` | mark this server as a demo whose data may be wiped at any time (`1`), as murmo.org |
+//! | `MURMO_BRIDGE` | `0` | the bridge (`1`): pages at `/bridge/` where owners make bots, and an HTTP API for programs to send and receive messages as those bots (DESIGN.md §16) |
+//! | `MURMO_BRIDGE_OWNERS` | empty | who may make bots: account ids or `Name#TAG`, comma-separated (empty: any identity that can log in here) |
+//! | `MURMO_BRIDGE_BOTS` | `5` | most bots per owner |
 //!
 //! Each variable is also read under its old name, `MESG_…`, when the `MURMO_…` name is not set. The default files
 //! `murmo.sqlite` and `murmo-host.key` fall back to `mesg.sqlite` and `mesg-host.key` when only those exist.
@@ -31,6 +34,7 @@
 pub mod admin;
 pub mod api;
 pub mod app;
+pub mod bridge;
 pub mod db;
 pub mod devices;
 pub mod egress;
@@ -236,6 +240,9 @@ fn config() -> Result<Config, String> {
             .iter()
             .filter_map(|o| federation::block_entry(o))
             .collect(),
+        bridge: env("MURMO_BRIDGE", "0") == "1",
+        bridge_owners: list(&env("MURMO_BRIDGE_OWNERS", "")),
+        bridge_bots: env("MURMO_BRIDGE_BOTS", "5").parse().unwrap_or(5).min(1000),
     })
 }
 
@@ -265,7 +272,9 @@ fn host_key(path: &str) -> std::io::Result<[u8; 32]> {
 
 /// Security headers on every response (rootcard GETTING_STARTED §2.4).
 async fn security_headers(State(app): State<Arc<App>>, req: Request, next: Next) -> Response {
-    let api = req.uri().path().starts_with("/api/") || req.uri().path().starts_with(rc::PREFIX);
+    let api = req.uri().path().starts_with("/api/")
+        || req.uri().path().starts_with(rc::PREFIX)
+        || req.uri().path().starts_with("/bridge/api/");
     let mut res = next.run(req).await;
     let h = res.headers_mut();
     let ws_origin = app
@@ -369,7 +378,8 @@ pub fn router(app: Arc<App>) -> Router {
             "/api/v1/federation/presence",
             post(federation::post_presence),
         )
-        .route("/api/v1/federation/space", post(federation::post_space));
+        .route("/api/v1/federation/space", post(federation::post_space))
+        .merge(bridge::routes(&app).layer(DefaultBodyLimit::max(api::MAX_BODY)));
     if !app.cfg.client_dir.is_empty() {
         r = r.fallback_service(ServeDir::new(&app.cfg.client_dir));
     }
@@ -415,6 +425,16 @@ pub fn build(
     };
     let push = push::Pusher::open(&db, cfg.push_hosts.clone(), contact)?;
     let limits = Limiter::persistent(cfg.limit_scale, db.clone())?;
+    let bridge = if cfg.bridge {
+        Some(bridge::Bridge::open(
+            db.clone(),
+            &seed,
+            cfg.bridge_owners.clone(),
+            cfg.bridge_bots,
+        )?)
+    } else {
+        None
+    };
     Ok(Arc::new(App {
         cfg: cfg.clone(),
         push,
@@ -425,6 +445,7 @@ pub fn build(
         limits,
         challenges: Challenges::default(),
         fed: federation::Federation::new(&seed),
+        bridge,
     }))
 }
 
@@ -473,6 +494,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             federation::flush_outbox(&retrier).await;
         }
     });
+
+    // The bridge's bots keep publishing prekeys while their programs are away.
+    if app.bridge.is_some() {
+        tokio::spawn(bridge::maintain(app.clone()));
+    }
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     for line in admin::summary(&cfg, api::client_build(&cfg.client_dir).as_deref()) {

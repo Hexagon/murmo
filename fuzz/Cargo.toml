@@ -38,3 +38,10 @@ path = "fuzz_targets/ws_binary.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bridge_envelope"
+path = "fuzz_targets/bridge_envelope.rs"
+test = false
+doc = false
+bench = false

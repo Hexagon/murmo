@@ -78,7 +78,12 @@ pub enum Sender<'a> {
 
 /// Remember that `account` wrote to each of `to` (accounts of this server, or `@<origin>` for another server): from
 /// then on they count it as a contact for [`WRITES_TTL`]. Kept as keyed hashes only.
-fn note_writes<'a>(app: &App, account: &str, to: impl IntoIterator<Item = &'a str>, now: i64) {
+pub(crate) fn note_writes<'a>(
+    app: &App,
+    account: &str,
+    to: impl IntoIterator<Item = &'a str>,
+    now: i64,
+) {
     let mut seen: Vec<&str> = Vec::new();
     for t in to {
         if seen.contains(&t) || t == account {
@@ -1445,6 +1450,9 @@ mod tests {
             federation: crate::federation::Policy::Off,
             federation_block: Vec::new(),
             push_contact: String::new(),
+            bridge: false,
+            bridge_owners: Vec::new(),
+            bridge_bots: 5,
         };
         let db = crate::db::Db::open(":memory:").expect("database");
         crate::build(&cfg, db, [3; 32]).expect("app")

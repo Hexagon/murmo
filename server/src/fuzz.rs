@@ -102,6 +102,9 @@ fn harness() -> &'static Harness {
             federation: crate::federation::Policy::Off,
             federation_block: Vec::new(),
             push_contact: String::new(),
+            bridge: false,
+            bridge_owners: Vec::new(),
+            bridge_bots: 5,
         };
         let db = crate::db::Db::open(":memory:").expect("database");
         let app = crate::build(&cfg, db, [3; 32]).expect("app");
@@ -128,6 +131,23 @@ pub fn ws_binary(data: &[u8]) {
     let _guard = h.rt.enter();
     let _ = crate::ws::fuzz_binary(&h.app, ACCOUNT, &device().id, data);
     let _ = h.app.db.purge(i64::MAX);
+}
+
+/// What reaches the bridge's bot device from other users (DESIGN.md §16.2): a packed envelope, and a decrypted message
+/// checked against the server's device lists.
+pub fn bridge_envelope(data: &[u8]) {
+    use crate::bridge::bot;
+    if let Ok(s) = std::str::from_utf8(data) {
+        let keys = [bot::PrekeySecret {
+            id: "AAAAAAAAAAA".into(),
+            secret: zeroize::Zeroizing::new([5; 32]),
+            time: 0,
+        }];
+        let _ = bot::open(&device().id, &keys, s);
+    }
+    let h = harness();
+    let _guard = h.rt.enter();
+    bot::fuzz_message(&h.app, ACCOUNT, &device().id, data);
 }
 
 #[cfg(test)]
@@ -164,7 +184,14 @@ mod tests {
             json_body(s.as_bytes());
             http_text(s.as_bytes());
             ws_frame(s.as_bytes());
+            bridge_envelope(s.as_bytes());
         }
+        // A sealed envelope for the fuzz prekey opens; changed in any byte, it does not.
+        let spk = rootcard::crypto::x25519_public(&[5; 32]);
+        let env = crate::bridge::bot::seal(&device().id, "AAAAAAAAAAA", &spk, b"{}").expect("seal");
+        bridge_envelope(env.as_bytes());
+        let msg = r#"{"body":{},"conv":"0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJK","from":{"account":"X","device":"d"},"id":"i","kind":"text","sig":"AA","time":1,"to":{"account":"0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJK","device":"d"},"v":1}"#;
+        bridge_envelope(msg.as_bytes());
         // Binary relay frames: valid, truncated, and with bad fields.
         let mut frame = vec![1u8, 1, 2];
         frame.extend_from_slice(&[1; 16]);

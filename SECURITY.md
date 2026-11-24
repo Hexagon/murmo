@@ -3,7 +3,7 @@
 Murmo Secure Messenger is end-to-end encrypted software, so we take reports about weaknesses seriously, and we are
 grateful for them.
 
-> **Status:** Murmo 0.2 and rootcard 0.3 are early versions that have not been reviewed by anyone outside the project.
+> **Status:** Murmo 0.3 and rootcard 0.3 are early versions that have not been reviewed by anyone outside the project.
 > Read [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for what Murmo is meant to protect, against whom, and what it
 > accepts.
 

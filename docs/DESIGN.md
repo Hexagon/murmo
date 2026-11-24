@@ -16,7 +16,8 @@ entry `app.mesg.localkey` and the IndexedDB databases (`mesg`, `mesg-<account>`)
 
 ## 1. Principles
 
-1. **The server is a blind relay.** It never sees plaintext, private keys, contact lists or message history. It knows
+1. **The server is a blind relay.** It never sees plaintext, private keys, contact lists or message history (the
+   optional bridge, §16, is the one exception: it runs bots, and reads what is written to them). It knows
    which device a stored ciphertext is for, and for how long it may keep it.
 2. **Trust flows from the recovery key.** rootcard's log says which account key is current. The account key starts the
    device list of an instance, and from then on only existing devices can add devices. A stolen password therefore
@@ -1033,6 +1034,8 @@ on the live budgets.
 | envelopes for another server that could not be reached (device there, ciphertext, when to try again) | delivery once it is back (§14.3) | until delivered or refused, at most 14 days (or the envelope's `ttl`) |
 | for each local account, which devices on other servers it writes to and on which server (device id, origin, last use), in memory | its file chunks and presence questions go to the right server (§14.6) | a week after last use, or a restart; at most 512 devices per account (the least recently used go first) |
 | a copy of the database made before a start that changes its schema (`<db>.before-<version>`) | a way back after an update | the newest two, at most a week |
+| **bridge only** (`MURMO_BRIDGE=1`, §16): per bot its owner's account id, handle, device, settings, a hash of its API key, and its state encrypted under a key from the host key (device and prekey secrets, contacts, remembered message ids, and **received messages in plaintext inside that encryption** until handed out, or confirmed, §16.3) | the bot device lives in the server | until the bot is deleted; events per the bot's retention (0: until handed out; at most 30 days) |
+| bridge owner sessions (hash of the token, account, handle), in memory | managing bots | 12 hours, logout, or a restart |
 | other servers' federation keys, nonces of their deliveries, device lists fetched from them, in memory | federation (§14) | an hour, 10 minutes, 20 seconds; at most 1 024 servers, and 256 lists of 16 MiB in all (the least recently fetched go first) |
 
 The server writes no access log. What it prints (its start, errors, and at most every 10 minutes a push service that
@@ -1258,6 +1261,9 @@ assistant ──MCP tools──► murmo-bot (Node, long-running) ──HTTPS/We
 - **A leak costs the bot, not the user.** A stolen bot device can speak only as the bot. Replacing it is a new device
   that contacts see (the safety code changes), and any device of the bot can `remove` it (§4.4).
 - Limits are no obstacle: 60 sends per minute per device, 96 KiB per envelope (§10).
+
+*Built differently:* the bridge (§16) runs the bot's device in the server instead of a sidecar, with an HTTP API any
+program (or an MCP server around it) can call. The plan below stays for a bot on the owner's own machine.
 
 *Order of work.* 1) decide marking and add the threat-model row; 2) file-backed `Store` with tests; 3) the sidecar
 (login, unlock, `Messenger`, reconnects) under `tools/murmo-bot/`; 4) the MCP tools with confirmation before sending;
@@ -1587,3 +1593,122 @@ accepts `caps` in prekeys), federation, safety codes, device lists.
 **Threat model.** T13 becomes "messages are safe once their message key is used and deleted; the first message of a
 session within the prekey window"; a new entry covers stored skipped keys and forced `resync` (an attacker who can
 make a device lose state gets messages lost, not read).
+
+## 16. The bridge (optional)
+
+The bridge lets any program (an AI assistant such as Claude, a monitoring script, a support desk) talk with Murmo
+users over plain HTTPS, without speaking the protocol. It is off unless the operator sets `MURMO_BRIDGE=1`; nothing of
+it exists otherwise (no routes, no table). It takes the place of the sidecar sketched in §13.6, with its trade-offs
+settled differently: the bot's device lives in the server, not on a machine of the owner.
+
+### 16.1 Shape
+
+```
+program ──HTTPS, API key──► /bridge/api/v1 ──► bot device (in the server) ──► mailbox ──► contacts' devices
+owner   ──browser──────────► /bridge/        (rootcard login, proof to the bridge, bots, keys)
+```
+
+- **Owners** log in at `/bridge/` with a rootcard identity of this server or of an allowed home (`MURMO_REMOTE_HOMES`).
+  The page uses the messenger's own login (§3) in the browser, then sends a rootcard **proof** by the account key for a
+  single-use challenge from the bridge (`POST /bridge/api/v1/challenge`), addressed to `<origin>/bridge`, so a proof
+  made for linking a device (addressed to `<origin>`) does not log in here, nor the other way round. The server checks
+  it against the identity's log: its own copy for its own identities; for another home, a log it fetches and verifies
+  at that moment, which may not be older than a copy it keeps ([VER-4]). The password never leaves the browser. A
+  session is a random token (256 bits) kept in memory as a hash for 12 hours. `MURMO_BRIDGE_OWNERS` restricts owners
+  to listed **account ids** (a `Name#TAG` is not enough: four tag characters can be found for any name by trying
+  recovery keys). A bot cannot be an owner.
+- **A bot** is an ordinary identity of this server's home and an ordinary Murmo account: contacts look it up, verify
+  its log and device list, and write to it as to anyone (§4–§6). Making one (`POST /bots { name }`) registers the
+  identity with rootcard's registration flow, in the server: a fresh recovery key, a random password nobody learns,
+  the vault, then entry 0 of the device list with the bot's single device (label `Murmo Bridge`, visible to contacts in
+  the device list and the safety code), signed by the account key, and the device's first prekey. The recovery card is
+  shown to the owner once and not kept: it is the only way to take over or retire the identity later (rootcard's key
+  tool). The account key is not kept either.
+- **An API key** (`mbk_` and 32 random bytes, base64url) is shown once; the server keeps `SHA-256(frame("murmo/bridge/api-key/v1", key))`.
+  A new key replaces the old one at once. A program sends it as `Authorization: Bearer`.
+
+### 16.2 The bot device
+
+The bridge is a client of the protocol like the web client, in Rust (`server/src/bridge/bot.rs`), and must agree with
+`client/js/protocol.js` byte for byte: device-list entries, signed prekeys, envelopes (§5.1), signed messages (§5.3).
+`tests/bridge.test.mjs` runs the real client engine against it.
+
+- **Keys.** The device key (Ed25519) and the prekeys' private keys (X25519) are in the bot's **state**, a canonical
+  JSON object encrypted with AES-256-GCM under `HKDF-SHA256(ikm = host key seed, info = "murmo/bridge/key/v1")` and
+  then `HKDF(that, salt = account, info = "murmo/bridge/state/v1")`, with the account as associated data. A copy of the
+  database is unreadable without the host key; database and host key together (a backup) hold everything.
+- **Prekeys** follow §5.2: a new one when the newest is 7 days old (when the bot is used, and every hour in the
+  background, so a bot whose program is away keeps receiving), private keys kept 28 days after they were made.
+- **Receiving** happens when the program calls the API: the bridge reads the bot's mailbox, decrypts and verifies each
+  envelope (for this device, from a present device of another account, about the conversation with the bot, signed),
+  acts on it as the web client does (§6.2: requests, accept, block, declined senders' replays), turns what the program
+  should see into **events**, sends receipts for texts (§6.4), keeps the state, and only then deletes the envelopes
+  from the mailbox (a crash in between reads them again; ids are remembered, 2 000, to drop copies).
+- **What it takes:** `request`, `accept`, `text`, `receipt`, `reaction`, `edit`, `retract`, and `file` as a notice
+  (name and size; the bridge does not take chunks). Disappearing messages (§6.8) are dropped unread and not
+  acknowledged, as by a client that does not know them (§12): the bridge cannot make a program forget them. Envelopes
+  from other Murmo servers (federation, §14) are not taken yet and are deleted.
+- **Sending** is to accepted contacts only, as §6: `POST /messages { to, text }` sends a `text` to an accepted contact,
+  accepts and then writes to one that asked, and to anyone else sends a `request` whose note is the text (at most 500
+  characters). `to` is an exact `Name#TAG[@host]` (rate limited as lookups, §10) or an account id this server knows.
+  Recipients on other Murmo servers are not reached yet.
+- **Contacts** are at most 2 000 per bot; requests from more new accounts are dropped.
+
+### 16.3 What a bot keeps, and for how long
+
+Per bot, set by the owner:
+
+- **Retention** (`retention_days`, 0–30, default 0). With **0**, events are deleted in the same step that hands them
+  to the program: nothing the program has received stays on the server, and an answer lost on the way is lost (at
+  most once). With **N days**, events stay until the program confirms them (`GET /messages?after=<seq>` confirms every
+  event up to `seq`) and never longer than N days (at least once). Either way at most 1 000 events wait.
+- **Owner only** (`owner_only`, default off). The bot takes messages only from its owner's account (whose request it
+  accepts at once) and writes to nobody else; envelopes from anyone else are deleted unread: no event, no receipt, no
+  answer. For a personal assistant this is the allowlist §13.6 asks for against prompt injection by strangers.
+- **Accept requests at once** (`auto_accept`, default off).
+
+Besides events, the state holds the device and prekey secrets, the contacts (account, handle, state, when changed) and
+the remembered message ids. What reaches a bot is **plaintext in the server** while the bridge handles it and, until
+it is handed out or expires, in the encrypted state: end-to-end encryption ends at the bridge, and then the program
+(and whoever runs it, such as a model provider) reads it (THREAT_MODEL T48).
+
+### 16.4 HTTP API (`/bridge/api/v1`)
+
+All bodies are JSON; errors are `{ "error": "<code>" }`. The answers are not cached (`Cache-Control: no-store`).
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/challenge` | – | `{ nonce }` for the owner's proof (2 minutes, once) |
+| POST | `/login` | proof | `{ account, home, nonce, proof }` → `{ token, account, handle, expires, max_bots }` |
+| POST | `/logout` | session | ends the session |
+| GET | `/bots` | session | `{ owner, bots: [bot], max_bots }` |
+| POST | `/bots` | session | `{ name, auto_accept?, retention_days?, owner_only? }` → `{ bot, api_key, card, card_text }` |
+| POST | `/bots/{account}` | session | change `{ auto_accept?, retention_days?, owner_only? }` |
+| DELETE | `/bots/{account}` | session | the device signs its own `remove` (§4.4), its prekey and mailbox go, then its state; the identity stays until retired with the card |
+| POST | `/bots/{account}/key` | session | `{ bot, api_key }`: a new key |
+| GET | `/me` | API key | the bot: `{ account, handle, address, device, created, auto_accept, owner_only, retention_days, key_hint, key_created }` |
+| GET | `/messages?after=&wait=` | API key | `{ events, next }`; `wait` ≤ 30 s holds the answer until something arrives (two waiting calls per bot) |
+| POST | `/messages` | API key | `{ to, text }` → `{ id, time, kind, to, state, queued, failed }` |
+| GET | `/contacts` | API key | `{ contacts: [{ account, handle, state, updated }] }` |
+| POST | `/contacts/{account}/accept`, `/decline`, `/block` | API key | answer a request; decline and block tell the other party nothing |
+
+An event is `{ seq, type, received, from: { account, handle }, … }` with `type`:
+`request` (`id`, `time`, `note`, `accepted`), `accepted`, `message` (`id`, `time`, `text`), `delivered` (`ids`),
+`reaction` (`message`, `emoji`), `edit` (`message`, `text`), `retract` (`message`), `file` (`id`, `name`, `size`).
+
+Limits: 600 API calls per minute per network address (and 30 calls with a wrong key per 10 minutes), 60 sends per
+minute per bot of which 30 requests per hour, 20 recipients by handle per minute, 10 bots made per owner and 60 in all
+per hour (each is a registration with Argon2id), `MURMO_BRIDGE_BOTS` (5) bots per owner, request bodies 64 KiB, texts
+8 000 characters.
+
+### 16.5 Pages
+
+`/bridge/` is a static page under `client/bridge/` (no build step, the same CSP as the messenger, texts in the four
+languages in `client/bridge/lang.js`): log in, make a bot with its settings, see the key and the recovery card once,
+change settings, make a new key, delete a bot, and curl examples. Nothing is stored in the browser: a reload logs out.
+
+### 16.6 Storage
+
+One table, `bridge_bots` (account, owner, handle, device, created, settings, the key's hash and last four characters,
+the encrypted state), created when the bridge starts and not otherwise; the database's schema version is not changed.
+The bot's identity, device list, prekey and mailbox are where every account's are.
