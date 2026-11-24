@@ -17,7 +17,7 @@ Caddy gets the certificate on first start, and Murmo answers at `https://chat.ex
 key are in the volume `murmo-data`, or in a directory on the machine set as `MURMO_DATA` in `.env`; such a directory
 must be owned by uid 65532, the user the server runs as (`sudo chown 65532:65532 /srv/murmo`), or the server cannot
 write to it. The image is `ghcr.io/hexagon/murmo`, for amd64 and
-arm64, published for every release: `0.2.1`, `0.2` and `latest`. The compose file runs `0.2` (`MURMO_IMAGE`). To run a
+arm64, published for every release: `0.3.0`, `0.3` and `latest`. The compose file runs `0.3` (`MURMO_IMAGE`). To run a
 build of your own (from `main`, or with changes), build the image in the repository and point `.env` at it:
 
 ```sh
@@ -44,13 +44,13 @@ Two files hold everything: the database (`MURMO_DB`) and the host key (`MURMO_HO
 both at start, with what it serves:
 
 ```text
-murmo-server 0.2.1 (commit 2517ee6…)
+murmo-server 0.3.0 (commit 2517ee6…)
   origin      https://chat.example.org
   listening   0.0.0.0:8080
   database    /data/murmo.sqlite
   host key    /data/murmo-host.key   (back up these two: murmo-server backup <dir>)
   federation  open
-  client      /app/client (build 0.2.1-…)
+  client      /app/client (build 0.3.0-…)
 ```
 
 It warns when a setting looks wrong: an `http://` origin while it listens beyond loopback, no client where
@@ -235,13 +235,16 @@ Set in the environment:
 | `MURMO_FEDERATION` | `open` | other Murmo servers this one exchanges messages with: `open` (any public https server with a domain name), `off`, or a comma-separated list of origins (DESIGN.md §14) |
 | `MURMO_FEDERATION_BLOCK` | empty | servers never to exchange messages with (comma-separated origins or host names; each also blocks its other ports and subdomains) |
 | `MURMO_DEMO` | `0` | mark this server as a demo (`1`): a "Demo" mark, a notice on the login screen and a section in the terms saying that identities, messages and files may be wiped at any time, with a link to running one's own server. murmo.org runs with it |
+| `MURMO_BRIDGE` | `0` | the bridge (`1`): pages at `/bridge/` where owners make bots, and an HTTP API at `/bridge/api/v1` for programs to send and receive messages as those bots (see "The bridge" below) |
+| `MURMO_BRIDGE_OWNERS` | empty | account ids that may make bots (comma-separated; empty: any identity that can log in here). Not `Name#TAG`: a tag can be forged |
+| `MURMO_BRIDGE_BOTS` | `5` | most bots per owner |
 
 With the compose files, these are read from `deploy/.env` by Docker Compose, not by the server:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `MURMO_DOMAIN` | none (required) | the server's DNS name; `MURMO_ORIGIN` is set to `https://<MURMO_DOMAIN>`, and Caddy gets its certificate |
-| `MURMO_IMAGE` | `ghcr.io/hexagon/murmo:0.2` | the image to run (`0.2` gets every 0.2.x patch with a pull) |
+| `MURMO_IMAGE` | `ghcr.io/hexagon/murmo:0.3` | the image to run (`0.3` gets every 0.3.x patch with a pull) |
 | `MURMO_DATA` | the volume `murmo-data` | where the database and host key are: a volume name, or a directory owned by uid 65532 |
 | `MURMO_PORT` | `8080` | the port on `127.0.0.1` with `compose.own-proxy.yaml` |
 
@@ -252,6 +255,27 @@ The version shown in the app ("Security and privacy") is the commit the server w
 `GITHUB_SHA` at build time, otherwise `git rev-parse HEAD`.
 
 The `MURMO_ORIGIN` goes into users' signed rootcard logs as their home address: choose it once.
+
+## The bridge
+
+With `MURMO_BRIDGE=1` the server also runs **bots**: Murmo accounts whose one device lives in the server, so that a
+program (an AI assistant, an alert script, a help desk) can write with Murmo users over HTTPS without speaking the
+protocol. Owners log in at `https://<your domain>/bridge/` with a rootcard identity, make a bot, and get its address
+(`Name#TAG@<your domain>`) and an API key. How it works and the whole API are in
+[DESIGN.md §16](DESIGN.md#16-the-bridge-optional).
+
+Before you turn it on:
+
+- **The server reads what is written to bots.** End-to-end encryption ends at the bridge (THREAT_MODEL T48, AR6). The
+  terms in the app do not say so yet; tell your users if you run it on a public server.
+- **Choose who may make bots** with `MURMO_BRIDGE_OWNERS` (account ids; each owner sees theirs on the bridge page after login). Without
+  it, anyone who can log in here (with `MURMO_REMOTE_HOMES`, also anyone with a rootcard.org identity) can make bots.
+- **Back up as before.** Bots, their keys and their settings are in the database, encrypted under a key derived from
+  the host key: `murmo-server backup` has both. A new host key makes every bot unreadable.
+- **The proxy** must pass `/bridge/` like everything else (the example configurations do). Long polls hold a request
+  for up to 30 seconds.
+- Not yet: contacts on other Murmo servers (federation) and files. Turning the bridge off keeps the table; its bots
+  stop answering until it is on again.
 
 ## Federation
 

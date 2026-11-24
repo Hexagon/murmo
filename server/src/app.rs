@@ -75,6 +75,12 @@ pub struct Config {
     /// Servers it never exchanges envelopes with (`MURMO_FEDERATION_BLOCK`), as host names: each blocks the host on any
     /// scheme and port, and its subdomains.
     pub federation_block: Vec<String>,
+    /// Whether the bridge is on (`MURMO_BRIDGE`, DESIGN.md §16).
+    pub bridge: bool,
+    /// Who may make bots (`MURMO_BRIDGE_OWNERS`): account ids or `Name#TAG`; empty for any identity accepted here.
+    pub bridge_owners: Vec<String>,
+    /// Most bots per owner (`MURMO_BRIDGE_BOTS`).
+    pub bridge_bots: usize,
 }
 
 /// The hosts a browser talks to for GIPHY search (the API and its media), allowed by the CSP only when a key is set.
@@ -130,6 +136,9 @@ impl Config {
             federation: crate::federation::Policy::Off,
             federation_block: Vec::new(),
             push_contact: String::new(),
+            bridge: false,
+            bridge_owners: Vec::new(),
+            bridge_bots: 5,
         }
     }
 }
@@ -830,6 +839,8 @@ pub struct App {
     pub push: crate::push::Pusher,
     /// Federation with other Murmo servers.
     pub fed: crate::federation::Federation,
+    /// The bridge, when it is on (DESIGN.md §16).
+    pub bridge: Option<crate::bridge::Bridge>,
 }
 
 /// The current state of an account as far as murmo is concerned.

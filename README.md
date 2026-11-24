@@ -21,7 +21,7 @@ reach someone only with their exact identifier (`Alice#3F9C`), and the device li
 in rootcard's verifiable key log rather than in trust in the server. The server is a single Rust binary that stores
 as little as possible.
 
-> **Status: early.** Murmo 0.2 builds on rootcard 0.3.5. Neither has had an external security review. Read the
+> **Status: early.** Murmo 0.3 builds on rootcard 0.3.5. Neither has had an external security review. Read the
 > [threat model](docs/THREAT_MODEL.md) before trusting it with anything sensitive, and report vulnerabilities
 > privately as described in [SECURITY.md](SECURITY.md).
 
@@ -62,6 +62,10 @@ in [docs/HOSTING.md](docs/HOSTING.md).
 Without Docker, each release has static archives for Linux (x86_64 and arm64) with a systemd service and SHA-256
 sums: see [docs/HOSTING.md](docs/HOSTING.md#without-containers).
 
+With `MURMO_BRIDGE=1` the server also runs **bots** that any program (an AI assistant, an alert script) can use over
+HTTPS: owners make them at `/bridge/` and get an address and an API key. The server reads what is written to a bot;
+see [docs/HOSTING.md](docs/HOSTING.md#the-bridge) before you turn it on.
+
 What changed in each release, and what operators have to do about it, is in [CHANGELOG.md](CHANGELOG.md).
 
 ### From source
@@ -86,7 +90,7 @@ qrcode-generator 2.0.4 from npm, unmodified (version and hashes in its README).
 
 ```
 server/   the Rust server: rootcard home, device lists, WebSocket mailbox, file relay
-client/   the web client (js/protocol.js protocol, js/core.js engine, js/app.js interface, js/lang/ texts)
+client/   the web client (js/protocol.js protocol, js/core.js engine, js/app.js interface, js/lang/ texts, bridge/ pages)
 docs/     DESIGN.md (protocol), THREAT_MODEL.md, HOSTING.md, PLAN.md
 tests/    protocol, end-to-end and browser smoke tests
 fuzz/     cargo-fuzz targets

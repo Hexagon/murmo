@@ -9,7 +9,7 @@ name: murmo
 
 services:
   murmo:
-    image: ${MURMO_IMAGE:-ghcr.io/hexagon/murmo:0.2}
+    image: ${MURMO_IMAGE:-ghcr.io/hexagon/murmo:0.3}
     restart: unless-stopped
     env_file: .env
     environment:

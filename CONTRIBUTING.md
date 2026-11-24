@@ -8,8 +8,9 @@ specific to agents). What is planned, and in which order, is in [docs/PLAN.md](d
 ## Where things are
 
 ```
-server/   the Rust server: rootcard home, device lists, WebSocket mailbox, file relay, federation
-client/   the web client: js/protocol.js protocol, js/core.js engine, js/app.js interface, js/lang/ texts
+server/   the Rust server: rootcard home, device lists, WebSocket mailbox, file relay, federation, bridge (optional)
+client/   the web client: js/protocol.js protocol, js/core.js engine, js/app.js interface, js/lang/ texts;
+          bridge/ the bridge's pages (texts in bridge/lang.js)
 docs/     DESIGN.md (protocol), THREAT_MODEL.md, HOSTING.md (operators), PLAN.md (roadmap)
 deploy/   compose files, Caddyfile, systemd service
 tests/    protocol, end-to-end, federation and browser smoke tests (Node)

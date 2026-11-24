@@ -110,7 +110,7 @@ jobs:
       - name: Fuzz each target for a minute
         working-directory: fuzz
         run: |
-          for t in json_body http_text ws_frame ws_binary; do
+          for t in json_body http_text ws_frame ws_binary bridge_envelope; do
             cargo fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=2048
           done
       - if: failure()

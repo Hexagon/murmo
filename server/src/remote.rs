@@ -81,6 +81,39 @@ fn fetch_log(base: &str, account: &str, public_only: bool) -> Result<Vec<Value>,
         .ok_or(ApiError::new(502, "home_error"))
 }
 
+/// Fetch an identity's log from an allowed home and verify it, without keeping it (the bridge's owner login): the
+/// newest log, whose current instance lives at `home`. → `(events, state)`
+pub async fn fetch_verified(
+    app: &Arc<App>,
+    account: &str,
+    home: &str,
+) -> Result<(Vec<Value>, rootcard::log::LogState), ApiError> {
+    if !allowed(app, home) {
+        return Err(ApiError::new(403, "home_not_allowed"));
+    }
+    let (b, a, public) = (
+        home.to_string(),
+        account.to_string(),
+        public_only(app, home),
+    );
+    let events = tokio::task::spawn_blocking(move || fetch_log(&b, &a, public))
+        .await
+        .map_err(ApiError::internal)??;
+    let options = VerifyOptions::new(app.cfg.realms.clone()).at(now());
+    let state = verify_log(&events, &options).map_err(|_| ApiError::new(502, "bad_log"))?;
+    if state.account != account {
+        return Err(ApiError::new(502, "bad_log"));
+    }
+    let inst = state
+        .instance
+        .as_ref()
+        .ok_or(ApiError::new(410, "account_retired"))?;
+    if inst.home.url != home {
+        return Err(ApiError::new(409, "not_home"));
+    }
+    Ok((events, state))
+}
+
 /// Fetch, verify and store the newest log of a remote identity, unless the stored copy is younger than `max_age`
 /// seconds. `home` names the home for an identity the server has not seen yet.
 pub async fn refresh(

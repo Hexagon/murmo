@@ -9,7 +9,18 @@ its section and puts the section in the release notes.
 
 ## Unreleased
 
+## 0.3.0 (2026-11-24)
+
+The bridge: programs, such as an AI assistant, can now write with Murmo users through bots, over HTTPS. It is off
+unless the operator turns it on. Nothing changes in the protocol; the database gains a table only where the bridge is
+on.
+
 **For users**
+
+- **Bots.** On a server that runs the bridge, a bot is an account like any other (`Name#TAG`): it asks before it
+  writes, and you accept or decline as for anyone. Its device is named "Murmo Bridge" in its device list and safety
+  code. What you write to a bot is read by the server that runs it and by the bot's program: end-to-end encryption
+  ends there.
 
 - **The help says what the server keeps about who writes to whom.** It keeps, as keyed hashes, the sender of each
   waiting message and, for 90 days, which account wrote to which (the terms already said so; the help and the FAQ
@@ -19,11 +30,22 @@ its section and puts the section in the release notes.
 
 **For operators**
 
+- **The bridge (`MURMO_BRIDGE=1`, off by default).** Owners log in at `/bridge/` with a rootcard identity (a proof
+  for a challenge, the password stays in the browser), make bots and get each bot's address and API key; programs
+  send and receive messages at `/bridge/api/v1` (DESIGN.md §16, `docs/HOSTING.md` "The bridge"). Per bot: how long
+  received messages are kept for the program (default: deleted as soon as it has them, or up to 30 days until it
+  confirms them), whether it talks with its owner's account only, and whether it accepts requests at once. A new key
+  or deleting a bot at any time. `MURMO_BRIDGE_OWNERS` limits who may make bots (account ids), `MURMO_BRIDGE_BOTS`
+  how many each (5). Not yet: contacts on other servers, and files.
+- The server is built with rootcard's `vault` feature (X25519, AES-GCM, Argon2id, from the same audited crates),
+  which the bridge needs to register bots and to encrypt to devices.
+- The compose file and `deploy/.env.example` run the `0.3` image.
 - `docs/HOSTING.md`: how to get `deploy/`, that a `MURMO_DATA` directory must be owned by uid 65532, the backup
   command for the systemd service, removing the old client before unpacking an update, and a table of the settings
   the compose files read.
 
-**Operators: anything to do?** No.
+**Operators: anything to do?** No, unless you set `MURMO_IMAGE` to `…:0.2` yourself: change it to `…:0.3`. The
+bridge stays off until you set `MURMO_BRIDGE=1`; read "The bridge" in `docs/HOSTING.md` first.
 
 ## 0.2.1 (2026-11-21)
 
