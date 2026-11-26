@@ -236,7 +236,7 @@ Set in the environment:
 | `MURMO_FEDERATION_BLOCK` | empty | servers never to exchange messages with (comma-separated origins or host names; each also blocks its other ports and subdomains) |
 | `MURMO_DEMO` | `0` | mark this server as a demo (`1`): a "Demo" mark, a notice on the login screen and a section in the terms saying that identities, messages and files may be wiped at any time, with a link to running one's own server. murmo.org runs with it |
 | `MURMO_BRIDGE` | `0` | the bridge (`1`): pages at `/bridge/` where owners make bots, and an HTTP API at `/bridge/api/v1` for programs to send and receive messages as those bots (see "The bridge" below) |
-| `MURMO_BRIDGE_OWNERS` | empty | account ids that may make bots (comma-separated; empty: any identity that can log in here). Not `Name#TAG`: a tag can be forged |
+| `MURMO_BRIDGE_OWNERS` | empty | account ids that may make bots (comma-separated; empty: any identity that can log in here). Not `Name#TAG`: a tag can be forged. Checked at login: bots already made keep working |
 | `MURMO_BRIDGE_BOTS` | `5` | most bots per owner |
 
 With the compose files, these are read from `deploy/.env` by Docker Compose, not by the server:
@@ -270,6 +270,9 @@ Before you turn it on:
   terms in the app do not say so yet; tell your users if you run it on a public server.
 - **Choose who may make bots** with `MURMO_BRIDGE_OWNERS` (account ids; each owner sees theirs on the bridge page after login). Without
   it, anyone who can log in here (with `MURMO_REMOTE_HOMES`, also anyone with a rootcard.org identity) can make bots.
+  The list is checked when an owner logs in, so it only stops new bots: an owner taken off it can no longer log in,
+  but bots already made and their API keys keep working. To stop such a bot, delete it while its owner may still log
+  in, or turn the bridge off.
 - **Back up as before.** Bots, their keys and their settings are in the database, encrypted under a key derived from
   the host key: `murmo-server backup` has both. A new host key makes every bot unreadable.
 - **The proxy** must pass `/bridge/` like everything else (the example configurations do). Long polls hold a request

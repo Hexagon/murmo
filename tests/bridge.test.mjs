@@ -240,10 +240,11 @@ test("the owner makes a new key, limits bots, and deletes the bot", async () => 
   assert.equal((await call("DELETE", `/bots/${bot.account}`, other)).status, 404);
   // A bot cannot log in as an owner, and an owner has at most MURMO_BRIDGE_BOTS bots.
   assert.equal((await call("POST", "/bots", session, { name: "bad name!" })).status, 400);
-  const second = await call("POST", "/bots", session, { name: "Second" });
-  assert.equal(second.status, 201);
-  secondBot = second.body;
-  assert.equal((await call("POST", "/bots", session, { name: "Third" })).status, 409);
+  // Two at once with room for one: one is made, the other refused (the count and the insert are one step).
+  const both = await Promise.all([call("POST", "/bots", session, { name: "Second" }), call("POST", "/bots", session, { name: "Third" })]);
+  assert.deepEqual(both.map((r) => r.status).sort(), [201, 409]);
+  secondBot = both.find((r) => r.status === 201).body;
+  assert.equal((await call("POST", "/bots", session, { name: "Fourth" })).status, 409);
 
   const del = await call("DELETE", `/bots/${bot.account}`, session);
   assert.equal(del.status, 200);
@@ -298,6 +299,16 @@ test("a bot for its owner only takes nobody else", async () => {
   assert.equal(bob.contacts.get(p.account)?.state, "outgoing");
   // It can be turned off again.
   assert.equal((await call("POST", `/bots/${p.account}`, session, { owner_only: false })).body.bot.owner_only, false);
+  // Turned on while the program waits: the waiting call takes the new setting at once.
+  const carol = await user("Carol");
+  // Nothing else may end the wait early (Alice's receipt, for one).
+  await until(async () => (await call("GET", "/messages?wait=1", k)).body.events.length === 0);
+  const waiting = call("GET", "/messages?wait=4", k);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal((await call("POST", `/bots/${p.account}`, session, { owner_only: true })).body.bot.owner_only, true);
+  await carol.request(p.handle, "Hinner jag före?");
+  assert.deepEqual((await waiting).body.events, []);
+  assert.deepEqual((await call("GET", "/messages?wait=1", k)).body.events, []);
 });
 
 test("logging out ends the session", async () => {
