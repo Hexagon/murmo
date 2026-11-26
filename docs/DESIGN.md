@@ -1616,7 +1616,8 @@ owner   ──browser──────────► /bridge/        (rootcard
   at that moment, which may not be older than a copy it keeps ([VER-4]). The password never leaves the browser. A
   session is a random token (256 bits) kept in memory as a hash for 12 hours. `MURMO_BRIDGE_OWNERS` restricts owners
   to listed **account ids** (a `Name#TAG` is not enough: four tag characters can be found for any name by trying
-  recovery keys). A bot cannot be an owner.
+  recovery keys). The list is checked at login only: an owner taken off it can no longer log in or make bots, but the
+  bots already made and their API keys keep working. A bot cannot be an owner.
 - **A bot** is an ordinary identity of this server's home and an ordinary Murmo account: contacts look it up, verify
   its log and device list, and write to it as to anyone (§4–§6). Making one (`POST /bots { name }`) registers the
   identity with rootcard's registration flow, in the server: a fresh recovery key, a random password nobody learns,

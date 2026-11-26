@@ -1089,8 +1089,12 @@ pub fn accept(app: &Arc<App>, me: &Me<'_>, st: &mut State, peer: &str) -> Result
     Ok(())
 }
 
-/// Decline or block a contact (nothing is sent: the other party is not told).
+/// Decline or block a contact (nothing is sent: the other party is not told). A new contact counts against
+/// [`MAX_CONTACTS`], as a request does.
 pub fn set_state(st: &mut State, peer: &str, state: &str, app: &App) -> Result<(), ApiError> {
+    if !st.contacts.contains_key(peer) && st.contacts.len() >= MAX_CONTACTS {
+        return Err(bad(409, "too_many_contacts"));
+    }
     let t = now();
     let c = st
         .contacts
@@ -1361,6 +1365,24 @@ mod tests {
         // Bound to the account and the key: another bot's row or another server's key does not open it.
         assert!(State::open(&key, "OTHER", &blob).is_err());
         assert!(State::open(&[4u8; 32], "ACC", &blob).is_err());
+    }
+
+    /// Declining or blocking through the API counts against the contact limit, as a request does (T53).
+    #[test]
+    fn declining_counts_against_the_contact_limit() {
+        let cfg = crate::app::Config::test();
+        let app =
+            crate::build(&cfg, crate::db::Db::open(":memory:").expect("db"), [5; 32]).expect("app");
+        let mut st = State::new(Zeroizing::new([9u8; 32]));
+        for i in 0..MAX_CONTACTS {
+            set_state(&mut st, &format!("A{i}"), "blocked", &app).expect("room");
+        }
+        let full = set_state(&mut st, "NEW", "declined", &app).expect_err("full");
+        assert_eq!((full.status, full.code), (409, "too_many_contacts"));
+        assert_eq!(st.contacts.len(), MAX_CONTACTS);
+        // A contact the bot has already can still change.
+        set_state(&mut st, "A0", "declined", &app).expect("known");
+        assert_eq!(st.contacts["A0"].state, "declined");
     }
 
     #[test]

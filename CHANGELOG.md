@@ -9,6 +9,15 @@ its section and puts the section in the release notes.
 
 ## Unreleased
 
+**For operators**
+
+- **Bridge fixes from a security review.** Declining or blocking through the API now counts against a bot's 2 000
+  contacts, as requests do, so a bot's state cannot grow without bound. A change by the owner (`owner_only`, accepting
+  requests at once, retention, deleting the bot) now applies at once, also to a `GET /messages` that is already
+  waiting. Bots made at the same moment by one owner can no longer pass `MURMO_BRIDGE_BOTS`. The documents now say
+  that `MURMO_BRIDGE_OWNERS` takes account ids only and is checked at login: bots already made keep working when
+  their owner is taken off the list.
+
 ## 0.3.0 (2026-11-24)
 
 The bridge: programs, such as an AI assistant, can now write with Murmo users through bots, over HTTPS. It is off

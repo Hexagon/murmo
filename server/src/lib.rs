@@ -23,7 +23,7 @@
 //! | `MURMO_FEDERATION_BLOCK` | empty | servers never to exchange messages with (comma-separated origins or host names; each also blocks its other ports and subdomains) |
 //! | `MURMO_DEMO` | `0` | mark this server as a demo whose data may be wiped at any time (`1`), as murmo.org |
 //! | `MURMO_BRIDGE` | `0` | the bridge (`1`): pages at `/bridge/` where owners make bots, and an HTTP API for programs to send and receive messages as those bots (DESIGN.md §16) |
-//! | `MURMO_BRIDGE_OWNERS` | empty | who may make bots: account ids or `Name#TAG`, comma-separated (empty: any identity that can log in here) |
+//! | `MURMO_BRIDGE_OWNERS` | empty | account ids that may log in and make bots, comma-separated (empty: any identity that can log in here). Checked at login: bots already made keep working |
 //! | `MURMO_BRIDGE_BOTS` | `5` | most bots per owner |
 //!
 //! Each variable is also read under its old name, `MESG_…`, when the `MURMO_…` name is not set. The default files

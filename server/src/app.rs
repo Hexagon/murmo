@@ -77,7 +77,7 @@ pub struct Config {
     pub federation_block: Vec<String>,
     /// Whether the bridge is on (`MURMO_BRIDGE`, DESIGN.md §16).
     pub bridge: bool,
-    /// Who may make bots (`MURMO_BRIDGE_OWNERS`): account ids or `Name#TAG`; empty for any identity accepted here.
+    /// Who may make bots (`MURMO_BRIDGE_OWNERS`): account ids only; empty for any identity accepted here.
     pub bridge_owners: Vec<String>,
     /// Most bots per owner (`MURMO_BRIDGE_BOTS`).
     pub bridge_bots: usize,

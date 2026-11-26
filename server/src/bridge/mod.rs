@@ -97,7 +97,7 @@ pub struct Bridge {
     pub store: Store,
     /// Encrypts bot states (from the host key, so a backup of database and key has everything).
     key: Zeroizing<[u8; 32]>,
-    /// Who may log in: account ids or `Name#TAG` (empty: any identity this server accepts).
+    /// Who may log in: account ids (empty: any identity this server accepts).
     owners: Vec<String>,
     /// Most bots per owner.
     max_bots: usize,
@@ -551,6 +551,9 @@ async fn create_bot(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes
             .unwrap_or(false);
         let retention = retention_of(&m)?.unwrap_or(0);
         let owner_only = bool_of(&m, "owner_only")?.unwrap_or(false);
+        // One creation at a time per owner, from the count to the insert: calls at once cannot pass `max_bots`.
+        let lock = b.lock(&format!("create:{owner}"));
+        let _g = lock.lock().await;
         if b.store.by_owner(&owner).map_err(ApiError::internal)?.len() >= b.max_bots {
             return Err(ApiError::new(409, "too_many_bots"));
         }
@@ -630,7 +633,7 @@ async fn change_bot(
                 .map_err(ApiError::internal)?;
             // A shorter time applies to what is kept already.
             let row = owned(&app, &owner, &account)?;
-            with_bot(&app, &row, |_, _, _| Ok(())).await?;
+            with_bot(&app, &row, |_, _, _, _| Ok(())).await?;
         }
         let row = owned(&app, &owner, &account)?;
         Ok(json(
@@ -689,21 +692,28 @@ async fn delete_bot(
 
 // ── bots ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-/// Run `f` on the bot's state after reading its mailbox, and keep the state.
+/// Run `f` on the bot's state after reading its mailbox, and keep the state. The bot's row is read again under its
+/// lock, so a change by the owner (`owner_only`, `auto_accept`, retention, deletion) applies at once, also to a
+/// `GET /messages` that was already waiting.
 async fn with_bot<T>(
     app: &Arc<App>,
     row: &BotRow,
-    f: impl FnOnce(&Arc<App>, &Me<'_>, &mut BotState) -> Result<T, ApiError>,
+    f: impl FnOnce(&Arc<App>, &BotRow, &Me<'_>, &mut BotState) -> Result<T, ApiError>,
 ) -> Result<T, ApiError> {
     let b = bridge(app)?;
     let lock = b.lock(&row.account);
     let _g = lock.lock().await;
+    let row = &b
+        .store
+        .get(&row.account)
+        .map_err(ApiError::internal)?
+        .ok_or(ApiError::new(404, "unknown_bot"))?;
     let mut st = b.load(&row.account)?;
     let me = Me::of(row);
     bot::rotate_prekey(app, &me, &mut st)?;
     let done = bot::receive(app, &me, &mut st, row.auto_accept)?;
     st.prune(row.retention);
-    let out = f(app, &me, &mut st);
+    let out = f(app, row, &me, &mut st);
     // Kept also when `f` failed; only then is what was read deleted from the mailbox.
     b.save(&row.account, &st)?;
     app.db.ack(&row.device, &done).map_err(ApiError::internal)?;
@@ -756,7 +766,7 @@ async fn messages(
         };
         let until = now() + wait;
         loop {
-            let (events, last) = with_bot(&app, &row, |_, _, st| {
+            let (events, last) = with_bot(&app, &row, |_, row, _, st| {
                 let events: Vec<Value> = if row.retention == 0 {
                     st.take(MAX_EVENTS)
                 } else {
@@ -831,7 +841,7 @@ async fn send(
             .ok_or(ApiError::new(400, "bad_field"))?;
         let peer = recipient(&app, &row.account, to)?;
         crate::remote::refresh_if_remote(&app, &peer, 300).await;
-        let r = with_bot(&app, &row, |app, me, st| {
+        let r = with_bot(&app, &row, |app, _, me, st| {
             bot::send_text(app, me, st, &peer, t)
         })
         .await?;
@@ -867,7 +877,7 @@ async fn contacts(
 ) -> Response {
     let run = async {
         let row = bot_of(&app, &headers, addr)?;
-        let list = with_bot(&app, &row, |_, _, st| {
+        let list = with_bot(&app, &row, |_, _, _, st| {
             Ok(st
                 .contacts
                 .iter()
@@ -900,7 +910,7 @@ async fn contact_action(
     let run = async {
         let row = bot_of(&app, &headers, addr)?;
         crate::api::check_account(&account)?;
-        let state = with_bot(&app, &row, |app, me, st| {
+        let state = with_bot(&app, &row, |app, _, me, st| {
             match action.as_str() {
                 "accept" => bot::accept(app, me, st, &account)?,
                 "decline" => bot::set_state(st, &account, "declined", app)?,
