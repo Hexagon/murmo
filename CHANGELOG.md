@@ -9,6 +9,11 @@ its section and puts the section in the release notes.
 
 ## Unreleased
 
+## 0.3.1 (2026-11-26)
+
+A patch release for servers that run the bridge: fixes from a security review. Nothing changes in the protocol, the
+client or the database.
+
 **For operators**
 
 - **Bridge fixes from a security review.** Declining or blocking through the API now counts against a bot's 2 000
@@ -17,6 +22,9 @@ its section and puts the section in the release notes.
   waiting. Bots made at the same moment by one owner can no longer pass `MURMO_BRIDGE_BOTS`. The documents now say
   that `MURMO_BRIDGE_OWNERS` takes account ids only and is checked at login: bots already made keep working when
   their owner is taken off the list.
+
+**Operators: anything to do?** No. The image tag `…:0.3` gets this release; a server without `MURMO_BRIDGE=1` is not
+affected.
 
 ## 0.3.0 (2026-11-24)
 
